@@ -33,6 +33,20 @@ func TestValidateReviewRequestAcceptsDynamicPanelName(t *testing.T) {
 	}
 }
 
+func TestFixArgsUseTheV064Contract(t *testing.T) {
+	got, err := FixArgs(49, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"fix", "--agent", "codex", "--quiet", "49"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+	if _, err := FixArgs(49, "$(arbitrary)"); err == nil {
+		t.Fatal("arbitrary fix agent was accepted")
+	}
+}
+
 func TestValidateReviewRequestRejectsEmptyAndControlPanel(t *testing.T) {
 	for _, panel := range []string{"", " \t", "bad\nname"} {
 		if err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: panel}); err == nil {
@@ -47,6 +61,9 @@ func TestCapabilitiesGateDaemonContractsByVersion(t *testing.T) {
 	}
 	if !capabilities("v0.64.0").FrozenRerunAPI {
 		t.Fatal("v0.64 must expose frozen-target rerun")
+	}
+	if !capabilities("v0.64.9").FixCommand || capabilities("v0.65.0").FixCommand {
+		t.Fatal("fix command must be gated to v0.64.x")
 	}
 }
 

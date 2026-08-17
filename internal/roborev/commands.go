@@ -81,6 +81,16 @@ func CancelArgs(id int64) ([]string, error) {
 	return []string{"cancel", strconv.FormatInt(id, 10)}, nil
 }
 
+func FixArgs(id int64, agent string) ([]string, error) {
+	if err := validateJobID(id); err != nil {
+		return nil, err
+	}
+	if agent != "codex" {
+		return nil, errors.New("fix agent is not allowed")
+	}
+	return []string{"fix", "--agent", agent, "--quiet", strconv.FormatInt(id, 10)}, nil
+}
+
 func ValidateReviewRequest(request ReviewRequest) error {
 	if strings.TrimSpace(request.RepoPath) == "" || strings.TrimSpace(request.GitRef) == "" {
 		return errors.New("repository and git ref are required")

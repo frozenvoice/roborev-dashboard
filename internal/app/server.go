@@ -15,6 +15,7 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/refine"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
@@ -23,6 +24,7 @@ type Server struct {
 	RoboRev     roborev.Service
 	Registry    *Registry
 	Panels      roborev.PanelCatalogResolver
+	Refines     *refine.Manager
 	AllowedHost string
 	csrfToken   string
 	mux         *http.ServeMux
@@ -49,7 +51,12 @@ func NewServer(service roborev.Service, registry *Registry, allowedHost string) 
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: roborev.NewPanelResolver(registry), AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	panels := roborev.NewPanelResolver(registry)
+	refines, err := refine.NewManager(refine.Dependencies{Registry: registry, Panels: panels, RoboRev: service, Binary: serviceBinary(service)})
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -67,6 +74,15 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// Shutdown cancels process-scoped Panel Refine runs and waits for their
+// child review/fix orchestration to stop.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.Refines == nil {
+		return nil
+	}
+	return s.Refines.Shutdown(ctx)
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
 	s.mux.HandleFunc("GET /api/runtime", s.runtime)
@@ -77,7 +93,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reviews/{id}/fix-prompt", s.showFixPrompt)
 	s.mux.HandleFunc("GET /api/panels/{run}/members", s.panelMembers)
 	s.mux.HandleFunc("GET /api/repos/panels", s.repositoryPanels)
+	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
+	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
+	s.mux.HandleFunc("POST /api/panel-refines", s.mutation(s.startPanelRefine))
+	s.mux.HandleFunc("POST /api/panel-refines/{id}/cancel", s.mutation(s.cancelPanelRefine))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
 	s.mux.HandleFunc("POST /api/reviews/{id}/close", s.mutation(s.closeReview))
@@ -89,6 +109,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos/panel-selection", s.mutation(s.selectRepositoryPanel))
 	s.mux.HandleFunc("POST /api/daemon/start", s.mutation(s.startDaemon))
 	s.mux.Handle("/", spaHandler())
+}
+
+// serviceBinary exposes the configured executable for the command preview.
+// The concrete client intentionally keeps its transport details private.
+func serviceBinary(service roborev.Service) string {
+	if client, ok := service.(*roborev.Client); ok {
+		return client.Binary
+	}
+	return "roborev"
 }
 
 func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +375,14 @@ type panelSelectionBody struct {
 	RepoPath string `json:"repoPath"`
 	Panel    string `json:"panel"`
 }
+
+type panelRefineBody struct {
+	RepoPath       string `json:"repoPath"`
+	Panel          string `json:"panel"`
+	FixAgent       string `json:"fixAgent"`
+	MaxFixAttempts int    `json:"maxFixAttempts"`
+	FinalPanel     string `json:"finalPanel"`
+}
 type commentBody struct {
 	Comment string `json:"comment"`
 }
@@ -358,6 +395,16 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	path, ok := s.repoForRequest(w, body.RepoPath)
 	if !ok {
 		return
+	}
+	var releaseReviewLease func()
+	if s.Refines != nil {
+		var leaseErr error
+		releaseReviewLease, leaseErr = s.Refines.AcquireReviewLease(path)
+		if leaseErr != nil {
+			writeError(w, http.StatusConflict, leaseErr.Error(), "repository")
+			return
+		}
+		defer releaseReviewLease()
 	}
 	repo, err := s.Registry.Inspect(r.Context(), path)
 	if err != nil {
@@ -394,6 +441,93 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 		Receipt json.RawMessage `json:"receipt"`
 		Target  RepositoryDTO   `json:"target"`
 	}{Receipt: receipt, Target: target})
+}
+
+func (s *Server) startPanelRefine(w http.ResponseWriter, r *http.Request) {
+	if s.Refines == nil {
+		writeError(w, http.StatusNotImplemented, "Panel Refine is unavailable", "panel-refine")
+		return
+	}
+	var body panelRefineBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	run, err := s.Refines.Start(r.Context(), refine.StartRequest{RepoPath: body.RepoPath, Panel: body.Panel, FixAgent: body.FixAgent, MaxFixAttempts: body.MaxFixAttempts, FinalPanel: body.FinalPanel})
+	if err != nil {
+		status := http.StatusConflict
+		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "between") || strings.Contains(err.Error(), "only the codex") {
+			status = http.StatusBadRequest
+		} else if strings.Contains(err.Error(), "installation is unavailable") || strings.Contains(err.Error(), "daemon is unavailable") || strings.Contains(err.Error(), "daemon is not running") {
+			status = http.StatusServiceUnavailable
+		}
+		writeError(w, status, err.Error(), "panel-refine")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, run)
+}
+
+func (s *Server) listPanelRefines(w http.ResponseWriter, r *http.Request) {
+	if s.Refines == nil {
+		writeJSON(w, http.StatusOK, []*refine.PanelRefineRun{})
+		return
+	}
+	path := r.URL.Query().Get("repo")
+	if path == "" {
+		path = r.URL.Query().Get("repoPath")
+	}
+	if strings.TrimSpace(path) == "" {
+		writeError(w, http.StatusBadRequest, "registered repository is required", "repository")
+		return
+	}
+	resolved, err := s.Registry.Resolve(path)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Refines.ListResponse(resolved))
+}
+
+func (s *Server) getPanelRefine(w http.ResponseWriter, r *http.Request) {
+	if s.Refines == nil {
+		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
+		return
+	}
+	run, ok := s.Refines.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
+		return
+	}
+	if !s.Registry.Contains(run.RepositoryPath) {
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) cancelPanelRefine(w http.ResponseWriter, r *http.Request) {
+	if s.Refines == nil {
+		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
+		return
+	}
+	run, exists := s.Refines.Get(r.PathValue("id"))
+	if !exists {
+		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
+		return
+	}
+	if !s.Registry.Contains(run.RepositoryPath) {
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
+		return
+	}
+	if err := s.Refines.Cancel(r.PathValue("id")); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, err.Error(), "panel-refine")
+		} else {
+			writeError(w, http.StatusConflict, err.Error(), "panel-refine")
+		}
+		return
+	}
+	run, _ = s.Refines.Get(r.PathValue("id"))
+	writeJSON(w, http.StatusAccepted, run)
 }
 
 func resolvePanelState(identity string, catalog roborev.PanelCatalog, saved string, hasSaved bool) RepositoryPanels {
@@ -571,8 +705,23 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.authorizeJob(w, r, id) {
+	job, err := s.RoboRev.JobMetadata(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found", "job")
 		return
+	}
+	if !s.Registry.Contains(job.RepoPath) {
+		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
+		return
+	}
+	var releaseReviewLease func()
+	if s.Refines != nil {
+		releaseReviewLease, err = s.Refines.AcquireReviewLease(job.RepoPath)
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error(), "repository")
+			return
+		}
+		defer releaseReviewLease()
 	}
 	ctx, cancel := mutationContext()
 	defer cancel()

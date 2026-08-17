@@ -1,7 +1,8 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type Repository, type ReviewEnqueueResponse, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizePanelRefineResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
+import { PanelRefine } from './PanelRefine'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
@@ -29,6 +30,7 @@ function outputOf(job: ReviewJob | null) {
 }
 function idOf(job: ReviewJob) { return Number(job.id || job.job_id) }
 function isRunning(job: ReviewJob) { return ['queued', 'running'].includes(String(job.status).toLowerCase()) }
+function isPanelRefineActive(run: PanelRefineRun | null) { return Boolean(run && ['starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing'].includes(run.phase)) }
 function isClosed(job: ReviewJob) { return Boolean(job.addressed || job.closed) }
 function isFinding(job: ReviewJob) { return !isRunning(job) && ['f', 'fail', 'finding', 'failed_review'].includes(statusOf(job)) }
 function elapsed(job: ReviewJob) {
@@ -271,6 +273,12 @@ export function App() {
   const [panelError, setPanelError] = useState('')
   const [panelLoadEpoch, setPanelLoadEpoch] = useState(0)
   const [repoSwitching, setRepoSwitching] = useState(false)
+  const [panelRefineRun, setPanelRefineRun] = useState<PanelRefineRun | null>(null)
+  const [panelRefineLoading, setPanelRefineLoading] = useState(false)
+  const [panelRefineError, setPanelRefineError] = useState('')
+  const [panelRefineOptions, setPanelRefineOptions] = useState<PanelRefineOptions | null>(null)
+  const [panelRefineReloadEpoch, setPanelRefineReloadEpoch] = useState(0)
+  const panelRefineGeneration = useRef(0)
   const reviewGeneration = useRef(0)
   const reviewActionGeneration = useRef(0)
   const runtimeGeneration = useRef(0)
@@ -323,6 +331,34 @@ export function App() {
     }
   }, [])
 
+  const loadPanelRefine = useCallback(async (repoPath: string, identity: string) => {
+    const generation = ++panelRefineGeneration.current
+    setPanelRefineLoading(true)
+    try {
+      const raw = await request<unknown>(`/api/panel-refines?repo=${encodeURIComponent(repoPath)}`)
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray((raw as Record<string, unknown>).runs)) {
+        if (generation === panelRefineGeneration.current) setPanelRefineError('The Panel Refine response was malformed.')
+        return null
+      }
+      const envelope = raw as { runs: unknown[] }
+      const payload = normalizePanelRefineResponse(envelope)
+      if (envelope.runs.length > 0 && payload.runs.length === 0) throw new APIError('The Panel Refine response contained no valid runs.')
+      if (generation !== panelRefineGeneration.current) return null
+      const next = payload.run && payload.run.repositoryIdentity === identity ? payload.run : null
+      if (payload.run && !next) throw new APIError('The Panel Refine response belonged to a different repository.')
+      setPanelRefineRun(next)
+      setPanelRefineOptions(payload.options)
+      setPanelRefineError('')
+      return next
+    } catch (error) {
+      if (generation !== panelRefineGeneration.current) return null
+      setPanelRefineError((error as Error).message)
+      return null
+    } finally {
+      if (generation === panelRefineGeneration.current) setPanelRefineLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     loadBootstrap()
       .catch(error => toast('error', (error as Error).message))
@@ -340,7 +376,41 @@ export function App() {
     void loadPanels(repo.path, repo.identity)
     return () => { panelGeneration.current++ }
   }, [initialized, loadPanels, panelLoadEpoch, repo?.identity, repo?.path])
-  const canPollReviews = Boolean(bootstrap?.roborev.installed && bootstrap.roborev.capabilities.jobListApi && bootstrap.roborev.status?.running)
+  useEffect(() => {
+    panelRefineGeneration.current++
+    if (!initialized || !repo) {
+      setPanelRefineRun(null)
+      setPanelRefineOptions(null)
+      setPanelRefineLoading(false)
+      setPanelRefineError('')
+      return
+    }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let observedActive = isPanelRefineActive(panelRefineRun)
+    let observedPhase = panelRefineRun?.phase
+    let observedHead = panelRefineRun?.currentHead
+    const poll = async () => {
+      const next = await loadPanelRefine(repo.path, repo.identity)
+      if (cancelled) return
+      const changed = Boolean(next && (next.phase !== observedPhase || next.currentHead !== observedHead))
+      if (next && (changed || !isPanelRefineActive(next)) && (observedActive || next.phase === 'passed' || next.phase === 'needs_attention' || next.phase === 'failed' || next.phase === 'cancelled')) {
+        void request<Bootstrap>('/api/bootstrap').then(data => {
+          if (cancelled || data.selectedRepositoryIdentity !== repo.identity) return
+          setCSRF(data.csrfToken)
+          setBootstrap(current => current && current.selectedRepositoryIdentity === repo.identity ? data : current)
+        }).catch(() => undefined)
+      }
+      if (next) { observedPhase = next.phase; observedHead = next.currentHead; observedActive = isPanelRefineActive(next) }
+      if (!cancelled && (next ? isPanelRefineActive(next) : observedActive)) timer = setTimeout(poll, 4000)
+    }
+    void poll()
+    return () => { cancelled = true; panelRefineGeneration.current++; if (timer) clearTimeout(timer) }
+  // panelRefineRun is intentionally read only as the effect's pre-poll active snapshot.
+  // Reloads are driven by repo identity and explicit start/cancel mutations.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialized, panelRefineReloadEpoch, repo?.identity, repo?.path, loadPanelRefine])
+  const canPollReviews = Boolean(bootstrap?.roborev?.installed && bootstrap.roborev?.capabilities?.jobListApi && bootstrap.roborev?.status?.running)
   useEffect(() => {
     if (!initialized) return
     reviewGeneration.current++
@@ -407,7 +477,7 @@ export function App() {
   }, [loadBootstrap, loadReviews, toast])
 
   const runningCount = jobs.filter(isRunning).length
-  const daemonRunning = Boolean(bootstrap?.roborev.status?.running)
+  const daemonRunning = Boolean(bootstrap?.roborev?.status?.running)
   const selectedPanel = panelConfiguration?.selectedPanel ?? ''
   const selectedPanelInfo = panelConfiguration?.panels.find(panel => panel.name === selectedPanel)
   const panelSelectionValue = selectedPanelInfo?.valid ? selectedPanel : ''
@@ -458,6 +528,38 @@ export function App() {
       if (generation === reviewActionGeneration.current) setBusy(false)
     }
   }
+  const startPanelRefine = async (body: { repoPath: string; panel: string; fixAgent: 'codex'; maxFixAttempts: number; finalPanel?: string }) => {
+    const targetIdentity = repo?.identity
+    if (!repo || !targetIdentity) return
+    setBusy(true)
+    try {
+      await request('/api/panel-refines', { method: 'POST', body: JSON.stringify(body) })
+      toast('success', 'Panel Refine started.')
+      setPanelRefineReloadEpoch(epoch => epoch + 1)
+    } catch (error) {
+      toast('error', (error as Error).message)
+      throw error
+    } finally { setBusy(false) }
+  }
+  const cancelPanelRefine = async (id: number | string) => {
+    setBusy(true)
+    try {
+      await request(`/api/panel-refines/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+      toast('success', 'Panel Refine cancellation requested.')
+      setPanelRefineReloadEpoch(epoch => epoch + 1)
+    } catch (error) {
+      toast('error', (error as Error).message)
+      throw error
+    } finally { setBusy(false) }
+  }
+  const openPanelRefineReview = (id: number) => {
+    const existing = jobs.find(job => idOf(job) === id)
+    if (existing) { setSelected(existing); return }
+    const identity = selectedRepositoryIdentity
+    void request<ReviewJob>(`/api/reviews/${encodeURIComponent(id)}`).then(value => {
+      if (identity === selectedRepositoryIdentity) setSelected({ ...value, id, job_id: id })
+    }).catch(error => toast('error', (error as Error).message))
+  }
   const switchRepo = async (identity: string) => {
     const target = bootstrap?.repositories.find(item => item.identity === identity)
     if (!target) return
@@ -466,10 +568,15 @@ export function App() {
     reviewActionGeneration.current++
     reviewGeneration.current++
     panelGeneration.current++
+    panelRefineGeneration.current++
     setReviewPollError('')
     setLoadedReviewIdentity('')
     setPanelConfiguration(null)
     setPanelError('')
+    setPanelRefineRun(null)
+    setPanelRefineOptions(null)
+    setPanelRefineError('')
+    setPanelRefineLoading(true)
     setPanelLoading(true)
     setJobs([])
     setSelected(null)
@@ -501,18 +608,21 @@ export function App() {
     }
   }
 
-	const reviewSupported = Boolean(bootstrap?.roborev.capabilities.reviewEnqueueApi)
+  const reviewSupported = Boolean(bootstrap?.roborev?.capabilities?.reviewEnqueueApi)
+  const panelRefineActive = isPanelRefineActive(panelRefineRun)
+  const panelRefineAvailable = Boolean(bootstrap?.roborev?.installed && daemonRunning && bootstrap.roborev.capabilities.panelReview && bootstrap.roborev.capabilities.fixCommand)
+  const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? 'RoboRev is not installed.' : !daemonRunning ? 'The RoboRev daemon is not running.' : !bootstrap.roborev.capabilities.panelReview ? 'This RoboRev version does not support panel review.' : !bootstrap.roborev.capabilities.fixCommand ? 'This RoboRev version does not support the typed fix command.' : ''
   const reviewsReady = !canPollReviews || !selectedRepositoryIdentity || loadedReviewIdentity === selectedRepositoryIdentity
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
   return <div className="shell">
-    <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev.version || 'Setup required'}</span></div></div></aside>
-    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || repoSwitching || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
-      {!loading && bootstrap && (!bootstrap.roborev.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
+    <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev?.version || 'Setup required'}</span></div></div></aside>
+    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
+      {!loading && bootstrap && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
       {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Panel configuration unavailable</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>Retry panel discovery</button>}</section>}
       {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
-    {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || !canPollReviews} canRerun={Boolean(bootstrap?.roborev.capabilities.frozenRerunApi)} canLoadMembers={Boolean(bootstrap?.roborev.capabilities.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
+    {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
     <div className="toasts" aria-live="polite">{toasts.map(item => <div key={item.id} className={`toast ${item.kind}`}>{item.kind === 'success' ? <Check /> : <XCircle />}{item.message}</div>)}</div>
   </div>
 }

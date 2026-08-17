@@ -64,10 +64,17 @@ type fakeService struct {
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
 	f.installationCalls++
-	return roborev.Installation{Installed: true, Version: "v0.64.0", Status: json.RawMessage(`{"running":true,"known":true}`)}
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Capabilities: roborev.Capabilities{ReviewEnqueueAPI: true, FrozenRerunAPI: true, JobListAPI: true, PanelReview: true, FixCommand: true}, Status: json.RawMessage(`{"running":true,"known":true}`)}
 }
 func (f *fakeService) List(context.Context, string, int) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
+}
+func (f *fakeService) SynthesisStatus(_ context.Context, id int64) (roborev.SynthesisStatus, error) {
+	path := f.repoPath
+	if path == "" {
+		path = `E:\repo`
+	}
+	return roborev.SynthesisStatus{JobMetadata: roborev.JobMetadata{ID: id, RepoPath: path, GitRef: "abcdef123456", Branch: "main", PanelName: "dashboard_cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}}, nil
 }
 func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
 	path := f.repoPath
@@ -101,13 +108,22 @@ func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (
 	if f.reviewReceipt != nil {
 		return f.reviewReceipt, nil
 	}
-	return json.RawMessage(`{"id":42}`), nil
+	data, _ := json.Marshal(map[string]any{"id": 42, "repo_path": request.RepoPath, "git_ref": request.GitRef, "branch": request.Branch, "panel_name": request.Panel, "panel_run_uuid": "00000000-0000-0000-0000-000000000042", "panel_role": "synthesis", "job_type": "synthesis"})
+	return data, nil
 }
-func (f *fakeService) Rerun(context.Context, int64) error           { return nil }
-func (f *fakeService) Comment(context.Context, int64, string) error { return f.commentErr }
-func (f *fakeService) Close(context.Context, int64, bool) error     { f.closeCalls++; return nil }
-func (f *fakeService) Cancel(context.Context, int64) error          { f.cancelCalls++; return nil }
-func (f *fakeService) StartDaemon(context.Context) error            { return nil }
+func (f *fakeService) ReviewPanel(ctx context.Context, request roborev.ReviewRequest) (roborev.PanelEnqueueResponse, error) {
+	raw, err := f.Review(ctx, request)
+	if err != nil {
+		return roborev.PanelEnqueueResponse{}, err
+	}
+	return roborev.DecodePanelEnqueueResponse(raw, request)
+}
+func (f *fakeService) Fix(context.Context, roborev.FixRequest) error { return nil }
+func (f *fakeService) Rerun(context.Context, int64) error            { return nil }
+func (f *fakeService) Comment(context.Context, int64, string) error  { return f.commentErr }
+func (f *fakeService) Close(context.Context, int64, bool) error      { f.closeCalls++; return nil }
+func (f *fakeService) Cancel(context.Context, int64) error           { f.cancelCalls++; return nil }
+func (f *fakeService) StartDaemon(context.Context) error             { return nil }
 
 func setupServer(t *testing.T, service *fakeService) *Server {
 	t.Helper()
@@ -177,6 +193,51 @@ func TestRuntimeHealthDoesNotBootstrapRepositories(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"version":"v0.64.0"`) {
 		t.Fatalf("runtime response missing version: %s", recorder.Body.String())
+	}
+}
+
+func TestPanelRefineListReturnsAuthorizedEnvelopeAndOptions(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Crepo", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Runs    []any `json:"runs"`
+		Options struct {
+			Executable       string   `json:"executable"`
+			Args             []string `json:"args"`
+			AllowedFixAgents []string `json:"allowedFixAgents"`
+			DefaultFixAgent  string   `json:"defaultFixAgent"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Options.Executable != "roborev" || response.Options.DefaultFixAgent != "codex" || len(response.Options.Args) != 5 || len(response.Options.AllowedFixAgents) != 1 {
+		t.Fatalf("unexpected Panel Refine options: %#v", response.Options)
+	}
+}
+
+func TestPanelRefineListRejectsUnregisteredRepository(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Cforeign", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPanelRefineListRequiresRepositoryQuery(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

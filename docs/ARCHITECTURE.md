@@ -54,6 +54,20 @@ repository 전환 시 panel catalog도 별도 current-generation request로 읽�
 
 Dashboard의 `/api/runtime`은 repository inspection이나 review listing 없이 TTL 30초의 version detection과 v0.64.0의 작은 `/api/health`만 수행하며 UI가 10초마다 호출한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&limit=0&omit_prompt=true`로 읽고 adapter에서 heavy field를 제거하며, nonterminal member가 있는 동안 4초마다 갱신한다. upstream v0.64.0에서 `limit=0`은 unlimited로 문서화되어 있다.
 
+### Panel Refine
+
+Panel Refine은 React effect가 아니라 Dashboard backend process가 소유하는 typed state machine이다. API는 `POST /api/panel-refines`, `GET /api/panel-refines`, `GET /api/panel-refines/{id}`, `POST /api/panel-refines/{id}/cancel`로 구성되며, Browser는 시작·상태 조회·취소만 요청한다. browser reload나 tab close는 active run을 중단하지 않는다. 이 checkpoint의 run은 process-scoped이므로 Dashboard process가 종료되면 active run context와 child process가 취소되고, 재시작 뒤 자동 resume하지 않는다. active run은 `reviewing`, `evaluating`, `fixing`, `final_reviewing`, `passed`, `needs_attention`, `failed`, `cancelled` 같은 명시적 phase와 iteration/fix/review receipt를 보존한다.
+
+시작 시 registered repository의 canonical identity를 fresh inspection으로 재검증하고, clean working tree·branch·HEAD를 확보한다. iteration panel과 선택한 optional final panel은 현재 Panel Resolver에서 다시 resolve하며, fix agent는 typed allowlist로 제한한다. 기본 max fix attempts는 3이고 허용 범위는 1~10이다. 같은 repository identity에는 process-scoped lock을 두어 동시에 두 Panel Refine을 시작하지 않으며, active run 동안 해당 repository의 `Review HEAD`, `Rerun same target/config`, 다른 Panel Refine start도 backend에서 거부한다. read-only 조회는 계속 허용한다.
+
+각 iteration은 fresh `Inspect` 결과의 full SHA와 branch를 사용해 새 panel review를 enqueue한다. 기존 frozen target을 재실행하는 Rerun은 사용하지 않는다. enqueue receipt에는 synthesis job ID, panel run UUID, repository path, full `git_ref`, branch, panel, synthesis role과 panel job type이 모두 있어야 하며 요청한 identity와 일치하지 않으면 중단한다. panel synthesis parent가 terminal이 될 때까지 4초 bounded polling으로 `/api/jobs` 결과를 읽고 같은 metadata를 다시 대조한다. `queued`/`running`만 계속 기다리며, 알려진 terminal status의 `P`만 통과로, `F`만 fix 대상으로 해석한다. cancelled/error/unknown/malformed 상태와 P/F 없는 terminal은 PASS로 취급하지 않고 `failed` 또는 `needs_attention`으로 중단한다. iteration panel이 PASS하고 final panel이 명시되면 final panel도 같은 HEAD에서 별도로 검증한다. 두 panel이 같으면 중복 review를 하지 않는다. final panel의 F도 같은 fix budget을 사용하며, fix 뒤에는 항상 iteration panel부터 새 HEAD를 검증한다.
+
+이번 checkpoint에서는 Codex만 허용하는 fix adapter가 v0.64.0의 확인된 typed command인 `roborev fix --agent codex --quiet <synthesis-id>`를 configured executable과 argument array로 실행한다. synthesis/parent job ID만 전달하고 finding text, prompt, diff 또는 arbitrary executable을 argv에 넣지 않는다. fix 성공 뒤에도 fresh inspection으로 repository identity와 branch가 동일하고 working tree가 clean하며 HEAD가 실제로 전진했는지 확인한다. HEAD 불변, dirty tree, branch 변경, identity drift, authorization 상실 또는 fix/review 오류는 자동으로 다음 iteration으로 넘기지 않고 `needs_attention`/`failed`로 중단한다.
+
+Review 완료 직후의 재검증과 repository identity lock은 사용자가 외부에서 commit, edit, checkout 또는 path retarget을 한 stale finding의 자동 적용을 막는다. 각 enqueue, polling, fix에는 짧은 bounded timeout을 두며 전체 run에도 명시적인 safety ceiling을 둔다. 취소 중 review는 RoboRev cancel을 best-effort로 호출하고, 취소 중 fix는 context cancellation으로 child process를 중단한다. 취소 후 fresh inspection 결과는 `cancelState`의 availability, HEAD, branch, dirty 및 inspection error로 run에 기록하며 clean을 추측하지 않는다.
+
+v0.64.0의 `fix`는 fix agent가 새 commit을 만든 뒤 panel 없는 default review를 자동 enqueue할 수 있다. Dashboard는 선택한 panel의 새 HEAD review를 별도로 enqueue하므로, 이 upstream 동작으로 unrelated extra review가 생길 수 있다. Dashboard는 응답이나 이름만으로 이를 추측해 억제하지 않으며, 해당 중복 제거는 upstream capability가 제공될 때 별도 version-gated 계약으로 다룬다.
+
 ## 확장 원칙
 
 각 RoboRev 기능은 service method, typed request, command builder, capability, HTTP route, confirmation 정책과 테스트를 함께 추가한다. CLI help에서 확인되지 않은 flag를 추측해 만들지 않는다. 중요한 변경은 이 문서와 coverage matrix를 함께 갱신한다.

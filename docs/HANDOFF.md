@@ -16,6 +16,9 @@
 - `666086c` clean archive에서 `go build ./...`가 통과해 embed placeholder를 검증했다.
 - `666086c`의 새 panel job 25를 완료했다. active-job prompt stripping, verified `id=` lookup, suspended Job Object attach, selected polling reconciliation, version TTL, poll gating, panel handler coverage와 deterministic registry fallback을 후속 작업 트리에 반영했다.
 - 후속 React/Vitest 9 tests, Vite production build와 roborev/app/process backend suites가 통과했다. Windows Application Control의 일시 차단 해제 후 최신 9.9MB EXE를 다시 실행했고 root/runtime/reviews smoke와 browser job 29 목록을 확인했다. 실제 list response는 7.3KB이며 `prompt`, `diff_content`, `output`, `review`가 없다.
+- Panel Refine checkpoint는 `POST/GET /api/panel-refines`와 `POST /api/panel-refines/{id}/cancel`을 사용하는 backend process-scoped authoritative state machine으로 fresh pinned panel review → synthesis 평가 → Codex fix → 새 clean HEAD 재검토를 반복한다. 시작 dialog는 실제 request body와 typed fix argv template preview를 표시한다. `dashboard_cross`를 fast iteration panel로 사용하고, 사용자가 명시한 경우에만 distinct `dashboard_deep` final gate를 실행한다. browser reload/reopen은 active run에 재접속할 수 있지만 Dashboard process restart resume은 지원하지 않으며 shutdown/cancel은 child process와 context를 정리한다. cancel 후 fresh inspection 결과는 `cancelState`로 보존한다.
+- Panel Refine은 repository identity lock으로 같은 repository의 동시 refine과 Review HEAD/Rerun 경쟁 mutation을 거부한다. 시작·iteration·fix 후 fresh inspection으로 clean tree, branch, canonical identity, HEAD 전진을 확인하고 stale/dirty/unknown 상태는 자동 fix하지 않는다. v0.64.0 `fix --agent codex --quiet <synthesis-id>`가 새 commit에 panel 없는 default review를 자동 enqueue할 수 있어 Dashboard의 선택 panel review와 unrelated extra review가 생길 수 있으며, 이를 이름이나 응답 추측으로 억제하지 않는다.
+- enqueue receipt와 `/api/jobs` polling은 synthesis job ID, panel run UUID, repo path, full git ref, branch, panel, synthesis role와 panel job type을 모두 일치시킨다. running 상태만 bounded 4초 polling하고 malformed/unknown/P-F 없는 결과는 fail closed한다.
 
 ## 결정
 
@@ -24,12 +27,14 @@
 - repository registry는 canonical Git root만 허용하고 runtime fresh inspection과 startup persisted-path inspection 결과가 expected identity와 일치하는지 같은 platform-aware 규칙으로 재검증한다. Frontend는 backend 제공 opaque identity만 비교한다.
 - panel discovery는 v0.64.0에 enumeration API가 없어 typed TOML fallback으로 global/local map merge를 재현한다. registered root direct `.roborev.toml`만 지원하며, config는 플랫폼별 no-follow handle로 bounded read한다. direct config 없는 `.git` regular-file layout은 metadata를 확인하고, metadata 실패 시 global named panel discovery/mutation을 fail closed하며 actual linked worktree는 main-config 상속을 추측하지 않고 built-in `none`만 허용한다.
 - panel preference는 Dashboard config에 repository identity별로 저장하되 current catalog를 매번 다시 authorization한다. malformed config는 fail closed한다.
+- Panel Refine은 기존 Fix Prompt를 대체하지 않는 별도 자동 workflow다. backend state machine만 run을 진행하고, v0.64.0 fix adapter는 확인된 `roborev fix --agent codex --quiet <synthesis-id>` argv 계약을 사용한다. 전체 run과 각 enqueue/poll/fix에는 bounded timeout이 있다.
 - Fix Prompt는 terminal F single/synthesis/individual member의 bounded `show --json` subset으로 로컬에서 결정적으로 생성하며 LLM이나 mutation을 호출하지 않는다.
 - review list는 각 요청 완료 4초 뒤, 작은 `/api/runtime` health 상태는 각 요청 완료 10초 뒤 다음 poll을 예약한다. `/api/runtime`은 repository inspect/list를 수행하지 않는다. `status --json`과 `list --json`은 full prompt/diff를 포함할 수 있어 polling에 사용하지 않는다.
 - `roborev init`은 post-commit hook과 daemon start를 함께 수행하므로 자동 호출하지 않는다. `.roborev.toml`을 직접 관리하고 manual panel review를 사용한다.
 
 ## 다음 작업
 
-1. 이번 feature checkpoint commit을 사용자가 직접 새 HEAD `dashboard_cross` review 대상으로 실행
-2. Checkpoint C: installer/update/daemon lifecycle/check-agents/hooks/config
-3. Checkpoint D 이후: fix/refine/analyze/run 등 agentic workflow와 stream relay
+1. Panel Refine checkpoint의 backend/frontend 회귀 테스트와 전체 test/build를 완료하고 새 HEAD에 `dashboard_cross` review 실행
+2. Panel Refine 통과 뒤 필요하면 사용자가 별도로 `dashboard_deep` final review 실행
+3. Checkpoint C: installer/update/daemon lifecycle/check-agents/hooks/config
+4. Checkpoint D 이후: analyze/run 등 agentic workflow와 stream relay; RoboRev upstream이 panel-aware fix suppression capability를 제공할 때만 v0.64 extra default review 재검토

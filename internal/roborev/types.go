@@ -16,6 +16,7 @@ type Capabilities struct {
 	FrozenRerunAPI   bool `json:"frozenRerunApi"`
 	JobListAPI       bool `json:"jobListApi"`
 	PanelReview      bool `json:"panelReview"`
+	FixCommand       bool `json:"fixCommand"`
 	PanelMembersAPI  bool `json:"panelMembersApi"`
 	PromptLazyLoad   bool `json:"promptLazyLoad"`
 	RawLog           bool `json:"rawLog"`
@@ -24,7 +25,34 @@ type Capabilities struct {
 type JobMetadata struct {
 	ID           int64  `json:"id"`
 	RepoPath     string `json:"repo_path"`
-	PanelRunUUID string `json:"panel_run_uuid,omitempty"`
+	GitRef       string `json:"git_ref"`
+	Branch       string `json:"branch"`
+	PanelName    string `json:"panel_name"`
+	PanelRunUUID string `json:"panel_run_uuid"`
+	PanelRole    string `json:"panel_role"`
+	JobType      string `json:"job_type"`
+	Status       string `json:"status"`
+	Verdict      string `json:"verdict"`
+	Skipped      bool   `json:"skipped"`
+}
+
+// PanelEnqueueResponse is the exact v0.64 panel synthesis receipt returned by
+// /api/enqueue. Unknown fields are tolerated for forward compatibility, but
+// every identity field below is required and validated by the adapter.
+type PanelEnqueueResponse struct {
+	ID           int64  `json:"id"`
+	RepoPath     string `json:"repo_path"`
+	GitRef       string `json:"git_ref"`
+	Branch       string `json:"branch"`
+	PanelName    string `json:"panel_name"`
+	PanelRunUUID string `json:"panel_run_uuid"`
+	PanelRole    string `json:"panel_role"`
+	JobType      string `json:"job_type"`
+	Skipped      bool   `json:"skipped"`
+}
+
+type SynthesisStatus struct {
+	JobMetadata
 }
 
 type ReviewRequest struct {
@@ -32,6 +60,15 @@ type ReviewRequest struct {
 	GitRef   string `json:"gitRef"`
 	Branch   string `json:"branch,omitempty"`
 	Panel    string `json:"panel,omitempty"`
+}
+
+// FixRequest identifies the panel synthesis job to fix. RepoPath is used
+// only as the process working directory; findings and prompts are never
+// passed to the command line.
+type FixRequest struct {
+	RepoPath string
+	JobID    int64
+	Agent    string
 }
 
 type CommentRequest struct {

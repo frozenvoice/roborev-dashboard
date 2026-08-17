@@ -16,6 +16,10 @@
 | `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
 | `log --raw` | raw log | CLI bytes | B | 예정 | bounded response, lazy-load |
 | `review` + `/api/enqueue` | repository panel-aware Review HEAD | version-gated daemon API | B | 예 | current effective panel을 재검증하고 full SHA를 pin; CLI에 JSON receipt가 없어 API 사용 |
+| `POST /api/panel-refines` | backend-authoritative panel review/fix loop 시작 | Dashboard process state machine + `/api/enqueue` | B | 예 | fresh pinned HEAD, clean-tree/identity/branch 검증, repository identity lock; browser lifecycle과 독립 |
+| `GET /api/panel-refines`, `GET /api/panel-refines/{id}` | Panel Refine 상태/timeline 재접속 | Dashboard process state machine | B | 예 | serialized active-run polling; process restart resume 없음 |
+| `POST /api/panel-refines/{id}/cancel` | Panel Refine 취소 | Dashboard state machine + best-effort daemon cancel/context cancellation | B | 예 | cancel 후 fresh inspection의 availability/HEAD/branch/dirty/error를 `cancelState`로 표시 |
+| `fix --agent codex --quiet <synthesis-id>` | Panel Refine synthesis fix | typed CLI, v0.64.0 | B | 예 | Codex allowlist checkpoint; shell/finding text argv 없음; 새 commit/clean tree/HEAD 전진 재검증 |
 | global/local `[review.panels]` | repository panel discovery/selector | bounded typed read-only TOML fallback | B | 예 | platform no-follow handle + regular file/1 MiB limit; map union + local whole-entry override, malformed fail closed |
 | Dashboard `panelSelections` | repository별 panel preference | Dashboard local JSON config | B | 예 | platform-aware repository identity key; preference는 authorization이 아님 |
 | `/api/jobs?panel_run=...&omit_prompt=true` | panel member 상태 | version-gated daemon API | B | 예 | panel tab에서만 lazy-load |
@@ -61,6 +65,10 @@
 - 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
 - `list --json`은 prompt와 diff를 포함한다. v0.64 daemon도 `omit_prompt=true`에서 queued/running prompt를 유지하므로 Dashboard adapter가 status와 무관하게 heavy fields를 제거한다.
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
+- Panel Refine은 Rerun same target/config가 아니라 매 iteration fresh HEAD의 새 panel review를 enqueue한다. iteration panel PASS 뒤 명시된 final panel을 검증하며, final panel F도 같은 fix budget으로 수정한 뒤 iteration panel부터 다시 시작한다.
+- Panel Refine receipt와 `/api/jobs` polling은 job ID, panel run UUID, repo path, full git ref, branch, panel, synthesis role 및 panel job type을 일치시켜야 한다. 알려진 running 상태만 계속 polling하고, unknown/malformed status 또는 P/F 없는 terminal은 fail closed한다.
+- Panel Refine run은 Dashboard process-scoped다. browser reload/reopen은 active run에 재접속할 수 있지만 process restart 뒤 자동 resume하지 않는다. shutdown은 active run context와 child process를 취소한다.
+- v0.64.0 `fix --agent codex --quiet <synthesis-id>`는 새 commit에 panel 없는 default review를 자동 enqueue할 수 있다. Dashboard의 선택 panel enqueue와 별도로 unrelated extra review가 생길 수 있으며, Dashboard는 이를 추측으로 억제하지 않는다.
 - v0.64.0은 panel enumeration JSON/API를 제공하지 않는다. Dashboard는 typed TOML로 global/local panel map을 병합하지만 linked worktree의 untracked main-checkout `.roborev.toml` 상속은 지원하지 않는다. local config가 없고 `.git`이 regular file인 ambiguous layout에서만 `--git-dir`과 `--git-common-dir` metadata를 요구하며, metadata resolution 실패는 global named panel을 숨기고 discovery/mutation을 fail closed한다. metadata가 성공해 actual linked worktree가 아니면 global catalog를 유지하고, `.git` directory/absent도 metadata 없이 global catalog를 유지한다.
 - Fix Prompt는 요청한 job의 `show --job --json` top-level finding과 job metadata만 사용하고 original prompt, diff, log, 다른 member aggregate 및 config를 포함하지 않는다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.

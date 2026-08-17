@@ -18,23 +18,54 @@ import (
 	"sync"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	proc "github.com/froze/roborev-dashboard/internal/process"
 )
 
 type Service interface {
 	Installation(context.Context) Installation
 	List(context.Context, string, int) (json.RawMessage, error)
+	SynthesisStatus(context.Context, int64) (SynthesisStatus, error)
 	JobMetadata(context.Context, int64) (JobMetadata, error)
 	Show(context.Context, int64) (json.RawMessage, error)
 	PanelMembers(context.Context, string) (json.RawMessage, error)
 	Prompt(context.Context, int64) (string, error)
 	Log(context.Context, int64) (string, error)
 	Review(context.Context, ReviewRequest) (json.RawMessage, error)
+	ReviewPanel(context.Context, ReviewRequest) (PanelEnqueueResponse, error)
+	Fix(context.Context, FixRequest) error
 	Rerun(context.Context, int64) error
 	Comment(context.Context, int64, string) error
 	Close(context.Context, int64, bool) error
 	Cancel(context.Context, int64) error
 	StartDaemon(context.Context) error
+}
+
+var ErrMalformedPanelEnqueueResponse = errors.New("malformed panel enqueue response")
+
+func (c *Client) ReviewPanel(ctx context.Context, request ReviewRequest) (PanelEnqueueResponse, error) {
+	raw, err := c.Review(ctx, request)
+	if err != nil {
+		return PanelEnqueueResponse{}, err
+	}
+	return DecodePanelEnqueueResponse(raw, request)
+}
+
+func DecodePanelEnqueueResponse(raw json.RawMessage, request ReviewRequest) (PanelEnqueueResponse, error) {
+	var receipt PanelEnqueueResponse
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		return PanelEnqueueResponse{}, fmt.Errorf("%w: invalid JSON", ErrMalformedPanelEnqueueResponse)
+	}
+	if receipt.Skipped {
+		return PanelEnqueueResponse{}, fmt.Errorf("%w: enqueue was skipped", ErrMalformedPanelEnqueueResponse)
+	}
+	if receipt.ID <= 0 || strings.TrimSpace(receipt.RepoPath) == "" || strings.TrimSpace(receipt.GitRef) == "" || strings.TrimSpace(receipt.Branch) == "" || strings.TrimSpace(receipt.PanelName) == "" || strings.TrimSpace(receipt.PanelRunUUID) == "" || receipt.PanelRole != "synthesis" || receipt.JobType != "synthesis" {
+		return PanelEnqueueResponse{}, fmt.Errorf("%w: missing synthesis identity", ErrMalformedPanelEnqueueResponse)
+	}
+	if !gitx.SameRepositoryPath(receipt.RepoPath, request.RepoPath) || receipt.GitRef != request.GitRef || receipt.Branch != request.Branch || receipt.PanelName != request.Panel {
+		return PanelEnqueueResponse{}, fmt.Errorf("%w: identity does not match request", ErrMalformedPanelEnqueueResponse)
+	}
+	return receipt, nil
 }
 
 type Client struct {
@@ -121,7 +152,8 @@ func capabilities(version string) Capabilities {
 		minor, _ = strconv.Atoi(parts[1])
 	}
 	v64 := len(parts) > 0 && parts[0] == "0" && minor >= 64
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, PanelReview: v64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
+	fixV64 := len(parts) > 1 && parts[0] == "0" && minor == 64
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, PanelReview: v64, FixCommand: fixV64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
@@ -277,6 +309,14 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 	return response.Jobs[0], nil
 }
 
+func (c *Client) SynthesisStatus(ctx context.Context, id int64) (SynthesisStatus, error) {
+	metadata, err := c.JobMetadata(ctx, id)
+	if err != nil {
+		return SynthesisStatus{}, err
+	}
+	return SynthesisStatus{JobMetadata: metadata}, nil
+}
+
 func (c *Client) Show(ctx context.Context, id int64) (json.RawMessage, error) {
 	args, err := ShowArgs(id)
 	if err != nil {
@@ -429,6 +469,38 @@ func (c *Client) Review(ctx context.Context, request ReviewRequest) (json.RawMes
 		body["panel"] = request.Panel
 	}
 	return c.postJSON(ctx, "/api/enqueue", body)
+}
+
+// Fix executes RoboRev's v0.64 fix command. It is deliberately a typed
+// process invocation: the synthesis job id is the only review-derived
+// argument and the repository is supplied as the process working directory.
+func (c *Client) Fix(ctx context.Context, request FixRequest) error {
+	args, err := FixArgs(request.JobID, request.Agent)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(request.RepoPath) == "" {
+		return errors.New("repository path is required")
+	}
+	installation := c.Installation(ctx)
+	if !installation.Installed {
+		return errors.New("RoboRev is not installed or version detection failed")
+	}
+	if !installation.Capabilities.FixCommand {
+		return fmt.Errorf("RoboRev %s does not support the version-gated fix command", installation.Version)
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{
+		Executable:  c.Binary,
+		Args:        args,
+		Dir:         request.RepoPath,
+		Timeout:     45 * time.Minute,
+		OutputLimit: 8 << 20,
+	})
+	if runErr != nil {
+		_ = result
+		return errors.New("RoboRev fix command failed")
+	}
+	return nil
 }
 
 func (c *Client) Rerun(ctx context.Context, id int64) error {

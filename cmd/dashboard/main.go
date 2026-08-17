@@ -137,7 +137,10 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
-	shutdown, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	_ = httpServer.Shutdown(shutdown)
+	httpShutdown, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = httpServer.Shutdown(httpShutdown)
+	httpCancel()
+	refineShutdown, refineCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	_ = serverHandler.Shutdown(refineShutdown)
+	refineCancel()
 }

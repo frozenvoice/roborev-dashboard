@@ -6,10 +6,15 @@ import type { PanelInfo } from './api'
 
 const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', selectedRepositoryIdentity: 'repo-1', repositories: [{ identity: 'repo-1', name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
-  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, panelReview: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
+  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, panelReview: true, fixCommand: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
 }
 const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
+const refineOptions = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
+function refineRun(overrides: Record<string, unknown> = {}) {
+  return { id: 'refine-1', repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', branch: 'main', iterationPanel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, fixAttempts: 0, phase: 'reviewing', startingHead: 'abcdef123456', currentHead: 'abcdef123456', currentReviewJobId: 42, iterations: [], command: refineOptions, ...overrides }
+}
+function refineEnvelope(runs: unknown[] = [refineRun()], options = refineOptions) { return { runs, options } }
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
 function panelConfiguration(repositoryIdentity = 'repo-1', panels: PanelInfo[] = [defaultPanel], selectedPanel = defaultPanel.name, selectionRequired = false, error?: string) {
@@ -179,6 +184,7 @@ describe('App review workflow', () => {
       if (path.startsWith('/api/reviews?')) return response(jobs)
       if (path === '/api/reviews/42') return response(jobs[0])
       if (path.includes('/api/panels/')) return response({ error: 'daemon unavailable' }, 502)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
       return response({ success: true })
     }))
     render(<App />)
@@ -375,6 +381,7 @@ describe('App review workflow', () => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return failed.promise
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
       return response({ success: true })
     }))
     render(<App />)
@@ -923,6 +930,7 @@ describe('App review workflow', () => {
       if (path === '/api/reviews' && init?.method === 'POST') return response({ error: 'enqueue rejected' }, 409)
       if (path.startsWith('/api/reviews?')) { reviewCalls++; return response({ error: 'review refresh failed' }, 502) }
       if (path === '/api/runtime') { runtimeCalls++; return response({ error: 'runtime refresh failed' }, 502) }
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
       return response({ success: true })
     }))
     render(<App />)
@@ -935,6 +943,160 @@ describe('App review workflow', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
     expect(await screen.findByText('enqueue rejected')).toHaveClass('toast', 'error')
     expect(screen.getAllByRole('alert')).toHaveLength(1)
+  })
+
+  it('reconnects to an active refine after bootstrap and serializes only active polling', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const slow = deferred<Response>()
+    let refineCalls = 0
+    const active = refineRun()
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/panel-refines?')) { refineCalls++; return refineCalls === 1 ? response(refineEnvelope([active])) : refineCalls === 2 ? slow.promise : response(refineEnvelope([{ ...active, currentHead: 'bbbbbbbbbbbb' }])) }
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText('Reviewing')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: '#42' }))
+    expect(await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Rerun same target\/config/ })).not.toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(refineCalls).toBe(2)
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(refineCalls).toBe(2)
+    slow.resolve(new Response(JSON.stringify(refineEnvelope([active])), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(refineCalls).toBe(3), { timeout: 5_000, interval: 100 })
+  })
+
+  it('keeps the active card through a transient refine refresh failure and refreshes bootstrap at terminal state', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let refineCalls = 0
+    let bootstrapCalls = 0
+    const active = refineRun()
+    const passed = refineRun({ phase: 'passed', currentHead: 'fedcba654321', fixAttempts: 1, completedAt: '2026-08-18T00:00:00Z' })
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') { bootstrapCalls++; return response(bootstrapCalls === 1 ? bootstrap : { ...bootstrap, repositories: [{ ...bootstrap.repositories[0], head: 'fedcba654321', headShort: 'fedcba65' }] }) }
+      if (path.startsWith('/api/panel-refines?')) { refineCalls++; if (refineCalls === 1) return response(refineEnvelope([active])); if (refineCalls === 2) return Promise.reject(new Error('refine refresh failed')); return response(refineEnvelope([passed])) }
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText('Reviewing')).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(await screen.findByRole('alert')).toHaveTextContent('refine refresh failed')
+    expect(screen.getByText('Reviewing')).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(await screen.findByText('Panel Refine passed')).toBeInTheDocument()
+    await vi.waitFor(() => expect(bootstrapCalls).toBe(2))
+    expect(screen.getByText('fedcba654321')).toBeInTheDocument()
+  })
+
+  it('shows only the switched repository refine and suppresses stale old-repository success or error', async () => {
+    const otherRepository = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature/current', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, otherRepository] }
+    const switched = { ...initial, selectedRepository: otherRepository.path, selectedRepositoryIdentity: otherRepository.identity }
+    const old = deferred<Response>()
+    let bootstrapCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path.startsWith('/api/panel-refines?')) return path.includes(encodeURIComponent(otherRepository.path)) ? response(refineEnvelope([{ ...refineRun(), id: 'refine-2', repositoryIdentity: 'repo-2', repositoryPath: otherRepository.path, branch: otherRepository.branch, currentHead: otherRepository.head }])) : old.promise
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue('repo-1'))
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: otherRepository.identity } })
+    await waitFor(() => expect(screen.getByText('222222222222')).toBeInTheDocument())
+    old.reject(new Error('stale old repository failure'))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('stale old repository failure')).not.toBeInTheDocument()
+    expect(screen.getByText('222222222222')).toBeInTheDocument()
+  })
+
+  it('accepts a panel refine response when the opaque repository identity matches despite path spelling', async () => {
+    const caseVariantRun = refineRun({ repositoryPath: 'e:\REPO' })
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([caseVariantRun]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText('Reviewing')).toBeInTheDocument()
+  })
+
+  it('disables Panel Refine when the daemon or typed fix capability is unavailable', async () => {
+    const unsupported = { ...bootstrap, roborev: { ...bootstrap.roborev, status: { running: false }, capabilities: { ...bootstrap.roborev.capabilities, fixCommand: false } } }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(unsupported)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
+    expect(trigger).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('daemon is not running')
+  })
+
+  it('keeps frozen rerun unavailable until the initial Panel Refine request settles', async () => {
+    const pending = deferred<Response>()
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/panel-refines?')) return pending.promise
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Rerun same target\/config/ })).not.toBeInTheDocument()
+    pending.resolve(new Response(JSON.stringify(refineEnvelope([])), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByRole('button', { name: /Rerun same target\/config/ })).toBeInTheDocument()
+  })
+
+  it('keeps direct start and cancel failures as actionable toasts', async () => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path === '/api/panel-refines' && init?.method === 'POST') return response({ error: 'start rejected' }, 409)
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
+    await waitFor(() => expect(trigger).toBeEnabled())
+    await userEvent.click(trigger)
+    await userEvent.click(screen.getByRole('button', { name: 'Start Panel Refine' }))
+    expect(await screen.findByText('start rejected')).toHaveClass('toast', 'error')
+  })
+
+  it('keeps cancel failure as an actionable toast', async () => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([refineRun()]))
+      if (path.startsWith('/api/panel-refines/') && init?.method === 'POST') return response({ error: 'cancel rejected' }, 409)
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    await screen.findByText('Reviewing')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel Panel Refine' }))
+    expect(await screen.findByText('cancel rejected')).toHaveClass('toast', 'error')
   })
 })
 
