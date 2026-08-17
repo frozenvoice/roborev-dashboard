@@ -1,0 +1,17 @@
+.tmp/
+node_modules/
+web/node_modules/
+internal/webui/dist/*
+!internal/webui/dist/.keep
+dist/
+coverage/
+*.log
+*.exe
+!.github/**/*.exe
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

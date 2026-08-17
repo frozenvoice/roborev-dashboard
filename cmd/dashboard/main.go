@@ -1,0 +1,129 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/froze/roborev-dashboard/internal/app"
+	"github.com/froze/roborev-dashboard/internal/gitx"
+	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/roborev"
+)
+
+func listenLocal(host string, port int) (net.Listener, error) {
+	ip := net.ParseIP(host)
+	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return nil, errors.New("bind address must be loopback")
+	}
+	for candidate := port; candidate < port+20; candidate++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(candidate)))
+		if err == nil {
+			return listener, nil
+		}
+	}
+	return nil, fmt.Errorf("no available local port in range %d-%d", port, port+19)
+}
+
+func openBrowser(address string) {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", address)
+	case "darwin":
+		command = exec.Command("open", address)
+	default:
+		command = exec.Command("xdg-open", address)
+	}
+	_ = command.Start()
+}
+
+func defaultConfigFile(override string) string {
+	if override != "" {
+		return filepath.Join(override, "config.json")
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "roborev-dashboard", "config.json")
+}
+
+func main() {
+	bind := flag.String("bind", "127.0.0.1", "loopback bind address")
+	port := flag.Int("port", 7410, "starting local port")
+	noOpen := flag.Bool("no-open", false, "do not open the default browser")
+	repo := flag.String("repo", "", "Git repository to register and select")
+	binaryOverride := flag.String("roborev", "", "explicit roborev executable path")
+	daemonAddress := flag.String("roborev-server", "127.0.0.1:7373", "RoboRev daemon loopback address")
+	configDir := flag.String("config-dir", "", "override Dashboard config directory")
+	flag.Parse()
+
+	listener, err := listenLocal(*bind, *port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer listener.Close()
+
+	runner := proc.ExecRunner{}
+	gitService := gitx.New(runner)
+	registry := app.NewRegistry(gitService, defaultConfigFile(*configDir))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	registry.Load(ctx)
+	initialRepo := *repo
+	if initialRepo == "" {
+		initialRepo, _ = os.Getwd()
+	}
+	if initialRepo != "" {
+		if _, err := registry.Add(ctx, initialRepo); err != nil {
+			log.Printf("Repository not registered: %v", err)
+		}
+	}
+	cancel()
+
+	binary, binaryErr := roborev.ResolveBinary(*binaryOverride)
+	if binaryErr != nil {
+		log.Printf("RoboRev setup required: %v", binaryErr)
+	}
+	client, err := roborev.NewClient(binary, runner, *daemonAddress)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	host := listener.Addr().String()
+	serverHandler, err := app.NewServer(client, registry, host)
+	if err != nil {
+		log.Fatal(err)
+	}
+	httpServer := &http.Server{Handler: serverHandler.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	url := "http://" + host
+	fmt.Printf("RoboRev Dashboard: %s\n", url)
+	if !*noOpen {
+		go openBrowser(url)
+	}
+
+	go func() {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("HTTP server: %v", err)
+		}
+	}()
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	shutdown, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	_ = httpServer.Shutdown(shutdown)
+}
