@@ -9,7 +9,7 @@
 - `AGENTS.md`, review 지침, architecture와 capability matrix를 작성했다.
 - Windows에 Go 1.26.5를 설치했다. 현재 shell PATH 갱신 전에는 `C:\Program Files\Go\bin\go.exe`를 사용할 수 있다.
 - Checkpoint A/B vertical slice와 후속 hardening을 `fb88aa9`, `cff6d45`, `d3ed6b2`, `666086c`, `ea1174b`로 commit했다.
-- RoboRev panel jobs 13, 17, 21, 25, 29, 33, 37을 완료하고 finding을 재현·분류했다. 실제 수정과 false-positive 근거는 `docs/REVIEW-FINDINGS.md`에 있다.
+- RoboRev panel jobs 13, 17, 21, 25, 29, 33, 37, 41을 완료하고 finding을 재현·분류했다. 실제 수정과 false-positive 근거는 `docs/REVIEW-FINDINGS.md`에 있다.
 - 현재 작업 트리는 job authorization, Windows Job Object cleanup, clean-checkout embed placeholder, registry persistence, lightweight runtime polling, panel-member refresh/race/error, real payload fixture와 capability gating을 반영한다.
 - Go 전체 테스트와 React/Vitest 8 tests, Vite production build, embedded EXE HTTP/browser smoke가 통과했다. 실제 job 21 detail에서 commit title/Finding/20s와 Codex·Claude·Grok member 상태를 확인했다.
 - `666086c` clean archive에서 `go build ./...`가 통과해 embed placeholder를 검증했다.
@@ -26,6 +26,6 @@
 
 ## 다음 작업
 
-1. job 37 후속 async generation hardening을 commit하고 새 HEAD `dashboard_cross` review 결과를 평가
+1. job 41 후속 lazy-loading hardening을 commit하고 새 HEAD `dashboard_cross` review를 enqueue
 2. Checkpoint C: installer/update/daemon lifecycle/check-agents/hooks/config
 3. Checkpoint D 이후: fix/refine/analyze/run 등 agentic workflow와 stream relay

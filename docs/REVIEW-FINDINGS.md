@@ -11,6 +11,7 @@
 | 29 | `ea1174b` | Finding | defensive heavy-key expansion, offline stale state clear/online immediate refresh, detail identity-only key로 tab/comment draft 보존, coalesced version refresh를 수정; upstream 수신 비용은 v0.64 limitation으로 기록 |
 | 33 | `4ecc039` | Finding | terminal detail/log refresh, in-flight list invalidation, transient offline draft 보존과 mutation disable, cold-load queue gating, failed version detection coalescing을 수정 |
 | 37 | `12a1cd9` | Finding | detail/log generation guard와 empty-log requested state, cancellation-isolated version failure cache, malformed version failure cache를 수정 |
+| 41 | `497abbf` | Finding | replacement request loading ownership, lazy error/retry UI, bounded terminal refresh retry, review 전환 시 전체 lazy generation invalidation을 수정 |
 
 ## 적용한 핵심 finding
 

@@ -83,6 +83,8 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
   const [lazyLoaded, setLazyLoaded] = useState<Record<string, boolean>>({})
+  const [lazyError, setLazyError] = useState<Record<string, string>>({})
+  const [detailError, setDetailError] = useState('')
   const [memberJobs, setMemberJobs] = useState<ReviewJob[]>([])
   const [memberError, setMemberError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -94,20 +96,22 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
 
   useEffect(() => {
     const generation = ++detailGeneration.current
-    setDetail(null); setLazy({}); setLazyLoaded({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true)
-    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(() => { if (generation === detailGeneration.current) setDetail(null) }).finally(() => { if (generation === detailGeneration.current) setLoading(false) })
-    return () => { detailGeneration.current++ }
+    lazyGeneration.current = { prompt: (lazyGeneration.current.prompt ?? 0) + 1, log: (lazyGeneration.current.log ?? 0) + 1 }
+    setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true)
+    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setLoading(false) })
+    return () => { detailGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
   }, [id])
   useEffect(() => {
     const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
     previousStatus.current = job.status
     if (!wasRunning || isRunning(job)) return
     const detailRequest = ++detailGeneration.current
-    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (detailRequest === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(() => undefined)
+    const refreshDetail = (attempt: number) => request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (detailRequest === detailGeneration.current) { setDetail({ ...value, id, job_id: id }); setDetailError('') } }).catch(error => { if (detailRequest !== detailGeneration.current) return; if (attempt < 1) setTimeout(() => refreshDetail(attempt + 1), 1200); else setDetailError((error as Error).message) }).finally(() => { if (detailRequest === detailGeneration.current) setLoading(false) })
+    refreshDetail(0)
     if (lazyLoaded.log) {
       const logRequest = (lazyGeneration.current.log ?? 0) + 1
       lazyGeneration.current.log = logRequest
-      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) setLazy(old => ({ ...old, log: value.text })) }).catch(() => undefined)
+      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) { setLazy(old => ({ ...old, log: value.text })); setLazyError(old => ({ ...old, log: '' })) } }).catch(error => { if (logRequest === lazyGeneration.current.log) setLazyError(old => ({ ...old, log: (error as Error).message })) }).finally(() => { if (logRequest === lazyGeneration.current.log) setLoading(false) })
     }
   }, [id, job.status, lazyLoaded.log])
   useEffect(() => {
@@ -115,8 +119,9 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
     const generation = (lazyGeneration.current[tab] ?? 0) + 1
     lazyGeneration.current[tab] = generation
     setLazyLoaded(old => ({ ...old, [tab]: true }))
+    setLazyError(old => ({ ...old, [tab]: '' }))
     setLoading(true)
-    request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => { if (generation === lazyGeneration.current[tab]) setLazy(old => ({ ...old, [tab]: value.text })) }).finally(() => { if (generation === lazyGeneration.current[tab]) setLoading(false) })
+    request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => { if (generation === lazyGeneration.current[tab]) setLazy(old => ({ ...old, [tab]: value.text })) }).catch(error => { if (generation === lazyGeneration.current[tab]) setLazyError(old => ({ ...old, [tab]: (error as Error).message })) }).finally(() => { if (generation === lazyGeneration.current[tab]) setLoading(false) })
   }, [id, lazyLoaded, tab])
   useEffect(() => {
     if (tab !== 'members' || !job.panel_run_uuid) return
@@ -156,9 +161,10 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
     </nav>
     <div className="detail-content">
       {loading && <div className="skeleton tall" />}
+      {!loading && detailError && <p role="alert" className="hint">Review detail could not be refreshed: {detailError}</p>}
       {!loading && tab === 'review' && <><div className="text-toolbar"><CopyButton value={text} /><span>{text.length.toLocaleString()} chars</span></div>{text ? <Markdown>{text}</Markdown> : <Empty title="No review output yet" body="Running reviews update automatically." />}</>}
       {!loading && tab === 'members' && <div className="member-list">{memberError && <p role="alert" className="hint">Panel members could not be refreshed: {memberError}</p>}{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || `Member #${idOf(member)}`}</strong><span>{member.model || 'default model'}</span><span>{elapsed(member)}</span></article>) : !memberError && <Empty title="No member jobs" body="This is a single-agent review or member metadata is unavailable." />}</div>}
-      {!loading && (tab === 'log' || tab === 'prompt') && <><div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || `No ${tab} is available.`}</pre></>}
+      {!loading && (tab === 'log' || tab === 'prompt') && <>{lazyError[tab] && <p role="alert" className="hint">{tab} could not be loaded: {lazyError[tab]} <button className="button ghost compact" onClick={() => setLazyLoaded(old => ({ ...old, [tab]: false }))}>Retry</button></p>}<div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || `No ${tab} is available.`}</pre></>}
       {tab === 'comments' && <CommentBox jobId={id} mutate={mutate} busy={busy} />}
       {tab === 'metadata' && <><div className="text-toolbar"><CopyButton value={JSON.stringify(current, null, 2)} /></div><pre className="long-text">{JSON.stringify(current, null, 2)}</pre></>}
     </div>
