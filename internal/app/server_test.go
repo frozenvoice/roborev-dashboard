@@ -19,6 +19,16 @@ func (fakeInspector) Inspect(_ context.Context, path string) (gitx.Repository, e
 	return gitx.Repository{Name: "repo", Path: path, Branch: "main", Head: "abcdef123456", HeadShort: "abcdef12"}, nil
 }
 
+type mutableInspector struct {
+	repository gitx.Repository
+}
+
+func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	repo := m.repository
+	repo.Path = path
+	return repo, nil
+}
+
 type fakeService struct {
 	commentErr        error
 	closeCalls        int
@@ -26,6 +36,8 @@ type fakeService struct {
 	cancelCalls       int
 	installationCalls int
 	panelRaw          json.RawMessage
+	reviewRequest     roborev.ReviewRequest
+	reviewReceipt     json.RawMessage
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -53,7 +65,11 @@ func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, er
 }
 func (f *fakeService) Prompt(context.Context, int64) (string, error) { return "prompt", nil }
 func (f *fakeService) Log(context.Context, int64) (string, error)    { return "log", nil }
-func (f *fakeService) Review(context.Context, roborev.ReviewRequest) (json.RawMessage, error) {
+func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
+	f.reviewRequest = request
+	if f.reviewReceipt != nil {
+		return f.reviewReceipt, nil
+	}
 	return json.RawMessage(`{"id":42}`), nil
 }
 func (f *fakeService) Rerun(context.Context, int64) error           { return nil }
@@ -61,9 +77,6 @@ func (f *fakeService) Comment(context.Context, int64, string) error { return f.c
 func (f *fakeService) Close(context.Context, int64, bool) error     { f.closeCalls++; return nil }
 func (f *fakeService) Cancel(context.Context, int64) error          { f.cancelCalls++; return nil }
 func (f *fakeService) StartDaemon(context.Context) error            { return nil }
-func (f *fakeService) ReviewCommand(request roborev.ReviewRequest) (roborev.CommandPreview, error) {
-	return roborev.ReviewPreview("roborev", request)
-}
 
 func setupServer(t *testing.T, service *fakeService) *Server {
 	t.Helper()
@@ -155,5 +168,54 @@ func TestPanelMembersEnforcesRepositoryBoundary(t *testing.T) {
 				t.Fatalf("expected %d, got %d: %s", test.want, recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestCreateReviewReturnsFreshPinnedTargetAndReceipt(t *testing.T) {
+	inspector := &mutableInspector{repository: gitx.Repository{Name: "repo", Branch: "main", Head: "old-bootstrap-sha", HeadShort: "oldboots"}}
+	registry := NewRegistry(inspector, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	inspector.repository = gitx.Repository{Name: "repo", Branch: "feature/fresh", Head: "fresh-pinned-sha", HeadShort: "freshpin", Dirty: true}
+	service := &fakeService{reviewReceipt: json.RawMessage(`{"job_id":50,"status":"queued"}`)}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(`{"repoPath":"E:\\repo","panel":"dashboard_cross"}`))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.reviewRequest.GitRef != "fresh-pinned-sha" || service.reviewRequest.Branch != "feature/fresh" {
+		t.Fatalf("enqueue did not use fresh inspection: %#v", service.reviewRequest)
+	}
+	var response struct {
+		Receipt struct {
+			JobID int64 `json:"job_id"`
+		} `json:"receipt"`
+		Target gitx.Repository `json:"target"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Receipt.JobID != 50 || response.Target.Head != "fresh-pinned-sha" || response.Target.Branch != "feature/fresh" || !response.Target.Dirty {
+		t.Fatalf("unexpected review metadata: %#v", response)
+	}
+}
+
+func TestBootstrapDoesNotAdvertiseFictionalReviewCLICommand(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "reviewHeadCommand") {
+		t.Fatalf("bootstrap still contains command preview: %s", recorder.Body.String())
 	}
 }

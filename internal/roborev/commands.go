@@ -78,16 +78,12 @@ func CancelArgs(id int64) ([]string, error) {
 	return []string{"cancel", strconv.FormatInt(id, 10)}, nil
 }
 
-func ReviewPreview(binary string, request ReviewRequest) (CommandPreview, error) {
-	if request.RepoPath == "" || request.GitRef == "" {
-		return CommandPreview{}, errors.New("repository and git ref are required")
+func ValidateReviewRequest(request ReviewRequest) error {
+	if strings.TrimSpace(request.RepoPath) == "" || strings.TrimSpace(request.GitRef) == "" {
+		return errors.New("repository and git ref are required")
 	}
 	if err := validatePanel(request.Panel); err != nil {
-		return CommandPreview{}, err
+		return err
 	}
-	args := []string{"review", request.GitRef, "--repo", request.RepoPath}
-	if request.Panel != "" {
-		args = append(args, "--panel", request.Panel)
-	}
-	return CommandPreview{Executable: binary, Args: args}, nil
+	return nil
 }

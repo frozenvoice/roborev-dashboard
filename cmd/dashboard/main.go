@@ -61,6 +61,25 @@ func defaultConfigFile(override string) string {
 	return filepath.Join(dir, "roborev-dashboard", "config.json")
 }
 
+type startupRegistry interface {
+	Load(context.Context)
+	Add(context.Context, string) (gitx.Repository, error)
+}
+
+func initializeRegistry(registry startupRegistry, initialRepo string, timeout time.Duration) error {
+	loadCtx, loadCancel := context.WithTimeout(context.Background(), timeout)
+	registry.Load(loadCtx)
+	loadCancel()
+
+	if initialRepo == "" {
+		return nil
+	}
+	addCtx, addCancel := context.WithTimeout(context.Background(), timeout)
+	_, err := registry.Add(addCtx, initialRepo)
+	addCancel()
+	return err
+}
+
 func main() {
 	bind := flag.String("bind", "127.0.0.1", "loopback bind address")
 	port := flag.Int("port", 7410, "starting local port")
@@ -80,18 +99,13 @@ func main() {
 	runner := proc.ExecRunner{}
 	gitService := gitx.New(runner)
 	registry := app.NewRegistry(gitService, defaultConfigFile(*configDir))
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	registry.Load(ctx)
 	initialRepo := *repo
 	if initialRepo == "" {
 		initialRepo, _ = os.Getwd()
 	}
-	if initialRepo != "" {
-		if _, err := registry.Add(ctx, initialRepo); err != nil {
-			log.Printf("Repository not registered: %v", err)
-		}
+	if err := initializeRegistry(registry, initialRepo, 10*time.Second); err != nil {
+		log.Printf("Repository not registered: %v", err)
 	}
-	cancel()
 
 	binary, binaryErr := roborev.ResolveBinary(*binaryOverride)
 	if binaryErr != nil {

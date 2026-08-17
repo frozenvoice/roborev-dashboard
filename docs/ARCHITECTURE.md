@@ -24,7 +24,7 @@ Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 �
 
 ### transport
 
-stable JSON CLI를 우선한다. v0.64.0의 `review` 명령에는 JSON launch receipt가 없으므로 새 review는 감지된 daemon endpoint의 public `/api/enqueue` 계약을 version capability로 캡슐화한다. Dashboard가 먼저 Git으로 `HEAD`를 full SHA로 고정하여 전송하므로 클릭 시점의 target이 audit 가능하다.
+stable JSON CLI를 우선한다. v0.64.0의 `review` 명령에는 JSON launch receipt가 없으므로 새 review는 감지된 daemon endpoint의 public `/api/enqueue` 계약을 version capability로 캡슐화한다. Dashboard가 요청 시점에 Git으로 `HEAD`를 full SHA로 고정해 daemon에 전송하고, enqueue receipt와 동일한 fresh repository metadata를 browser에 반환하므로 실제 target이 audit 가능하다. UI는 실행되지 않는 CLI command preview를 만들지 않는다.
 
 `/api/job/rerun`은 v0.64.0 upstream에서 기존 frozen target과 resolved agent/panel config를 복제한다. 이 기능은 `Rerun same target/config`로만 노출하고 새 HEAD review와 request type, endpoint 및 UI 위치를 공유하지 않는다.
 
@@ -36,7 +36,7 @@ v0.64.0의 `repo list`에는 JSON이 없다. 초기 vertical slice는 Dashboard 
 
 ### repository registry
 
-server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인하고 `git -C <path> rev-parse --show-toplevel` 결과가 같은 root인지 검증한다. path를 받는 mutation뿐 아니라 global job ID와 panel UUID를 받는 read/mutation도 daemon의 metadata-only lookup으로 owning repository를 확인하고 registry 밖이면 거부한다. recent repository와 last selection만 `os.UserConfigDir()/roborev-dashboard/config.json`에 저장하며 credential은 저장하지 않는다.
+server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인하고 `git -C <path> rev-parse --show-toplevel` 결과가 같은 root인지 검증한다. canonical path identity는 Windows에서 case-insensitive, case-sensitive platform에서 exact spelling으로 중앙화한다. path를 받는 mutation뿐 아니라 global job ID와 panel UUID를 받는 read/mutation도 daemon의 metadata-only lookup으로 owning repository를 확인하고 registry 밖이면 거부한다. recent repository와 last selection만 `os.UserConfigDir()/roborev-dashboard/config.json`에 저장하며 credential은 저장하지 않는다. Add/Select는 prospective state 저장이 성공한 뒤에만 in-memory authorization/selection을 갱신한다.
 
 ### HTTP 보안
 
@@ -44,7 +44,7 @@ server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인�
 
 ### 데이터와 UI 상태
 
-review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 4초마다 polling한다. v0.64.0은 이 flag에서도 queued/running prompt를 유지하므로 adapter가 상태와 무관하게 알려진 heavy content key를 제거한 뒤 browser로 전달한다. upstream projection이 없어 daemon→Dashboard 구간에서는 active prompt를 수신·검사해야 하는 비용이 남으며, 이는 v0.64 capability limitation이다. `list --json`은 full prompt와 diff를 포함하므로 주기 경로에서 사용하지 않는다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 panel UUID로 lazy-load한다. mutation 성공 후 목록을 RoboRev source of truth에서 다시 fetch한다.
+review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 사용하며, 각 요청 완료 4초 후 다음 요청을 예약해 겹치는 poll을 만들지 않는다. repository 전환과 unmount는 generation을 무효화해 이전 응답과 오류가 새 상태를 덮지 못하게 한다. background refresh 오류는 반복 toast가 아니라 deduplicated inline 상태로 표시한다. v0.64.0은 이 flag에서도 queued/running prompt를 유지하므로 adapter가 상태와 무관하게 알려진 heavy content key를 제거한 뒤 browser로 전달한다. upstream projection이 없어 daemon→Dashboard 구간에서는 active prompt를 수신·검사해야 하는 비용이 남으며, 이는 v0.64 capability limitation이다. `list --json`은 full prompt와 diff를 포함하므로 주기 경로에서 사용하지 않는다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 panel UUID로 lazy-load한다. mutation 성공 후 목록을 RoboRev source of truth에서 다시 fetch한다.
 
 Dashboard의 `/api/runtime`은 repository inspection이나 review listing 없이 TTL 30초의 version detection과 v0.64.0의 작은 `/api/health`만 수행하며 UI가 10초마다 호출한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&limit=0&omit_prompt=true`로 읽고 adapter에서 heavy field를 제거하며, nonterminal member가 있는 동안 4초마다 갱신한다. upstream v0.64.0에서 `limit=0`은 unlimited로 문서화되어 있다.
 

@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'native-command.ps1')
 $goCommand = Get-Command go -ErrorAction SilentlyContinue
 if ($goCommand) {
     $goPath = $goCommand.Source
@@ -10,8 +11,8 @@ if ($goCommand) {
 
 Push-Location $root
 try {
-    npm --prefix web run build
-    & $goPath run ./cmd/dashboard @args
+    Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('--prefix', 'web', 'run', 'build')
+    Invoke-NativeCommand -FilePath $goPath -ArgumentList (@('run', './cmd/dashboard') + $args)
 } finally {
     Pop-Location
 }

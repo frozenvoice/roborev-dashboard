@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
@@ -142,19 +142,7 @@ func (s *Server) repoForRequest(w http.ResponseWriter, path string) (string, boo
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	repos := s.Registry.InspectAll(r.Context())
 	installation := s.RoboRev.Installation(r.Context())
-	var preview *roborev.CommandPreview
-	if selected, err := s.Registry.Resolve(""); err == nil {
-		for _, repo := range repos {
-			if strings.EqualFold(repo.Path, selected) {
-				p, e := s.RoboRev.ReviewCommand(roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: "dashboard_cross"})
-				if e == nil {
-					preview = &p
-				}
-				break
-			}
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": s.csrfToken, "repositories": repos, "selectedRepository": s.Registry.Selected(), "roborev": installation, "reviewHeadCommand": preview})
+	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": s.csrfToken, "repositories": repos, "selectedRepository": s.Registry.Selected(), "roborev": installation})
 }
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
@@ -275,27 +263,26 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var repoInfo any
-	for _, repo := range s.Registry.InspectAll(r.Context()) {
-		if strings.EqualFold(repo.Path, path) {
-			repoInfo = repo
-			request := roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: body.Panel}
-			if request.Panel == "" {
-				request.Panel = "dashboard_cross"
-			}
-			ctx, cancel := mutationContext()
-			defer cancel()
-			raw, err := s.RoboRev.Review(ctx, request)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, err.Error(), "enqueue")
-				return
-			}
-			writeRawJSON(w, http.StatusCreated, raw)
-			return
-		}
+	repo, err := s.Registry.Inspect(r.Context(), path)
+	if err != nil {
+		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		return
 	}
-	_ = repoInfo
-	writeError(w, http.StatusConflict, "repository state is unavailable", "repository")
+	request := roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: body.Panel}
+	if request.Panel == "" {
+		request.Panel = "dashboard_cross"
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	receipt, err := s.RoboRev.Review(ctx, request)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "enqueue")
+		return
+	}
+	writeJSON(w, http.StatusCreated, struct {
+		Receipt json.RawMessage `json:"receipt"`
+		Target  gitx.Repository `json:"target"`
+	}{Receipt: receipt, Target: repo})
 }
 
 func (s *Server) comment(w http.ResponseWriter, r *http.Request) {
@@ -459,5 +446,3 @@ func spaHandler() http.Handler {
 		serveIndex(w)
 	})
 }
-
-var _ = fmt.Sprintf

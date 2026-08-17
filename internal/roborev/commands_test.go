@@ -20,19 +20,15 @@ func TestCommentArgsKeepUserTextInOneArgument(t *testing.T) {
 	}
 }
 
-func TestReviewPreviewSeparatesRepoWithSpaces(t *testing.T) {
-	got, err := ReviewPreview(`C:\Tools\roborev.exe`, ReviewRequest{RepoPath: `E:\한글 프로젝트\repo`, GitRef: "abc123", Panel: "dashboard_cross"})
+func TestValidateReviewRequestAcceptsPinnedTarget(t *testing.T) {
+	err := ValidateReviewRequest(ReviewRequest{RepoPath: `E:\한글 프로젝트\repo`, GitRef: "abc123", Branch: "main", Panel: "dashboard_cross"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"review", "abc123", "--repo", `E:\한글 프로젝트\repo`, "--panel", "dashboard_cross"}
-	if !reflect.DeepEqual(got.Args, want) {
-		t.Fatalf("args mismatch: %#v", got.Args)
-	}
 }
 
-func TestReviewPreviewRejectsUnknownPanel(t *testing.T) {
-	_, err := ReviewPreview("roborev", ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: "$(calc)"})
+func TestValidateReviewRequestRejectsUnknownPanel(t *testing.T) {
+	err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: "$(calc)"})
 	if err == nil {
 		t.Fatal("expected panel allow-list error")
 	}

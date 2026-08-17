@@ -26,15 +26,14 @@ export type Installation = {
   }
 }
 
-export type CommandPreview = { executable: string; args: string[] }
-
 export type Bootstrap = {
   csrfToken: string
   repositories: Repository[]
   selectedRepository: string
   roborev: Installation
-  reviewHeadCommand?: CommandPreview
 }
+
+export type ReviewEnqueueResponse = { receipt: unknown; target: Repository }
 
 export type ReviewJob = {
   id: number

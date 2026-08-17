@@ -38,8 +38,3 @@ type CommentRequest struct {
 	JobID   int64  `json:"jobId"`
 	Comment string `json:"comment"`
 }
-
-type CommandPreview struct {
-	Executable string   `json:"executable"`
-	Args       []string `json:"args"`
-}

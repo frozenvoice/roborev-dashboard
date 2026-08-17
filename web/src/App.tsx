@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, type Bootstrap, type Installation, type Repository, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, type Bootstrap, type Installation, type Repository, type ReviewEnqueueResponse, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
@@ -200,25 +200,29 @@ export function App() {
   const [initialized, setInitialized] = useState(false)
   const [menu, setMenu] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
-	const reviewGeneration = useRef(0)
-  const initiallyLoadedRepository = useRef('')
+  const [reviewPollError, setReviewPollError] = useState('')
+  const [runtimePollError, setRuntimePollError] = useState('')
+  const reviewGeneration = useRef(0)
+  const reviewActionGeneration = useRef(0)
+  const runtimeGeneration = useRef(0)
 
   const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
   const loadReviews = useCallback(async (repo?: string) => {
-		if (!repo) return []
-		const generation = ++reviewGeneration.current
-		try {
-			const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))
+    if (!repo) return []
+    const generation = ++reviewGeneration.current
+    try {
+      const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))
       if (generation === reviewGeneration.current) {
         setJobs(next)
         setSelected(current => current ? next.find(job => idOf(job) === idOf(current)) ?? current : current)
+        setReviewPollError('')
       }
-			return generation === reviewGeneration.current ? next : []
-		} catch (error) {
-			if (!(error instanceof APIError && error.message.includes('daemon not running'))) toast('error', (error as Error).message)
-			return []
-		}
-  }, [toast])
+      return generation === reviewGeneration.current ? next : []
+    } catch (error) {
+      if (generation === reviewGeneration.current) setReviewPollError((error as Error).message)
+      return []
+    }
+  }, [])
   const loadBootstrap = useCallback(async () => {
     const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data)
     return data
@@ -226,66 +230,118 @@ export function App() {
 
   useEffect(() => {
     loadBootstrap()
-      .then(async data => {
-        if (data.roborev.installed && data.roborev.capabilities.jobListApi && data.roborev.status?.running) {
-          await loadReviews(data.selectedRepository)
-          initiallyLoadedRepository.current = data.selectedRepository
-        }
-      })
       .catch(error => toast('error', (error as Error).message))
       .finally(() => { setInitialized(true); setLoading(false) })
-  }, [loadBootstrap, loadReviews, toast])
+  }, [loadBootstrap, toast])
+  useEffect(() => () => { reviewActionGeneration.current++ }, [])
   const canPollReviews = Boolean(bootstrap?.roborev.installed && bootstrap.roborev.capabilities.jobListApi && bootstrap.roborev.status?.running)
   useEffect(() => {
     if (!initialized) return
+    reviewGeneration.current++
     if (!canPollReviews) {
-      reviewGeneration.current++
       setJobs([])
-      initiallyLoadedRepository.current = ''
+      setReviewPollError('')
       return
     }
-    if (initiallyLoadedRepository.current !== bootstrap?.selectedRepository) {
-      loadReviews(bootstrap?.selectedRepository)
-      initiallyLoadedRepository.current = bootstrap?.selectedRepository ?? ''
+    const repoPath = bootstrap?.selectedRepository
+    if (!repoPath) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      await loadReviews(repoPath)
+      if (!cancelled) timer = setTimeout(poll, 4000)
     }
-    const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000)
-    return () => clearInterval(timer)
+    void poll()
+    return () => {
+      cancelled = true
+      reviewGeneration.current++
+      if (timer) clearTimeout(timer)
+    }
   }, [bootstrap?.selectedRepository, canPollReviews, initialized, loadReviews])
   useEffect(() => {
-    const timer = setInterval(() => request<Installation>('/api/runtime').then(runtime => setBootstrap(current => current ? { ...current, roborev: runtime } : current)).catch(error => toast('error', (error as Error).message)), 10_000)
-    return () => clearInterval(timer)
-  }, [toast])
+    if (!initialized) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      const generation = ++runtimeGeneration.current
+      try {
+        const runtime = await request<Installation>('/api/runtime')
+        if (!cancelled && generation === runtimeGeneration.current) {
+          setBootstrap(current => current ? { ...current, roborev: runtime } : current)
+          setRuntimePollError('')
+        }
+      } catch (error) {
+        if (!cancelled && generation === runtimeGeneration.current) setRuntimePollError((error as Error).message)
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 10_000)
+      }
+    }
+    timer = setTimeout(poll, 10_000)
+    return () => {
+      cancelled = true
+      runtimeGeneration.current++
+      if (timer) clearTimeout(timer)
+    }
+  }, [initialized])
 
   const mutate = useCallback(async (path: string, body?: unknown) => {
     setBusy(true)
     try {
       await request(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
       toast('success', path.includes('comment-close') ? 'Comment saved and review closed.' : 'RoboRev state updated.')
-			const latest = await loadReviews(bootstrap?.selectedRepository)
-			if (selected) setSelected(latest.find(job => idOf(job) === idOf(selected)) ?? selected)
-      await loadBootstrap()
+      const data = await loadBootstrap()
+      await loadReviews(data.selectedRepository)
     } catch (error) {
       const apiError = error as APIError
       toast('error', apiError.phase === 'close' ? `Partial success: ${apiError.message}` : apiError.message)
       throw error
     } finally { setBusy(false) }
-  }, [bootstrap?.selectedRepository, loadBootstrap, loadReviews, selected, toast])
+  }, [loadBootstrap, loadReviews, toast])
 
-  const repo = bootstrap?.repositories.find(item => item.path.toLowerCase() === bootstrap.selectedRepository.toLowerCase())
+  const repo = bootstrap?.repositories.find(item => item.path === bootstrap.selectedRepository)
   const runningCount = jobs.filter(isRunning).length
   const daemonRunning = Boolean(bootstrap?.roborev.status?.running)
   const reviewHead = async () => {
     if (!repo) return
-    await mutate('/api/reviews', { repoPath: repo.path, panel: 'dashboard_cross' })
-    toast('success', `New HEAD review enqueued for ${repo.headShort}.`)
+    const generation = ++reviewActionGeneration.current
+    setBusy(true)
+    try {
+      const result = await request<ReviewEnqueueResponse>('/api/reviews', { method: 'POST', body: JSON.stringify({ repoPath: repo.path, panel: 'dashboard_cross' }) })
+      if (generation !== reviewActionGeneration.current) return
+      const target = result?.target
+      if (!target?.path || !target.headShort) throw new APIError('Review was enqueued, but its pinned target metadata was missing.')
+      setBootstrap(current => {
+        if (!current) return current
+        const exists = current.repositories.some(item => item.path === target.path)
+        return {
+          ...current,
+          selectedRepository: target.path,
+          repositories: exists ? current.repositories.map(item => item.path === target.path ? target : item) : [...current.repositories, target],
+        }
+      })
+      toast('success', `New HEAD review enqueued for ${target.headShort}.`)
+      await loadReviews(target.path)
+    } catch (error) {
+      if (generation === reviewActionGeneration.current) toast('error', (error as Error).message)
+    } finally {
+      if (generation === reviewActionGeneration.current) setBusy(false)
+    }
   }
-  const switchRepo = async (path: string) => { await mutate('/api/repos/select', { repoPath: path }); setSelected(null) }
+  const switchRepo = async (path: string) => {
+    reviewActionGeneration.current++
+    reviewGeneration.current++
+    setReviewPollError('')
+    setJobs([])
+    setSelected(null)
+    await mutate('/api/repos/select', { repoPath: path })
+  }
 
 	const reviewSupported = Boolean(bootstrap?.roborev.capabilities.reviewEnqueueApi)
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev.version || 'Setup required'}</span></div></div></aside>
     <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={bootstrap?.selectedRepository || ''} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.path} key={item.path}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || !repo || !bootstrap?.roborev.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
       {!loading && bootstrap && (!bootstrap.roborev.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
+      {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
       {loading ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : activeNav === 'Reviews' || activeNav === 'Overview' ? <ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
     {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || !canPollReviews} canRerun={Boolean(bootstrap?.roborev.capabilities.frozenRerunApi)} canLoadMembers={Boolean(bootstrap?.roborev.capabilities.panelMembersApi && selected.panel_run_uuid)} />}

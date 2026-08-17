@@ -44,11 +44,19 @@ func (s *Service) command(ctx context.Context, path string, args ...string) (str
 	return strings.TrimSpace(result.Stdout), nil
 }
 
-func samePath(left, right string) bool {
+// RepositoryKey returns the platform-aware identity key for a canonical
+// repository path. Windows path identity is case-insensitive; platforms with
+// case-sensitive paths retain exact cleaned spelling.
+func RepositoryKey(path string) string {
+	path = filepath.Clean(path)
 	if runtime.GOOS == "windows" {
-		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+		return strings.ToLower(path)
 	}
-	return filepath.Clean(left) == filepath.Clean(right)
+	return path
+}
+
+func SameRepositoryPath(left, right string) bool {
+	return RepositoryKey(left) == RepositoryKey(right)
 }
 
 func (s *Service) CanonicalRoot(ctx context.Context, input string) (string, error) {
@@ -73,7 +81,7 @@ func (s *Service) CanonicalRoot(ctx context.Context, input string) (string, erro
 	if resolved, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
 		root = resolved
 	}
-	if !samePath(abs, root) {
+	if !SameRepositoryPath(abs, root) {
 		return "", fmt.Errorf("path must be the Git repository root: %s", root)
 	}
 	return filepath.Clean(root), nil

@@ -6,9 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
-	"strings"
 	"sync"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -32,11 +30,7 @@ type Registry struct {
 }
 
 func registryKey(path string) string {
-	path = filepath.Clean(path)
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(path)
-	}
-	return path
+	return gitx.RepositoryKey(path)
 }
 
 func NewRegistry(inspector RepositoryInspector, configFile string) *Registry {
@@ -77,19 +71,19 @@ func (r *Registry) Load(ctx context.Context) {
 	}
 }
 
-func (r *Registry) saveLocked() error {
+func (r *Registry) saveState(pathsByKey map[string]string, selected string) error {
 	if r.configFile == "" {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(r.configFile), 0o700); err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(r.paths))
-	for _, path := range r.paths {
+	paths := make([]string, 0, len(pathsByKey))
+	for _, path := range pathsByKey {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	data, err := json.MarshalIndent(registryConfig{Recent: paths, LastSelected: r.selected}, "", "  ")
+	data, err := json.MarshalIndent(registryConfig{Recent: paths, LastSelected: selected}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -110,13 +104,20 @@ func (r *Registry) Add(ctx context.Context, path string) (gitx.Repository, error
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.paths[registryKey(repo.Path)] = repo.Path
-	if r.selected == "" {
-		r.selected = repo.Path
+	prospectivePaths := make(map[string]string, len(r.paths)+1)
+	for key, value := range r.paths {
+		prospectivePaths[key] = value
 	}
-	if err := r.saveLocked(); err != nil {
+	prospectivePaths[registryKey(repo.Path)] = repo.Path
+	prospectiveSelected := r.selected
+	if prospectiveSelected == "" {
+		prospectiveSelected = repo.Path
+	}
+	if err := r.saveState(prospectivePaths, prospectiveSelected); err != nil {
 		return gitx.Repository{}, err
 	}
+	r.paths = prospectivePaths
+	r.selected = prospectiveSelected
 	return repo, nil
 }
 
@@ -147,8 +148,24 @@ func (r *Registry) Select(path string) error {
 	if !ok {
 		return errors.New("repository is not registered")
 	}
+	if err := r.saveState(r.paths, resolved); err != nil {
+		return err
+	}
 	r.selected = resolved
-	return r.saveLocked()
+	return nil
+}
+
+// Inspect resolves a path using the registry's platform-aware identity rules
+// and returns freshly inspected repository state for that registered root.
+func (r *Registry) Inspect(ctx context.Context, path string) (gitx.Repository, error) {
+	resolved, err := r.Resolve(path)
+	if err != nil {
+		return gitx.Repository{}, err
+	}
+	if r.inspector == nil {
+		return gitx.Repository{}, errors.New("repository inspector is unavailable")
+	}
+	return r.inspector.Inspect(ctx, resolved)
 }
 
 func (r *Registry) InspectAll(ctx context.Context) []gitx.Repository {

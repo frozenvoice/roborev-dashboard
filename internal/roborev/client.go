@@ -35,7 +35,6 @@ type Service interface {
 	Close(context.Context, int64, bool) error
 	Cancel(context.Context, int64) error
 	StartDaemon(context.Context) error
-	ReviewCommand(ReviewRequest) (CommandPreview, error)
 }
 
 type Client struct {
@@ -422,7 +421,7 @@ func (c *Client) Review(ctx context.Context, request ReviewRequest) (json.RawMes
 	if !installation.Capabilities.ReviewEnqueueAPI {
 		return nil, fmt.Errorf("RoboRev %s does not support the version-gated enqueue API", installation.Version)
 	}
-	if _, err := ReviewPreview(c.Binary, request); err != nil {
+	if err := ValidateReviewRequest(request); err != nil {
 		return nil, err
 	}
 	body := map[string]any{"repo_path": request.RepoPath, "git_ref": request.GitRef, "branch": request.Branch}
@@ -484,8 +483,4 @@ func (c *Client) StartDaemon(ctx context.Context) error {
 		return errors.New(message)
 	}
 	return err
-}
-
-func (c *Client) ReviewCommand(request ReviewRequest) (CommandPreview, error) {
-	return ReviewPreview(c.Binary, request)
 }
