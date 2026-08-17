@@ -88,7 +88,7 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
   const id = idOf(job)
   const members = useMemo(() => memberJobs.length ? memberJobs : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs, memberJobs])
 
-  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(value => setDetail({ ...job, ...value, id, job_id: id })).catch(() => setDetail(job)).finally(() => setLoading(false)) }, [id])
+  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(value => setDetail({ ...value, id, job_id: id })).catch(() => setDetail(null)).finally(() => setLoading(false)) }, [id])
   useEffect(() => {
     if (!['prompt', 'log'].includes(tab) || lazy[tab]) return
     setLoading(true)
@@ -121,7 +121,7 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
     return () => { cancelled = true; if (timer) clearTimeout(timer) }
   }, [job.panel_run_uuid, job.status, tab])
 
-  const current = detail ?? job
+  const current = detail ? { ...detail, ...job, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
   const text = outputOf(current)
   const terminal = !isRunning(current)
   return <aside className="detail-panel" aria-label="Review detail">
@@ -189,13 +189,17 @@ export function App() {
   }, [toast])
   const loadBootstrap = useCallback(async () => {
     const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data)
-    if (data.roborev.installed && data.roborev.capabilities.jobListApi && data.roborev.status?.running) await loadReviews(data.selectedRepository)
-  }, [loadReviews])
+  }, [])
 
   useEffect(() => { loadBootstrap().catch(error => toast('error', (error as Error).message)).finally(() => setLoading(false)) }, [loadBootstrap, toast])
   const canPollReviews = Boolean(bootstrap?.roborev.installed && bootstrap.roborev.capabilities.jobListApi && bootstrap.roborev.status?.running)
   useEffect(() => {
-    if (!canPollReviews) return
+    if (!canPollReviews) {
+      setJobs([])
+      setSelected(null)
+      return
+    }
+    loadReviews(bootstrap?.selectedRepository)
     const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000)
     return () => clearInterval(timer)
   }, [bootstrap?.selectedRepository, canPollReviews, loadReviews])
@@ -236,7 +240,7 @@ export function App() {
       {!loading && bootstrap && (!bootstrap.roborev.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
       {loading ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : activeNav === 'Reviews' || activeNav === 'Overview' ? <ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
-    {selected && <ReviewDetail key={`${idOf(selected)}-${selected.status}-${selected.closed}-${selected.addressed}`} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy} canRerun={Boolean(bootstrap?.roborev.capabilities.frozenRerunApi)} canLoadMembers={Boolean(bootstrap?.roborev.capabilities.panelMembersApi && selected.panel_run_uuid)} />}
+    {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy} canRerun={Boolean(bootstrap?.roborev.capabilities.frozenRerunApi)} canLoadMembers={Boolean(bootstrap?.roborev.capabilities.panelMembersApi && selected.panel_run_uuid)} />}
     <div className="toasts" aria-live="polite">{toasts.map(item => <div key={item.id} className={`toast ${item.kind}`}>{item.kind === 'success' ? <Check /> : <XCircle />}{item.message}</div>)}</div>
   </div>
 }

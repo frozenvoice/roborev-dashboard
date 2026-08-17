@@ -23,7 +23,11 @@ func buildFakeRoboRev(t *testing.T) string {
 		name += ".exe"
 	}
 	output := filepath.Join(t.TempDir(), name)
-	command := exec.Command("go", "build", "-o", output, "../../testdata/fakeroborev")
+	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
+	if runtime.GOOS == "windows" {
+		goBinary += ".exe"
+	}
+	command := exec.Command(goBinary, "build", "-o", output, "../../testdata/fakeroborev")
 	if data, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build fake roborev: %v\n%s", err, data)
 	}

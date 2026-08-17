@@ -44,7 +44,7 @@ server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인�
 
 ### 데이터와 UI 상태
 
-review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 4초마다 polling한다. v0.64.0은 이 flag에서도 queued/running prompt를 유지하므로 adapter가 모든 상태의 `prompt`, `diff_content`, `patch`를 명시적으로 제거한 뒤 browser로 전달한다. `list --json`은 full prompt와 diff를 포함하므로 주기 경로에서 사용하지 않는다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 panel UUID로 lazy-load한다. mutation 성공 후 목록을 RoboRev source of truth에서 다시 fetch한다.
+review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 4초마다 polling한다. v0.64.0은 이 flag에서도 queued/running prompt를 유지하므로 adapter가 상태와 무관하게 알려진 heavy content key를 제거한 뒤 browser로 전달한다. upstream projection이 없어 daemon→Dashboard 구간에서는 active prompt를 수신·검사해야 하는 비용이 남으며, 이는 v0.64 capability limitation이다. `list --json`은 full prompt와 diff를 포함하므로 주기 경로에서 사용하지 않는다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 panel UUID로 lazy-load한다. mutation 성공 후 목록을 RoboRev source of truth에서 다시 fetch한다.
 
 Dashboard의 `/api/runtime`은 repository inspection이나 review listing 없이 TTL 30초의 version detection과 v0.64.0의 작은 `/api/health`만 수행하며 UI가 10초마다 호출한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&limit=0&omit_prompt=true`로 읽고 adapter에서 heavy field를 제거하며, nonterminal member가 있는 동안 4초마다 갱신한다. upstream v0.64.0에서 `limit=0`은 unlimited로 문서화되어 있다.
 

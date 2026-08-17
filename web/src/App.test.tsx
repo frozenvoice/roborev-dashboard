@@ -116,9 +116,12 @@ describe('App review workflow', () => {
     render(<App />)
     fireEvent.click(await screen.findByText(/#42/))
     expect(await screen.findByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Comments' }))
+    fireEvent.change(screen.getByLabelText('Comment'), { target: { value: 'keep this draft' } })
     await vi.advanceTimersByTimeAsync(4100)
     expect((await screen.findAllByText('Pass')).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Comment')).toHaveValue('keep this draft')
   })
 
   it('disables Review HEAD when the enqueue capability is unavailable', async () => {

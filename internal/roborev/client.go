@@ -39,13 +39,14 @@ type Service interface {
 }
 
 type Client struct {
-	Binary    string
-	Runner    proc.Runner
-	DaemonURL string
-	HTTP      *http.Client
-	versionMu sync.RWMutex
-	version   string
-	versionAt time.Time
+	Binary           string
+	Runner           proc.Runner
+	DaemonURL        string
+	HTTP             *http.Client
+	versionMu        sync.RWMutex
+	version          string
+	versionAt        time.Time
+	versionRefreshMu sync.Mutex
 }
 
 func ResolveBinary(override string) (string, error) {
@@ -147,6 +148,15 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	c.versionMu.RLock()
 	value := c.version
 	detectedAt := c.versionAt
+	c.versionMu.RUnlock()
+	if value != "" && time.Since(detectedAt) < 30*time.Second {
+		return value, nil
+	}
+	c.versionRefreshMu.Lock()
+	defer c.versionRefreshMu.Unlock()
+	c.versionMu.RLock()
+	value = c.version
+	detectedAt = c.versionAt
 	c.versionMu.RUnlock()
 	if value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
@@ -286,9 +296,9 @@ func stripHeavyJobFields(raw json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("invalid jobs payload")
 	}
 	for _, job := range jobs {
-		delete(job, "prompt")
-		delete(job, "diff_content")
-		delete(job, "patch")
+		for _, field := range []string{"prompt", "diff_content", "patch", "review", "output", "log", "raw_log"} {
+			delete(job, field)
+		}
 	}
 	jobsJSON, err := json.Marshal(jobs)
 	if err != nil {

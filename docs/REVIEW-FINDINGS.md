@@ -8,6 +8,7 @@
 | 17 | `cff6d45` | Finding | panel UUID repository authorization, member refresh/race/error, lightweight runtime endpoint, unknown health state와 diagnostic, daemon HTTP fixture를 수정 |
 | 21 | `d3ed6b2` | Finding | visible commit subject/normalized verdict search, real v0.64 lifecycle fixture와 elapsed assertion, status palette duplication을 수정 |
 | 25 | `666086c` | Finding | active-job heavy field strip, verified `id=` authorization fixture, suspended-before-Job-Object resume, selected state sync, version TTL, poll gating, panel handler tests, deterministic registry fallback을 수정 |
+| 29 | `ea1174b` | Finding | defensive heavy-key expansion, offline stale state clear/online immediate refresh, detail identity-only key로 tab/comment draft 보존, coalesced version refresh를 수정; upstream 수신 비용은 v0.64 limitation으로 기록 |
 
 ## 적용한 핵심 finding
 
