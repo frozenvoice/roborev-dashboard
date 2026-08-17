@@ -47,6 +47,8 @@ type Client struct {
 	version          string
 	versionAt        time.Time
 	versionRefreshMu sync.Mutex
+	versionErr       error
+	versionErrAt     time.Time
 }
 
 func ResolveBinary(override string) (string, error) {
@@ -148,21 +150,35 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	c.versionMu.RLock()
 	value := c.version
 	detectedAt := c.versionAt
+	detectionErr := c.versionErr
+	errorAt := c.versionErrAt
 	c.versionMu.RUnlock()
 	if value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
+	}
+	if detectionErr != nil && time.Since(errorAt) < 5*time.Second {
+		return "", detectionErr
 	}
 	c.versionRefreshMu.Lock()
 	defer c.versionRefreshMu.Unlock()
 	c.versionMu.RLock()
 	value = c.version
 	detectedAt = c.versionAt
+	detectionErr = c.versionErr
+	errorAt = c.versionErrAt
 	c.versionMu.RUnlock()
 	if value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
 	}
+	if detectionErr != nil && time.Since(errorAt) < 5*time.Second {
+		return "", detectionErr
+	}
 	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
 	if err != nil {
+		c.versionMu.Lock()
+		c.versionErr = err
+		c.versionErrAt = time.Now()
+		c.versionMu.Unlock()
 		return "", err
 	}
 	var version struct {
@@ -174,6 +190,8 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	c.versionMu.Lock()
 	c.version = version.Version
 	c.versionAt = time.Now()
+	c.versionErr = nil
+	c.versionErrAt = time.Time{}
 	c.versionMu.Unlock()
 	return version.Version, nil
 }

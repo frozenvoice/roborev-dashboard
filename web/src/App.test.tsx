@@ -104,13 +104,13 @@ describe('App review workflow', () => {
   it('reconciles a selected running job when polling reaches a terminal state', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let listCalls = 0
-    const running = { ...jobs[0], status: 'running', verdict: undefined }
-    const done = { ...jobs[0], status: 'done', verdict: 'P' }
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const done = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) { listCalls++; return response(listCalls === 1 ? [running] : [done]) }
-      if (path === '/api/reviews/42') return response(listCalls === 1 ? running : done)
+      if (path === '/api/reviews/42') return response(listCalls === 1 ? running : { ...done, output: '# Completed review' })
       return response({ success: true })
     }))
     render(<App />)
@@ -122,6 +122,8 @@ describe('App review workflow', () => {
     expect((await screen.findAllByText('Pass')).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Comment')).toHaveValue('keep this draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Review' }))
+    expect(await screen.findByText('Completed review')).toBeInTheDocument()
   })
 
   it('disables Review HEAD when the enqueue capability is unavailable', async () => {
