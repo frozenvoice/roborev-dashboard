@@ -27,10 +27,17 @@ func TestValidateReviewRequestAcceptsPinnedTarget(t *testing.T) {
 	}
 }
 
-func TestValidateReviewRequestRejectsUnknownPanel(t *testing.T) {
-	err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: "$(calc)"})
-	if err == nil {
-		t.Fatal("expected panel allow-list error")
+func TestValidateReviewRequestAcceptsDynamicPanelName(t *testing.T) {
+	if err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: "team-specific"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateReviewRequestRejectsEmptyAndControlPanel(t *testing.T) {
+	for _, panel := range []string{"", " \t", "bad\nname"} {
+		if err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: panel}); err == nil {
+			t.Fatalf("expected invalid panel %q", panel)
+		}
 	}
 }
 

@@ -1,15 +1,32 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, CommentBox } from './App'
+import type { PanelInfo } from './api'
 
 const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', selectedRepositoryIdentity: 'repo-1', repositories: [{ identity: 'repo-1', name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
   roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, panelReview: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
 }
 const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
+const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
+function panelConfiguration(repositoryIdentity = 'repo-1', panels: PanelInfo[] = [defaultPanel], selectedPanel = defaultPanel.name, selectionRequired = false, error?: string) {
+  return { repositoryIdentity, panels, selectedPanel, selectionRequired, ...(error ? { error } : {}) }
+}
+function withPanels(handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>, panelHandler?: (repoPath: string) => Promise<Response>) {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (path.startsWith('/api/repos/panels?')) {
+      const repoPath = new URL(path, 'http://localhost').searchParams.get('repo')
+      if (panelHandler) return panelHandler(repoPath ?? '')
+      const repositoryIdentity = repoPath === 'E:\\other' ? 'repo-2' : 'repo-1'
+      return response(panelConfiguration(repositoryIdentity))
+    }
+    return handler(input, init)
+  })
+}
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -21,7 +38,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('App review workflow', () => {
   it('keeps Review HEAD distinct from frozen rerun', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response(jobs)
@@ -36,13 +53,13 @@ describe('App review workflow', () => {
   })
 
   it('renders finding state and safe review text', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)
     expect((await screen.findAllByText('Finding')).length).toBeGreaterThan(0)
   })
 
   it('searches real commit subjects and normalized verdict labels and renders elapsed timestamps', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)
     const search = await screen.findByRole('textbox', { name: 'Search reviews' })
     expect(await screen.findByText('25s')).toBeInTheDocument()
@@ -54,7 +71,7 @@ describe('App review workflow', () => {
   })
 
   it('lazy-loads and renders panel member agents', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response(jobs)
@@ -75,8 +92,88 @@ describe('App review workflow', () => {
     expect(screen.getByText('claude-code').closest('article')).toHaveTextContent('Pass')
   })
 
+  it('copies and opens a finding member fix prompt across a routine member refresh', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+    const slowOpen = deferred<Response>()
+    const calls: Array<{ path: string; method: string }> = []
+    let promptCalls = 0
+    let memberCalls = 0
+    const members = { jobs: [
+      { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
+      { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
+      { id: 45, panel_role: 'member', panel_member_index: 2, status: 'running', agent: 'grok' },
+    ] }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, method: init?.method ?? 'GET' })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.includes('/api/panels/')) { memberCalls++; return response(members) }
+      if (path.startsWith('/api/reviews/43/fix-prompt?')) {
+        promptCalls++
+        return promptCalls === 1 ? response({ text: 'Member fix prompt', jobId: 43, stale: false }) : slowOpen.promise
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Panel members' }))
+    const findingRow = (await screen.findByText('codex')).closest('article')!
+    expect(within(findingRow).getByRole('button', { name: 'Copy Fix Prompt' })).toBeInTheDocument()
+    expect(within(findingRow).getByRole('button', { name: 'Open Fix Prompt' })).toBeInTheDocument()
+    expect(within(screen.getByText('claude-code').closest('article')!).queryByRole('button', { name: /Fix Prompt/ })).not.toBeInTheDocument()
+    expect(within(screen.getByText('grok').closest('article')!).queryByRole('button', { name: /Fix Prompt/ })).not.toBeInTheDocument()
+
+    await userEvent.click(within(findingRow).getByRole('button', { name: 'Copy Fix Prompt' }))
+    expect(await screen.findByText('Fix prompt for review #43 copied.')).toBeInTheDocument()
+    expect(clipboard).toHaveBeenCalledWith('Member fix prompt')
+    await userEvent.click(within(screen.getByText('codex').closest('article')!).getByRole('button', { name: 'Open Fix Prompt' }))
+    await vi.advanceTimersByTimeAsync(4100)
+    expect(memberCalls).toBeGreaterThan(1)
+    slowOpen.resolve(new Response(JSON.stringify({ text: 'Slow member prompt', jobId: 43, stale: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Finding · Review #43')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Fix prompt' })).toHaveValue('Slow member prompt')
+    const promptPath = `/api/reviews/43/fix-prompt?repo=${encodeURIComponent(bootstrap.selectedRepository)}`
+    expect(calls.filter(call => call.path === promptPath)).toHaveLength(2)
+    expect(calls.filter(call => call.method !== 'GET')).toHaveLength(0)
+  })
+
+  it('ignores a pending member fix prompt when the member target disappears', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const prompt = deferred<Response>()
+    let memberCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.includes('/api/panels/')) {
+        memberCalls++
+        return response({ jobs: memberCalls === 1
+          ? [{ id: 43, panel_role: 'member', status: 'done', verdict: 'F', agent: 'codex' }, { id: 45, panel_role: 'member', status: 'running', agent: 'grok' }]
+          : [{ id: 45, panel_role: 'member', status: 'running', agent: 'grok' }] })
+      }
+      if (path.startsWith('/api/reviews/43/fix-prompt?')) return prompt.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Panel members' }))
+    const findingRow = (await screen.findByText('codex')).closest('article')!
+    await userEvent.click(within(findingRow).getByRole('button', { name: 'Open Fix Prompt' }))
+    await vi.advanceTimersByTimeAsync(4100)
+    await waitFor(() => expect(screen.queryByText('codex')).not.toBeInTheDocument())
+    prompt.resolve(new Response(JSON.stringify({ text: 'Removed member prompt', jobId: 43, stale: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByText('Removed member prompt')).not.toBeInTheDocument()
+  })
+
   it('renders panel member refresh errors inline', async () => {
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response(jobs)
@@ -92,7 +189,7 @@ describe('App review workflow', () => {
 
   it('keeps the list job ID after loading a real show response', async () => {
     const calls: string[] = []
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (init?.method === 'POST') { calls.push(path); return response({ success: true }) }
       if (path === '/api/bootstrap') return response(bootstrap)
@@ -111,7 +208,7 @@ describe('App review workflow', () => {
     let listCalls = 0
     const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
     const done = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) { listCalls++; return response(listCalls === 1 ? [running] : [done]) }
@@ -133,7 +230,7 @@ describe('App review workflow', () => {
 
   it('disables Review HEAD when the enqueue capability is unavailable', async () => {
     const unsupported = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, reviewEnqueueApi: false } } }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(unsupported) : response([])))
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(unsupported) : response([])))
     render(<App />)
     expect(await screen.findByRole('button', { name: 'Review HEAD' })).toBeDisabled()
     expect(await screen.findByText('RoboRev upgrade required')).toBeInTheDocument()
@@ -143,7 +240,7 @@ describe('App review workflow', () => {
   it('renders the normal empty queue without polling when the daemon is offline', async () => {
     const offline = { ...bootstrap, roborev: { ...bootstrap.roborev, status: { running: false } } }
     let reviewCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(offline)
       if (path.startsWith('/api/reviews')) reviewCalls++
@@ -163,7 +260,7 @@ describe('App review workflow', () => {
     const offlineRuntime = { ...bootstrap.roborev, status: { running: false } }
     let runtimeCalls = 0
     let pendingReviewCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path === '/api/runtime') return response(++runtimeCalls === 1 ? offlineRuntime : bootstrap.roborev)
@@ -194,7 +291,7 @@ describe('App review workflow', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const slow = deferred<Response>()
     let reviewCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path === '/api/runtime') return response(bootstrap.roborev)
@@ -219,7 +316,7 @@ describe('App review workflow', () => {
     const initial = { ...bootstrap, repositories: [...bootstrap.repositories, otherRepository] }
     const switched = { ...initial, selectedRepository: otherRepository.path, selectedRepositoryIdentity: otherRepository.identity }
     let bootstrapCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
       if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
@@ -249,7 +346,7 @@ describe('App review workflow', () => {
     const initial = { ...bootstrap, repositories: [...bootstrap.repositories, otherRepository] }
     const switched = { ...initial, selectedRepository: otherRepository.path, selectedRepositoryIdentity: otherRepository.identity }
     let bootstrapCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
       if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
@@ -274,7 +371,7 @@ describe('App review workflow', () => {
 
   it('settles initial review readiness on an error without an infinite skeleton', async () => {
     const failed = deferred<Response>()
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return failed.promise
@@ -293,7 +390,7 @@ describe('App review workflow', () => {
     const registered = { ...bootstrap.repositories[0], path: 'E:\\Repo', branch: 'main' }
     const caseBootstrap = { ...bootstrap, selectedRepository: 'e:\\repo', repositories: [registered] }
     const pinned = { ...registered, path: 'e:\\REPO', branch: 'feature/fresh', head: 'fedcba987654', headShort: 'fedcba98' }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(caseBootstrap)
       if (path === '/api/reviews' && init?.method === 'POST') return response({ receipt: { job_id: 99 }, target: pinned })
@@ -313,7 +410,7 @@ describe('App review workflow', () => {
   it('keeps case-varied paths distinct when their opaque identities differ', async () => {
     const other = { ...bootstrap.repositories[0], identity: 'repo-2', name: 'other', path: 'e:\\REPO', branch: 'other' }
     const distinct = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(distinct) : response([])))
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(distinct) : response([])))
     render(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
     await userEvent.click(screen.getByRole('button', { name: 'Repositories' }))
@@ -328,7 +425,7 @@ describe('App review workflow', () => {
     const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
     let bootstrapCalls = 0
     let selectBody: unknown
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
       if (path === '/api/repos/select' && init?.method === 'POST') { selectBody = JSON.parse(String(init.body)); return response({ success: true }) }
@@ -344,9 +441,277 @@ describe('App review workflow', () => {
     await waitFor(() => expect(selector).toHaveValue(other.identity))
   })
 
+  it.each([
+    ['response', 200, panelConfiguration('repo-1', [{ ...defaultPanel, name: 'alpha' }], 'alpha')],
+    ['error', 502, { error: 'stale A panel failure' }],
+  ])('does not leak a stale Repo A panel %s into Repo B', async (_kind, status, payload) => {
+    const oldPanels = deferred<Response>()
+    const other = { ...bootstrap.repositories[0], identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'other' }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    const bravo = { ...defaultPanel, name: 'bravo', origin: 'local' as const }
+    let bootstrapCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path.startsWith('/api/reviews?')) return response(path.includes(encodeURIComponent(other.path)) ? [{ ...jobs[0], id: 84 }] : jobs)
+      return response({ success: true })
+    }, repoPath => repoPath === other.path ? response(panelConfiguration(other.identity, [bravo], bravo.name)) : oldPanels.promise))
+    render(<App />)
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue(bravo.name))
+    oldPanels.resolve(new Response(JSON.stringify(payload), { status, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue(bravo.name)
+    expect(screen.queryByText('stale A panel failure')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Cross review · alpha' })).not.toBeInTheDocument()
+  })
+
+  it('uses a remembered server panel choice', async () => {
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta', origin: 'local' as const }]
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response(panelConfiguration('repo-1', panels, 'beta'))))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('beta'))
+    expect(screen.getAllByText('Cross review · beta')).toHaveLength(2)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+  })
+
+  it('uses the server auto-selection for one named panel', async () => {
+    const solo = { ...defaultPanel, name: 'solo' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response(panelConfiguration('repo-1', [solo], solo.name))))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('solo'))
+    expect(screen.getAllByText('Cross review · solo')).toHaveLength(2)
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled()
+  })
+
+  it('requires a choice when the server reports multiple panels without a saved selection', async () => {
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta' }]
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response(panelConfiguration('repo-1', panels, '', true))))
+    render(<App />)
+    expect(await screen.findByRole('option', { name: 'Select a review panel' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+  })
+
+  it('honors stale selection state reported by the server', async () => {
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta' }]
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response(panelConfiguration('repo-1', panels, 'removed', true))))
+    render(<App />)
+    expect(await screen.findByRole('option', { name: 'Select a review panel' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+  })
+
+  it('keeps malformed server panel state disabled', async () => {
+    const stale = { ...defaultPanel, name: 'available' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response({ ...panelConfiguration('repo-1', [stale], 'removed', true), panels: 'invalid' })))
+    render(<App />)
+    expect(await screen.findByText('Panel configuration unavailable')).toBeInTheDocument()
+    expect(screen.getByText('The panel configuration response was malformed.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+  })
+
+  it('shows a safe unavailable state for a server-reported panel configuration error', async () => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs), () => response(panelConfiguration('repo-1', [defaultPanel], '', true, 'Repository panel config could not be read.'))))
+    render(<App />)
+    expect(await screen.findByText('Panel configuration unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Repository panel config could not be read.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+  })
+
+  it('posts the exact selected panel for Review HEAD', async () => {
+    const beta = { ...defaultPanel, name: 'beta' }
+    let reviewBody: unknown
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/reviews' && init?.method === 'POST') { reviewBody = JSON.parse(String(init.body)); return response({ receipt: { job_id: 99 }, target: bootstrap.repositories[0] }) }
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }, () => response(panelConfiguration('repo-1', [beta], beta.name))))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+    await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
+    await waitFor(() => expect(reviewBody).toEqual({ repoPath: bootstrap.repositories[0].path, panel: beta.name }))
+  })
+
+  it('supports a dashboard-free repository with the synthetic no-panel choice', async () => {
+    const none = { name: 'none', kind: 'single' as const, members: [], origin: 'builtin' as const, valid: true }
+    let reviewBody = ''
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response({ ...bootstrap, repositories: [{ ...bootstrap.repositories[0], hasConfig: false }] })
+      if (path === '/api/reviews' && init?.method === 'POST') { reviewBody = String(init.body); return response({ receipt: { job_id: 99 }, target: bootstrap.repositories[0] }) }
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }, () => response(panelConfiguration('repo-1', [none], none.name))))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('none'))
+    expect(screen.getAllByText('Single agent · no panel')).toHaveLength(2)
+    await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
+    await waitFor(() => expect(JSON.parse(reviewBody)).toEqual({ repoPath: bootstrap.repositories[0].path, panel: 'none' }))
+    expect(reviewBody).not.toContain('dashboard_cross')
+  })
+
+  it('persists a panel selection with the canonical repository path and reloads server state', async () => {
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta' }]
+    let selectedPanel = ''
+    let selectionBody: unknown
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/repos/panel-selection' && init?.method === 'POST') { selectionBody = JSON.parse(String(init.body)); selectedPanel = 'beta'; return response({ success: true }) }
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }, () => response(panelConfiguration('repo-1', panels, selectedPanel, !selectedPanel))))
+    render(<App />)
+    const selector = await screen.findByRole('combobox', { name: 'Review panel' })
+    await screen.findByRole('option', { name: 'Cross review · beta' })
+    await userEvent.selectOptions(selector, 'beta')
+    await waitFor(() => expect(selectionBody).toEqual({ repoPath: bootstrap.repositories[0].path, panel: 'beta' }))
+    await waitFor(() => expect(selector).toHaveValue('beta'))
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled()
+  })
+
+  it('retries panel discovery after an initial transient failure', async () => {
+    let panelCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }, () => ++panelCalls === 1
+      ? response({ error: 'temporary panel failure' }, 502)
+      : response(panelConfiguration())))
+    render(<App />)
+    expect(await screen.findByText('Panel configuration unavailable')).toBeInTheDocument()
+    expect(screen.getByText('temporary panel failure')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry panel discovery' }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue(defaultPanel.name))
+    expect(screen.queryByText('Panel configuration unavailable')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled()
+  })
+
+  it('reports a failed panel selection immediately and recovers through retry', async () => {
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta' }]
+    let selectionAttempted = false
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/repos/panel-selection' && init?.method === 'POST') {
+        selectionAttempted = true
+        return response({ error: 'selection storage unavailable' }, 503)
+      }
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }, () => response(panelConfiguration('repo-1', panels, selectionAttempted ? 'alpha' : '', !selectionAttempted))))
+    render(<App />)
+    const selector = await screen.findByRole('combobox', { name: 'Review panel' })
+    await screen.findByRole('option', { name: 'Cross review · beta' })
+    await userEvent.selectOptions(selector, 'beta')
+    expect(await screen.findByText('selection storage unavailable', { selector: '.toast' })).toBeInTheDocument()
+    expect(screen.getByText('Panel configuration unavailable')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry panel discovery' }))
+    await waitFor(() => expect(selector).toHaveValue('alpha'))
+    expect(screen.queryByText('Panel configuration unavailable')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled()
+  })
+
+  it('suppresses a stale panel-selection failure after switching repositories', async () => {
+    const selection = deferred<Response>()
+    const panels = [{ ...defaultPanel, name: 'alpha' }, { ...defaultPanel, name: 'beta' }]
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    let bootstrapCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
+      if (path === '/api/repos/panel-selection' && init?.method === 'POST') return selection.promise
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }, repoPath => response(panelConfiguration(repoPath === other.path ? other.identity : 'repo-1', panels, 'alpha'))))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('alpha'))
+    fireEvent.change(screen.getByRole('combobox', { name: 'Review panel' }), { target: { value: 'beta' } })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(other.identity))
+    selection.resolve(new Response(JSON.stringify({ error: 'stale selection failure' }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('stale selection failure')).not.toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('alpha')
+  })
+
+  it('restores the server-selected repository after a repo switch fails', async () => {
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const state = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(state)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ error: 'repository selection rejected' }, 500)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await screen.findByText(/#42/)
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    expect(await screen.findByText('repository selection rejected', { selector: '.toast' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue('repo-1'))
+    expect(screen.getByText(/#42/)).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue(defaultPanel.name)
+    expect(screen.queryByText('Panel configuration unavailable')).not.toBeInTheDocument()
+  })
+
+  it('keeps the newest repository when an older failed switch completes later', async () => {
+    const staleSwitch = deferred<Response>()
+    const repoB = { identity: 'repo-2', name: 'repo-b', path: 'E:\\repo-b', branch: 'feature/b', head: '222222222222', headShort: '22222222', commitSubject: 'B', dirty: false, hasConfig: true }
+    const repoC = { identity: 'repo-3', name: 'repo-c', path: 'E:\\repo-c', branch: 'feature/c', head: '333333333333', headShort: '33333333', commitSubject: 'C', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, repoB, repoC] }
+    const selectedC = { ...initial, selectedRepository: repoC.path, selectedRepositoryIdentity: repoC.identity }
+    const cJobs = [{ ...jobs[0], id: 126, git_ref: repoC.head, commit_subject: 'Repository C review' }]
+    let bootstrapCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : selectedC)
+      if (path === '/api/repos/select' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { repoPath: string }
+        return body.repoPath === repoB.path ? staleSwitch.promise : response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?')) return response(path.includes(encodeURIComponent(repoC.path)) ? cJobs : jobs)
+      return response({ success: true })
+    }, repoPath => {
+      const identity = repoPath === repoC.path ? repoC.identity : repoPath === repoB.path ? repoB.identity : 'repo-1'
+      return response(panelConfiguration(identity))
+    }))
+    render(<App />)
+    await screen.findByText(/#42/)
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    fireEvent.change(selector, { target: { value: repoB.identity } })
+    expect(selector).toBeDisabled()
+    // A queued browser event is still guarded even though the control is disabled during the active switch.
+    fireEvent.change(selector, { target: { value: repoC.identity } })
+    expect(await screen.findByText(/#126/)).toBeInTheDocument()
+    await waitFor(() => expect(selector).toHaveValue(repoC.identity))
+    expect(selector).toBeEnabled()
+
+    staleSwitch.resolve(new Response(JSON.stringify({ error: 'stale repository B failure' }), { status: 500, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(selector).toHaveValue(repoC.identity)
+    expect(screen.getByText('feature/c')).toBeInTheDocument()
+    expect(screen.getByText('33333333')).toBeInTheDocument()
+    expect(screen.getByText(/#126/)).toBeInTheDocument()
+    expect(screen.queryByText(/#42/)).not.toBeInTheDocument()
+    expect(screen.queryByText('stale repository B failure')).not.toBeInTheDocument()
+    expect(screen.queryByText('Repository state could not be restored')).not.toBeInTheDocument()
+  })
+
   it('uses the server-pinned Review HEAD target in the toast and repository metadata', async () => {
     const pinned = { ...bootstrap.repositories[0], branch: 'feature/fresh', head: 'fedcba987654', headShort: 'fedcba98', commitSubject: 'Fresh commit', dirty: true }
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path === '/api/reviews' && init?.method === 'POST') return response({ receipt: { job_id: 99 }, target: pinned })
@@ -354,12 +719,128 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
-    await userEvent.click(await screen.findByRole('button', { name: 'Review HEAD' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+    await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
     expect(await screen.findByText('New HEAD review enqueued for fedcba98.')).toBeInTheDocument()
     expect(screen.getByText('feature/fresh')).toBeInTheDocument()
     expect(screen.getByText('fedcba98')).toBeInTheDocument()
     expect(screen.getByText('Dirty')).toBeInTheDocument()
     expect(screen.queryByText('RoboRev state updated.')).not.toBeInTheDocument()
+  })
+
+  it('shows fix prompt actions for terminal findings but not passes', async () => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('button', { name: 'Copy Fix Prompt' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open Fix Prompt' })).toBeInTheDocument()
+    cleanup()
+
+    const pass = { ...jobs[0], verdict: 'P' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([pass])
+      if (path === '/api/reviews/42') return response(pass)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })
+    expect(screen.queryByRole('button', { name: 'Copy Fix Prompt' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Open Fix Prompt' })).not.toBeInTheDocument()
+  })
+
+  it('fetches and copies the exact repository-scoped fix prompt without mutations', async () => {
+    const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+    const calls: Array<{ path: string; method: string }> = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, method: init?.method ?? 'GET' })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.startsWith('/api/reviews/42/fix-prompt?')) return response({ text: 'Fix this finding safely.', jobId: 42, stale: false })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Copy Fix Prompt' }))
+    expect(await screen.findByText('Fix prompt for review #42 copied.')).toBeInTheDocument()
+    expect(clipboard).toHaveBeenCalledWith('Fix this finding safely.')
+    expect(calls).toContainEqual({ path: `/api/reviews/42/fix-prompt?repo=${encodeURIComponent(bootstrap.selectedRepository)}`, method: 'GET' })
+    expect(calls.filter(call => call.method !== 'GET')).toHaveLength(0)
+  })
+
+  it('opens an editable fix prompt with generated finding metadata', async () => {
+    const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.startsWith('/api/reviews/42/fix-prompt?')) return response({ text: 'Original fix prompt', jobId: 42, stale: true })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Open Fix Prompt' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByText('Finding · Review #42')).toBeInTheDocument()
+    expect(screen.getByText(/Repository state changed/)).toBeInTheDocument()
+    const editor = screen.getByRole('textbox', { name: 'Fix prompt' })
+    expect(editor).toHaveValue('Original fix prompt')
+    fireEvent.change(editor, { target: { value: '수정한 프롬프트\n붙여넣은 내용' } })
+    expect(editor).toHaveValue('수정한 프롬프트\n붙여넣은 내용')
+    const dialog = screen.getByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Copy' }))
+    expect(clipboard).toHaveBeenCalledWith('수정한 프롬프트\n붙여넣은 내용')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('falls back to the editable fix prompt when clipboard copy fails', async () => {
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('permission denied'))
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.startsWith('/api/reviews/42/fix-prompt?')) return response({ text: 'Fallback prompt', jobId: 42, stale: false })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Copy Fix Prompt' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Fix prompt' })).toHaveValue('Fallback prompt')
+  })
+
+  it('ignores a fix prompt response after the review detail closes', async () => {
+    const prompt = deferred<Response>()
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.startsWith('/api/reviews/42/fix-prompt?')) return prompt.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Open Fix Prompt' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close detail' }))
+    prompt.resolve(new Response(JSON.stringify({ text: 'Stale prompt', jobId: 42, stale: false }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByText('Stale prompt')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Fix prompt for review/)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -373,7 +854,7 @@ describe('App review workflow', () => {
     const otherJobs = [{ ...jobs[0], id: 84, git_ref: otherRepository.head, commit_subject: 'Other repository review' }]
     let bootstrapCalls = 0
     let enqueueCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
       if (path === '/api/reviews' && init?.method === 'POST') { enqueueCalls++; return enqueue.promise }
@@ -383,7 +864,8 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
-    await userEvent.click(await screen.findByRole('button', { name: 'Review HEAD' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+    await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
     await waitFor(() => expect(enqueueCalls).toBe(1))
     fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: otherRepository.identity } })
     expect(await screen.findByText(/#84/)).toBeInTheDocument()
@@ -403,7 +885,7 @@ describe('App review workflow', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     let reviewCalls = 0
     let runtimeCalls = 0
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path === '/api/reviews' && init?.method === 'POST') return response({ error: 'enqueue rejected' }, 409)

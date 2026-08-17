@@ -2,12 +2,10 @@ package roborev
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
-
-var allowedPanels = map[string]bool{"dashboard_cross": true, "none": true}
 
 func validateJobID(id int64) error {
 	if id <= 0 {
@@ -17,11 +15,16 @@ func validateJobID(id int64) error {
 }
 
 func validatePanel(panel string) error {
-	if panel == "" {
-		return nil
+	if strings.TrimSpace(panel) == "" {
+		return errors.New("panel is required")
 	}
-	if !allowedPanels[panel] {
-		return fmt.Errorf("unsupported panel %q", panel)
+	if len(panel) > 128 {
+		return errors.New("panel exceeds 128 characters")
+	}
+	for _, char := range panel {
+		if unicode.IsControl(char) {
+			return errors.New("panel contains control characters")
+		}
 	}
 	return nil
 }

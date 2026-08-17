@@ -15,8 +15,11 @@
 | `show --job --json` | review detail/metadata | JSON CLI | B | 예 | `job_id` identity 보존, 선택 시 lazy-load |
 | `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
 | `log --raw` | raw log | CLI bytes | B | 예정 | bounded response, lazy-load |
-| `review` + `/api/enqueue` | Review HEAD/advanced enqueue | version-gated daemon API | B | 예정 | CLI에 JSON receipt가 없어 API 사용 |
+| `review` + `/api/enqueue` | repository panel-aware Review HEAD | version-gated daemon API | B | 예 | current effective panel을 재검증하고 full SHA를 pin; CLI에 JSON receipt가 없어 API 사용 |
+| global/local `[review.panels]` | repository panel discovery/selector | typed read-only TOML fallback | B | 예 | official enumeration API 없음; map union + local whole-entry override, malformed fail closed |
+| Dashboard `panelSelections` | repository별 panel preference | Dashboard local JSON config | B | 예 | platform-aware repository identity key; preference는 authorization이 아님 |
 | `/api/jobs?panel_run=...&omit_prompt=true` | panel member 상태 | version-gated daemon API | B | 예 | panel tab에서만 lazy-load |
+| `show --job --json` subset | Copy/Open Fix Prompt | bounded JSON CLI + deterministic local template | B | 예 | terminal F single/synthesis/individual member; LLM/수정 실행 없음 |
 | `/api/job/rerun` | Rerun same target/config | version-gated daemon API | B | 예 | frozen target; HEAD action과 분리 |
 | `cancel <id>` | queued/running cancel | typed CLI | B | 예 | terminal job은 UI에서 숨김 |
 | `comment --job <id> --message ... --commenter ...` | comment | typed CLI | B | 예 | 설치된 help로 확인; argument array, multiline 지원 |
@@ -58,5 +61,7 @@
 - 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
 - `list --json`은 prompt와 diff를 포함한다. v0.64 daemon도 `omit_prompt=true`에서 queued/running prompt를 유지하므로 Dashboard adapter가 status와 무관하게 heavy fields를 제거한다.
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
+- v0.64.0은 panel enumeration JSON/API를 제공하지 않는다. Dashboard는 typed TOML로 global/local panel map을 병합하지만 linked worktree의 untracked main-checkout `.roborev.toml` 상속은 지원하지 않는다. direct config가 없는 linked worktree에서는 potentially divergent global named panel을 막고 built-in `none`만 허용한다.
+- Fix Prompt는 요청한 job의 `show --job --json` top-level finding과 job metadata만 사용하고 original prompt, diff, log, 다른 member aggregate 및 config를 포함하지 않는다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.
 - `stream`은 JSONL이며 UI source of truth가 충분한지 검증 전까지 polling 보조 신호로만 계획한다.

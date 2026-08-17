@@ -37,6 +37,27 @@ export type Bootstrap = {
 
 export type ReviewEnqueueResponse = { receipt: unknown; target: Repository }
 
+export type PanelInfo = {
+  name: string
+  kind: 'panel' | 'single'
+  members: string[]
+  synthesisAgent?: string
+  synthesisBackupAgent?: string
+  origin: 'global' | 'local' | 'builtin'
+  valid: boolean
+  error?: string
+}
+
+export type PanelConfiguration = {
+  repositoryIdentity: string
+  panels: PanelInfo[]
+  selectedPanel: string
+  selectionRequired: boolean
+  error?: string
+}
+
+export type FixPromptResponse = { text: string; jobId: number; stale: boolean }
+
 export type ReviewJob = {
   id: number
   job_id?: number

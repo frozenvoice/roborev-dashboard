@@ -270,3 +270,73 @@ func TestRegistryLoadCaseOnlyIdentityFollowsPlatform(t *testing.T) {
 		t.Fatal("case-sensitive platform accepted case-only canonical target change")
 	}
 }
+
+func TestRegistryPanelSelectionPersistsAndIgnoresStaleRepositories(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.json")
+	registry := NewRegistry(fakeInspector{}, configFile)
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetPanelSelection(`E:\repo`, "team-panel"); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg registryConfig
+	data, err := os.ReadFile(configFile)
+	if err != nil || json.Unmarshal(data, &cfg) != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if cfg.PanelSelections == nil {
+		cfg.PanelSelections = make(map[string]string)
+	}
+	cfg.PanelSelections[registryKey(`E:\stale`)] = "stale-panel"
+	data, _ = json.Marshal(cfg)
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := NewRegistry(fakeInspector{}, configFile)
+	reloaded.Load(context.Background())
+	if panel, ok, err := reloaded.PanelSelection(`E:\repo`); err != nil || !ok || panel != "team-panel" {
+		t.Fatalf("selection = %q, %v, %v", panel, ok, err)
+	}
+	if _, _, err := reloaded.PanelSelection(`E:\stale`); err == nil {
+		t.Fatal("stale panel preference became authorization")
+	}
+}
+
+func TestRegistryPanelSelectionPersistenceFailureRollsBack(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), "repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetPanelSelection("repo", "before"); err != nil {
+		t.Fatal(err)
+	}
+	registry.configFile = failingRegistryConfig(t)
+	if err := registry.SetPanelSelection("repo", "after"); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if panel, ok, err := registry.PanelSelection("repo"); err != nil || !ok || panel != "before" {
+		t.Fatalf("rollback selection = %q, %v, %v", panel, ok, err)
+	}
+}
+
+func TestRegistryPanelSelectionUsesPlatformIdentity(t *testing.T) {
+	registered := `E:\Workspace\Repo`
+	alias := strings.ToLower(registered)
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), registered); err != nil {
+		t.Fatal(err)
+	}
+	err := registry.SetPanelSelection(alias, "panel")
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("Windows identity alias rejected: %v", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("case-sensitive platform accepted different path identity")
+	}
+}

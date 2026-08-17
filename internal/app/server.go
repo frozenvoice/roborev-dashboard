@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/webui"
@@ -21,6 +22,7 @@ import (
 type Server struct {
 	RoboRev     roborev.Service
 	Registry    *Registry
+	Panels      roborev.PanelCatalogResolver
 	AllowedHost string
 	csrfToken   string
 	mux         *http.ServeMux
@@ -31,6 +33,14 @@ type RepositoryDTO struct {
 	Identity string `json:"identity"`
 }
 
+type RepositoryPanels struct {
+	RepositoryIdentity string              `json:"repositoryIdentity"`
+	Panels             []roborev.PanelInfo `json:"panels"`
+	SelectedPanel      string              `json:"selectedPanel"`
+	SelectionRequired  bool                `json:"selectionRequired"`
+	Error              string              `json:"error,omitempty"`
+}
+
 func NewServer(service roborev.Service, registry *Registry, allowedHost string) (*Server, error) {
 	if service == nil || registry == nil {
 		return nil, errors.New("service and repository registry are required")
@@ -39,7 +49,7 @@ func NewServer(service roborev.Service, registry *Registry, allowedHost string) 
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
-	s := &Server{RoboRev: service, Registry: registry, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: roborev.NewPanelResolver(), AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -64,7 +74,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
 	s.mux.HandleFunc("GET /api/reviews/{id}/prompt", s.showPrompt)
 	s.mux.HandleFunc("GET /api/reviews/{id}/log", s.showLog)
+	s.mux.HandleFunc("GET /api/reviews/{id}/fix-prompt", s.showFixPrompt)
 	s.mux.HandleFunc("GET /api/panels/{run}/members", s.panelMembers)
+	s.mux.HandleFunc("GET /api/repos/panels", s.repositoryPanels)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
@@ -74,6 +86,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/reviews/{id}/rerun", s.mutation(s.rerunReview))
 	s.mux.HandleFunc("POST /api/repos", s.mutation(s.addRepository))
 	s.mux.HandleFunc("POST /api/repos/select", s.mutation(s.selectRepository))
+	s.mux.HandleFunc("POST /api/repos/panel-selection", s.mutation(s.selectRepositoryPanel))
 	s.mux.HandleFunc("POST /api/daemon/start", s.mutation(s.startDaemon))
 	s.mux.Handle("/", spaHandler())
 }
@@ -224,6 +237,65 @@ func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"text": value})
 }
 
+func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
+	if !ok {
+		return
+	}
+	requestedRepo := r.URL.Query().Get("repo")
+	if strings.TrimSpace(requestedRepo) == "" {
+		writeError(w, http.StatusBadRequest, "repository query is required", "request")
+		return
+	}
+	resolved, err := s.Registry.Resolve(requestedRepo)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return
+	}
+	metadata, err := s.RoboRev.JobMetadata(r.Context(), id)
+	if err != nil || metadata.ID != id {
+		writeError(w, http.StatusNotFound, "job not found", "job")
+		return
+	}
+	if !gitx.SameRepositoryPath(metadata.RepoPath, resolved) {
+		writeError(w, http.StatusForbidden, "job belongs to a different repository", "repository")
+		return
+	}
+	repo, err := s.Registry.Inspect(r.Context(), resolved)
+	if err != nil {
+		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		return
+	}
+	raw, err := s.RoboRev.Show(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "fix-prompt")
+		return
+	}
+	review, err := fixprompt.DecodeShow(raw)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), "fix-prompt")
+		return
+	}
+	if review.JobID != id || !gitx.SameRepositoryPath(review.RepositoryPath, metadata.RepoPath) || !gitx.SameRepositoryPath(review.RepositoryPath, repo.Path) {
+		writeError(w, http.StatusConflict, "RoboRev review identity does not match job metadata", "fix-prompt")
+		return
+	}
+	if review.PanelRole != "" && review.PanelRole != "synthesis" && review.PanelRole != "member" {
+		writeError(w, http.StatusConflict, "RoboRev review has an unsupported panel role", "fix-prompt")
+		return
+	}
+	result, err := fixprompt.Generate(review, fixprompt.RepositoryState{Path: repo.Path, Head: repo.Head})
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error(), "fix-prompt")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Text  string `json:"text"`
+		JobID int64  `json:"jobId"`
+		Stale bool   `json:"stale"`
+	}{Text: result.Text, JobID: id, Stale: result.Stale})
+}
+
 func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
 	raw, err := s.RoboRev.PanelMembers(r.Context(), r.PathValue("run"))
 	if err != nil {
@@ -270,6 +342,10 @@ type reviewBody struct {
 	RepoPath string `json:"repoPath"`
 	Panel    string `json:"panel"`
 }
+type panelSelectionBody struct {
+	RepoPath string `json:"repoPath"`
+	Panel    string `json:"panel"`
+}
 type commentBody struct {
 	Comment string `json:"comment"`
 }
@@ -288,10 +364,20 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
 		return
 	}
-	request := roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: body.Panel}
-	if request.Panel == "" {
-		request.Panel = "dashboard_cross"
+	if strings.TrimSpace(body.Panel) == "" {
+		writeError(w, http.StatusBadRequest, "panel selection is required", "panel")
+		return
 	}
+	catalog, err := s.Panels.Resolve(repo.Path)
+	if err != nil {
+		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
+		return
+	}
+	if _, ok := catalog.Find(body.Panel); !ok {
+		writeError(w, http.StatusBadRequest, "panel is not currently available", "panel")
+		return
+	}
+	request := roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: body.Panel}
 	target, err := s.repositoryDTO(repo)
 	if err != nil {
 		writeError(w, http.StatusConflict, "repository identity is unavailable: "+err.Error(), "repository")
@@ -308,6 +394,96 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 		Receipt json.RawMessage `json:"receipt"`
 		Target  RepositoryDTO   `json:"target"`
 	}{Receipt: receipt, Target: target})
+}
+
+func resolvePanelState(identity string, catalog roborev.PanelCatalog, saved string, hasSaved bool) RepositoryPanels {
+	state := RepositoryPanels{RepositoryIdentity: identity, Panels: catalog.Panels}
+	if hasSaved {
+		if _, ok := catalog.Find(saved); ok {
+			state.SelectedPanel = saved
+			return state
+		}
+	}
+	named := ""
+	namedCount := 0
+	for _, panel := range catalog.Panels {
+		if panel.Valid && panel.Kind == "panel" {
+			named, namedCount = panel.Name, namedCount+1
+		}
+	}
+	switch namedCount {
+	case 0:
+		state.SelectedPanel = roborev.PanelNone
+	case 1:
+		state.SelectedPanel = named
+	default:
+		state.SelectionRequired = true
+	}
+	return state
+}
+
+func (s *Server) panelState(ctx context.Context, path string) (RepositoryPanels, error) {
+	repo, err := s.Registry.Inspect(ctx, path)
+	if err != nil {
+		return RepositoryPanels{}, err
+	}
+	identity, err := s.Registry.Identity(repo.Path)
+	if err != nil {
+		return RepositoryPanels{}, err
+	}
+	catalog, err := s.Panels.Resolve(repo.Path)
+	if err != nil {
+		return RepositoryPanels{RepositoryIdentity: identity, Panels: []roborev.PanelInfo{}, Error: err.Error()}, nil
+	}
+	saved, hasSaved, err := s.Registry.PanelSelection(repo.Path)
+	if err != nil {
+		return RepositoryPanels{}, err
+	}
+	return resolvePanelState(identity, catalog, saved, hasSaved), nil
+}
+
+func (s *Server) repositoryPanels(w http.ResponseWriter, r *http.Request) {
+	path, ok := s.repoForRequest(w, r.URL.Query().Get("repo"))
+	if !ok {
+		return
+	}
+	state, err := s.panelState(r.Context(), path)
+	if err != nil {
+		writeError(w, http.StatusConflict, "repository panels are unavailable: "+err.Error(), "panel")
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (s *Server) selectRepositoryPanel(w http.ResponseWriter, r *http.Request) {
+	var body panelSelectionBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	path, ok := s.repoForRequest(w, body.RepoPath)
+	if !ok {
+		return
+	}
+	repo, err := s.Registry.Inspect(r.Context(), path)
+	if err != nil {
+		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		return
+	}
+	catalog, err := s.Panels.Resolve(repo.Path)
+	if err != nil {
+		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
+		return
+	}
+	if _, exists := catalog.Find(body.Panel); !exists {
+		writeError(w, http.StatusBadRequest, "panel is not currently available", "panel")
+		return
+	}
+	if err := s.Registry.SetPanelSelection(repo.Path, body.Panel); err != nil {
+		writeError(w, http.StatusInternalServerError, "save panel selection: "+err.Error(), "panel")
+		return
+	}
+	identity, _ := s.Registry.Identity(repo.Path)
+	writeJSON(w, http.StatusOK, resolvePanelState(identity, catalog, body.Panel, true))
 }
 
 func (s *Server) comment(w http.ResponseWriter, r *http.Request) {

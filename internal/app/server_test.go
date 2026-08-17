@@ -23,6 +23,20 @@ type mutableInspector struct {
 	repository gitx.Repository
 }
 
+type fakePanelResolver struct {
+	catalog roborev.PanelCatalog
+	err     error
+}
+
+func (f fakePanelResolver) Resolve(string) (roborev.PanelCatalog, error) { return f.catalog, f.err }
+
+func testPanelCatalog() roborev.PanelCatalog {
+	return roborev.PanelCatalog{Panels: []roborev.PanelInfo{
+		{Name: roborev.PanelNone, Kind: "single", Members: []string{}, Origin: "builtin", Valid: true},
+		{Name: "dashboard_cross", Kind: "panel", Members: []string{"reviewer"}, Origin: "local", Valid: true},
+	}}
+}
+
 func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
 	repo := m.repository
 	if repo.Path == "" {
@@ -41,6 +55,9 @@ type fakeService struct {
 	reviewRequest     roborev.ReviewRequest
 	reviewReceipt     json.RawMessage
 	reviewCalls       int
+	showRaw           json.RawMessage
+	showCalls         int
+	metadataID        int64
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -55,9 +72,17 @@ func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetad
 	if path == "" {
 		path = `E:\repo`
 	}
-	return roborev.JobMetadata{ID: id, RepoPath: path}, nil
+	metadataID := id
+	if f.metadataID != 0 {
+		metadataID = f.metadataID
+	}
+	return roborev.JobMetadata{ID: metadataID, RepoPath: path}, nil
 }
 func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
+	f.showCalls++
+	if f.showRaw != nil {
+		return f.showRaw, nil
+	}
 	return json.RawMessage(`{"id":42}`), nil
 }
 func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, error) {
@@ -92,6 +117,7 @@ func setupServer(t *testing.T, service *fakeService) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	server.Panels = fakePanelResolver{catalog: testPanelCatalog()}
 	return server
 }
 
@@ -187,6 +213,7 @@ func TestCreateReviewReturnsFreshPinnedTargetAndReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	server.Panels = fakePanelResolver{catalog: testPanelCatalog()}
 	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(`{"repoPath":"E:\\repo","panel":"dashboard_cross"}`))
 	request.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder := httptest.NewRecorder()

@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 )
@@ -18,16 +20,18 @@ type RepositoryInspector interface {
 }
 
 type registryConfig struct {
-	Recent       []string `json:"recentRepositories"`
-	LastSelected string   `json:"lastSelectedRepository"`
+	Recent          []string          `json:"recentRepositories"`
+	LastSelected    string            `json:"lastSelectedRepository"`
+	PanelSelections map[string]string `json:"panelSelections,omitempty"`
 }
 
 type Registry struct {
-	mu         sync.RWMutex
-	paths      map[string]string
-	selected   string
-	configFile string
-	inspector  RepositoryInspector
+	mu              sync.RWMutex
+	paths           map[string]string
+	selected        string
+	panelSelections map[string]string
+	configFile      string
+	inspector       RepositoryInspector
 }
 
 func registryKey(path string) string {
@@ -35,7 +39,7 @@ func registryKey(path string) string {
 }
 
 func NewRegistry(inspector RepositoryInspector, configFile string) *Registry {
-	return &Registry{paths: make(map[string]string), inspector: inspector, configFile: configFile}
+	return &Registry{paths: make(map[string]string), panelSelections: make(map[string]string), inspector: inspector, configFile: configFile}
 }
 
 func (r *Registry) Load(ctx context.Context) {
@@ -51,11 +55,16 @@ func (r *Registry) Load(ctx context.Context) {
 		return
 	}
 	loaded := make(map[string]string)
+	loadedPanelSelections := make(map[string]string)
 	firstLoaded := ""
 	for _, path := range cfg.Recent {
 		repo, inspectErr := r.inspectExpected(ctx, path)
 		if inspectErr == nil {
-			loaded[registryKey(repo.Path)] = repo.Path
+			key := registryKey(repo.Path)
+			loaded[key] = repo.Path
+			if panel, ok := cfg.PanelSelections[key]; ok {
+				loadedPanelSelections[key] = panel
+			}
 			if firstLoaded == "" {
 				firstLoaded = repo.Path
 			}
@@ -64,6 +73,7 @@ func (r *Registry) Load(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.paths = loaded
+	r.panelSelections = loadedPanelSelections
 	selectedPath := ""
 	if selected, ok := loaded[registryKey(cfg.LastSelected)]; ok {
 		selectedPath = selected
@@ -74,7 +84,7 @@ func (r *Registry) Load(ctx context.Context) {
 	r.selected = selectedPath
 }
 
-func (r *Registry) saveState(pathsByKey map[string]string, selected string) error {
+func (r *Registry) saveState(pathsByKey map[string]string, selected string, panelSelections map[string]string) error {
 	if r.configFile == "" {
 		return nil
 	}
@@ -86,7 +96,7 @@ func (r *Registry) saveState(pathsByKey map[string]string, selected string) erro
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	data, err := json.MarshalIndent(registryConfig{Recent: paths, LastSelected: selected}, "", "  ")
+	data, err := json.MarshalIndent(registryConfig{Recent: paths, LastSelected: selected, PanelSelections: panelSelections}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -112,15 +122,17 @@ func (r *Registry) Add(ctx context.Context, path string) (gitx.Repository, error
 		prospectivePaths[key] = value
 	}
 	prospectivePaths[registryKey(repo.Path)] = repo.Path
+	prospectivePanelSelections := cloneSelections(r.panelSelections)
 	prospectiveSelected := r.selected
 	if prospectiveSelected == "" {
 		prospectiveSelected = repo.Path
 	}
-	if err := r.saveState(prospectivePaths, prospectiveSelected); err != nil {
+	if err := r.saveState(prospectivePaths, prospectiveSelected, prospectivePanelSelections); err != nil {
 		return gitx.Repository{}, err
 	}
 	r.paths = prospectivePaths
 	r.selected = prospectiveSelected
+	r.panelSelections = prospectivePanelSelections
 	return repo, nil
 }
 
@@ -151,11 +163,67 @@ func (r *Registry) Select(path string) error {
 	if !ok {
 		return errors.New("repository is not registered")
 	}
-	if err := r.saveState(r.paths, resolved); err != nil {
+	if err := r.saveState(r.paths, resolved, r.panelSelections); err != nil {
 		return err
 	}
 	r.selected = resolved
 	return nil
+}
+
+func cloneSelections(source map[string]string) map[string]string {
+	cloned := make(map[string]string, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func validPanelPreference(panel string) bool {
+	if strings.TrimSpace(panel) == "" || len(panel) > 128 {
+		return false
+	}
+	for _, char := range panel {
+		if unicode.IsControl(char) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Registry) SetPanelSelection(path, panel string) error {
+	if !validPanelPreference(panel) {
+		return errors.New("invalid panel selection")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if path == "" {
+		path = r.selected
+	}
+	key := registryKey(path)
+	if _, ok := r.paths[key]; !ok {
+		return errors.New("repository is not registered")
+	}
+	prospective := cloneSelections(r.panelSelections)
+	prospective[key] = panel
+	if err := r.saveState(r.paths, r.selected, prospective); err != nil {
+		return err
+	}
+	r.panelSelections = prospective
+	return nil
+}
+
+func (r *Registry) PanelSelection(path string) (string, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if path == "" {
+		path = r.selected
+	}
+	key := registryKey(path)
+	if _, ok := r.paths[key]; !ok {
+		return "", false, errors.New("repository is not registered")
+	}
+	panel, ok := r.panelSelections[key]
+	return panel, ok, nil
 }
 
 // Inspect resolves a path using the registry's platform-aware identity rules
