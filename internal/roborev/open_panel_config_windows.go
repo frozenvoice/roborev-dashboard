@@ -44,24 +44,32 @@ func openPanelConfigNoFollow(path string) (*os.File, error) {
 // namespace used by Win32 APIs. Extended paths are preserved verbatim so this
 // helper never adds a second namespace prefix or changes caller spelling.
 func windowsExtendedPath(path string) (string, error) {
+	return windowsExtendedPathWithAbs(path, filepath.Abs)
+}
+
+func windowsExtendedPathWithAbs(path string, abs func(string) (string, error)) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("panel config path is required")
 	}
 	if strings.HasPrefix(path, `\\?\`) {
 		return path, nil
 	}
-	if strings.HasPrefix(path, `\\.\`) {
+	if isWindowsDeviceNamespace(path) {
 		return "", errors.New("device namespace paths are not supported")
 	}
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
+	absolute := path
+	if !filepath.IsAbs(path) {
+		var err error
+		absolute, err = abs(path)
+		if err != nil {
+			return "", err
+		}
 	}
 	absolute = filepath.Clean(absolute)
 	if strings.HasPrefix(absolute, `\\?\`) {
 		return absolute, nil
 	}
-	if strings.HasPrefix(absolute, `\\.\`) {
+	if isWindowsDeviceNamespace(absolute) {
 		return "", errors.New("device namespace paths are not supported")
 	}
 	if strings.HasPrefix(absolute, `\\`) {
@@ -71,4 +79,9 @@ func windowsExtendedPath(path string) (string, error) {
 		return "", errors.New("panel config path is not absolute")
 	}
 	return `\\?\` + absolute, nil
+}
+
+func isWindowsDeviceNamespace(path string) bool {
+	normalized := strings.ReplaceAll(path, "/", `\`)
+	return strings.HasPrefix(normalized, `\\.\`)
 }
