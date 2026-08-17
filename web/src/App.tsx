@@ -82,26 +82,42 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
   const [tab, setTab] = useState<Tab>('review')
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
+  const [lazyLoaded, setLazyLoaded] = useState<Record<string, boolean>>({})
   const [memberJobs, setMemberJobs] = useState<ReviewJob[]>([])
   const [memberError, setMemberError] = useState('')
   const [loading, setLoading] = useState(false)
   const previousStatus = useRef(job.status)
+  const detailGeneration = useRef(0)
+  const lazyGeneration = useRef<Record<string, number>>({})
   const id = idOf(job)
   const members = useMemo(() => memberJobs.length ? memberJobs : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs, memberJobs])
 
-  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(value => setDetail({ ...value, id, job_id: id })).catch(() => setDetail(null)).finally(() => setLoading(false)) }, [id])
+  useEffect(() => {
+    const generation = ++detailGeneration.current
+    setDetail(null); setLazy({}); setLazyLoaded({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true)
+    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(() => { if (generation === detailGeneration.current) setDetail(null) }).finally(() => { if (generation === detailGeneration.current) setLoading(false) })
+    return () => { detailGeneration.current++ }
+  }, [id])
   useEffect(() => {
     const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
     previousStatus.current = job.status
     if (!wasRunning || isRunning(job)) return
-    request<ReviewJob>(`/api/reviews/${id}`).then(value => setDetail({ ...value, id, job_id: id })).catch(() => undefined)
-    if (lazy.log) request<{ text: string }>(`/api/reviews/${id}/log`).then(value => setLazy(old => ({ ...old, log: value.text }))).catch(() => undefined)
-  }, [id, job.status, lazy.log])
+    const detailRequest = ++detailGeneration.current
+    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (detailRequest === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(() => undefined)
+    if (lazyLoaded.log) {
+      const logRequest = (lazyGeneration.current.log ?? 0) + 1
+      lazyGeneration.current.log = logRequest
+      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) setLazy(old => ({ ...old, log: value.text })) }).catch(() => undefined)
+    }
+  }, [id, job.status, lazyLoaded.log])
   useEffect(() => {
-    if (!['prompt', 'log'].includes(tab) || lazy[tab]) return
+    if (!['prompt', 'log'].includes(tab) || lazyLoaded[tab]) return
+    const generation = (lazyGeneration.current[tab] ?? 0) + 1
+    lazyGeneration.current[tab] = generation
+    setLazyLoaded(old => ({ ...old, [tab]: true }))
     setLoading(true)
-    request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => setLazy(old => ({ ...old, [tab]: value.text }))).finally(() => setLoading(false))
-  }, [id, lazy, tab])
+    request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => { if (generation === lazyGeneration.current[tab]) setLazy(old => ({ ...old, [tab]: value.text })) }).finally(() => { if (generation === lazyGeneration.current[tab]) setLoading(false) })
+  }, [id, lazyLoaded, tab])
   useEffect(() => {
     if (tab !== 'members' || !job.panel_run_uuid) return
     let cancelled = false

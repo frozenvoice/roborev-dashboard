@@ -175,17 +175,16 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	}
 	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
 	if err != nil {
-		c.versionMu.Lock()
-		c.versionErr = err
-		c.versionErrAt = time.Now()
-		c.versionMu.Unlock()
+		c.cacheVersionError(ctx, err)
 		return "", err
 	}
 	var version struct {
 		Version string `json:"version"`
 	}
 	if json.Unmarshal([]byte(result.Stdout), &version) != nil || version.Version == "" {
-		return "", errors.New("invalid roborev version response")
+		err = errors.New("invalid roborev version response")
+		c.cacheVersionError(ctx, err)
+		return "", err
 	}
 	c.versionMu.Lock()
 	c.version = version.Version
@@ -194,6 +193,16 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	c.versionErrAt = time.Time{}
 	c.versionMu.Unlock()
 	return version.Version, nil
+}
+
+func (c *Client) cacheVersionError(ctx context.Context, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	c.versionMu.Lock()
+	c.versionErr = err
+	c.versionErrAt = time.Now()
+	c.versionMu.Unlock()
 }
 
 func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
