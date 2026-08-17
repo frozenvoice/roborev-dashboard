@@ -1,6 +1,6 @@
-import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, type Bootstrap, type Repository, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, type Bootstrap, type Installation, type Repository, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
@@ -52,7 +52,8 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: 
 
 function StatusPill({ job }: { job: ReviewJob }) {
   const status = statusOf(job)
-  return <span className={`status status-${status}`}><span className="status-dot" />{statusLabel(status)}</span>
+  const visualStatus = status === 'p' ? 'pass' : status === 'f' ? 'finding' : status
+  return <span className={`status status-${visualStatus}`}><span className="status-dot" />{statusLabel(status)}</span>
 }
 
 function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
@@ -77,28 +78,48 @@ export function CommentBox({ jobId, mutate, busy }: { jobId: number; mutate: (pa
   </section>
 }
 
-function ReviewDetail({ job, jobs, close, mutate, busy }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
+function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean; canRerun: boolean; canLoadMembers: boolean }) {
   const [tab, setTab] = useState<Tab>('review')
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
   const [memberJobs, setMemberJobs] = useState<ReviewJob[]>([])
+  const [memberError, setMemberError] = useState('')
   const [loading, setLoading] = useState(false)
   const id = idOf(job)
   const members = useMemo(() => memberJobs.length ? memberJobs : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs, memberJobs])
 
-  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(setDetail).catch(() => setDetail(job)).finally(() => setLoading(false)) }, [id])
+  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(value => setDetail({ ...job, ...value, id, job_id: id })).catch(() => setDetail(job)).finally(() => setLoading(false)) }, [id])
   useEffect(() => {
     if (!['prompt', 'log'].includes(tab) || lazy[tab]) return
     setLoading(true)
     request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => setLazy(old => ({ ...old, [tab]: value.text }))).finally(() => setLoading(false))
   }, [id, lazy, tab])
   useEffect(() => {
-    if (tab !== 'members' || !job.panel_run_uuid || memberJobs.length) return
-    setLoading(true)
-    request<unknown>(`/api/panels/${encodeURIComponent(job.panel_run_uuid)}/members`)
-      .then(value => setMemberJobs(jobsFromPayload(value).filter(member => member.panel_role === 'member').sort((a, b) => (a.panel_member_index ?? 0) - (b.panel_member_index ?? 0))))
-      .finally(() => setLoading(false))
-  }, [job.panel_run_uuid, memberJobs.length, tab])
+    if (tab !== 'members' || !job.panel_run_uuid) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let first = true
+    const loadMembers = async () => {
+      if (first) setLoading(true)
+      try {
+        const value = await request<unknown>(`/api/panels/${encodeURIComponent(job.panel_run_uuid!)}/members`)
+        if (cancelled) return
+        const next = jobsFromPayload(value).filter(member => member.panel_role === 'member').sort((a, b) => (a.panel_member_index ?? 0) - (b.panel_member_index ?? 0))
+        setMemberJobs(next)
+        setMemberError('')
+        if (isRunning(job) || next.some(isRunning)) timer = setTimeout(loadMembers, 4000)
+      } catch (error) {
+        if (cancelled) return
+        setMemberError((error as Error).message)
+        if (isRunning(job)) timer = setTimeout(loadMembers, 4000)
+      } finally {
+        if (!cancelled && first) setLoading(false)
+        first = false
+      }
+    }
+    loadMembers()
+    return () => { cancelled = true; if (timer) clearTimeout(timer) }
+  }, [job.panel_run_uuid, job.status, tab])
 
   const current = detail ?? job
   const text = outputOf(current)
@@ -107,12 +128,12 @@ function ReviewDetail({ job, jobs, close, mutate, busy }: { job: ReviewJob; jobs
     <header className="detail-header"><div><span className="eyebrow">Review #{id}</span><h2>{current.commit_subject || current.subject || current.git_ref || current.commit_sha || 'Review detail'}</h2></div><button className="icon-button" aria-label="Close detail" onClick={close}><X /></button></header>
     <div className="detail-summary"><StatusPill job={current} /><span><Bot size={14} />{current.panel_name || current.agent || 'default'}</span><span><Clock3 size={14} />{elapsed(current)}</span></div>
     <nav className="tabs" aria-label="Review detail tabs">
-      {(['review', 'members', 'log', 'prompt', 'comments', 'metadata'] as Tab[]).map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'members' ? 'Panel members' : item[0].toUpperCase() + item.slice(1)}</button>)}
+      {(['review', ...(canLoadMembers ? ['members' as const] : []), 'log', 'prompt', 'comments', 'metadata'] as Tab[]).map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'members' ? 'Panel members' : item[0].toUpperCase() + item.slice(1)}</button>)}
     </nav>
     <div className="detail-content">
       {loading && <div className="skeleton tall" />}
       {!loading && tab === 'review' && <><div className="text-toolbar"><CopyButton value={text} /><span>{text.length.toLocaleString()} chars</span></div>{text ? <Markdown>{text}</Markdown> : <Empty title="No review output yet" body="Running reviews update automatically." />}</>}
-      {!loading && tab === 'members' && <div className="member-list">{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || `Member #${idOf(member)}`}</strong><span>{member.model || 'default model'}</span><span>{elapsed(member)}</span></article>) : <Empty title="No member jobs" body="This is a single-agent review or member metadata is unavailable." />}</div>}
+      {!loading && tab === 'members' && <div className="member-list">{memberError && <p role="alert" className="hint">Panel members could not be refreshed: {memberError}</p>}{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || `Member #${idOf(member)}`}</strong><span>{member.model || 'default model'}</span><span>{elapsed(member)}</span></article>) : !memberError && <Empty title="No member jobs" body="This is a single-agent review or member metadata is unavailable." />}</div>}
       {!loading && (tab === 'log' || tab === 'prompt') && <><div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || `No ${tab} is available.`}</pre></>}
       {tab === 'comments' && <CommentBox jobId={id} mutate={mutate} busy={busy} />}
       {tab === 'metadata' && <><div className="text-toolbar"><CopyButton value={JSON.stringify(current, null, 2)} /></div><pre className="long-text">{JSON.stringify(current, null, 2)}</pre></>}
@@ -121,7 +142,7 @@ function ReviewDetail({ job, jobs, close, mutate, busy }: { job: ReviewJob; jobs
       {isRunning(current) && <button className="button danger" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/cancel`)}><CircleStop size={16} />Cancel</button>}
       {terminal && !isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/close`)}><Check size={16} />Close</button>}
       {terminal && isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/reopen`)}><RotateCcw size={16} />Reopen</button>}
-      {terminal && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm('Rerun the same frozen target and resolved configuration? This does not review the current HEAD.')) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />Rerun same target/config</button>}
+      {terminal && canRerun && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm(`Rerun the same frozen target and resolved configuration?\n\nActual RoboRev transport:\nPOST /api/job/rerun\n{"job_id":${id}}\n\nThis does not review the current HEAD.`)) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />Rerun same target/config</button>}
     </footer>
   </aside>
 }
@@ -130,7 +151,7 @@ function Empty({ title, body }: { title: string; body: string }) { return <div c
 
 function ReviewList({ jobs, selected, onSelect }: { jobs: ReviewJob[]; selected?: number; onSelect: (job: ReviewJob) => void }) {
   const [query, setQuery] = useState('')
-  const filtered = jobs.filter(job => JSON.stringify([job.id, job.git_ref, job.subject, job.agent, job.panel_name, job.status, job.verdict]).toLowerCase().includes(query.toLowerCase()))
+  const filtered = jobs.filter(job => JSON.stringify([job.id, job.git_ref, job.subject, job.commit_subject, job.agent, job.panel_name, job.status, job.verdict, statusLabel(statusOf(job))]).toLowerCase().includes(query.toLowerCase()))
   return <section className="review-section">
     <header className="section-heading"><div><span className="eyebrow">Review operations</span><h1>Review queue</h1><p>Live RoboRev jobs for the selected repository. Heavy content loads on demand.</p></div><div className="search"><Search size={16} /><input aria-label="Search reviews" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search jobs, agents, refs…" /></div></header>
     <div className="table-wrap"><table><thead><tr><th>Status</th><th>Target</th><th>Reviewer</th><th>Branch</th><th>Elapsed</th><th>State</th><th /></tr></thead><tbody>
@@ -148,11 +169,20 @@ export function App() {
   const [loading, setLoading] = useState(true)
   const [menu, setMenu] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
+	const reviewGeneration = useRef(0)
 
   const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
   const loadReviews = useCallback(async (repo?: string) => {
-    if (!repo) return
-    try { setJobs(jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))) } catch (error) { if (!(error instanceof APIError && error.message.includes('daemon not running'))) toast('error', (error as Error).message) }
+		if (!repo) return []
+		const generation = ++reviewGeneration.current
+		try {
+			const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))
+			if (generation === reviewGeneration.current) setJobs(next)
+			return generation === reviewGeneration.current ? next : []
+		} catch (error) {
+			if (!(error instanceof APIError && error.message.includes('daemon not running'))) toast('error', (error as Error).message)
+			return []
+		}
   }, [toast])
   const loadBootstrap = useCallback(async () => {
     const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data); await loadReviews(data.selectedRepository)
@@ -161,17 +191,17 @@ export function App() {
   useEffect(() => { loadBootstrap().catch(error => toast('error', (error as Error).message)).finally(() => setLoading(false)) }, [loadBootstrap, toast])
   useEffect(() => { const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000); return () => clearInterval(timer) }, [bootstrap?.selectedRepository, loadReviews])
   useEffect(() => {
-    const timer = setInterval(() => loadBootstrap().catch(error => toast('error', (error as Error).message)), 10_000)
+    const timer = setInterval(() => request<Installation>('/api/runtime').then(runtime => setBootstrap(current => current ? { ...current, roborev: runtime } : current)).catch(error => toast('error', (error as Error).message)), 10_000)
     return () => clearInterval(timer)
-  }, [loadBootstrap, toast])
+  }, [toast])
 
   const mutate = useCallback(async (path: string, body?: unknown) => {
     setBusy(true)
     try {
       await request(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
       toast('success', path.includes('comment-close') ? 'Comment saved and review closed.' : 'RoboRev state updated.')
-      await loadReviews(bootstrap?.selectedRepository)
-      if (selected) { try { setSelected(await request<ReviewJob>(`/api/reviews/${idOf(selected)}`)) } catch { /* list remains authoritative */ } }
+			const latest = await loadReviews(bootstrap?.selectedRepository)
+			if (selected) setSelected(latest.find(job => idOf(job) === idOf(selected)) ?? selected)
       await loadBootstrap()
     } catch (error) {
       const apiError = error as APIError
@@ -190,13 +220,14 @@ export function App() {
   }
   const switchRepo = async (path: string) => { await mutate('/api/repos/select', { repoPath: path }); setSelected(null) }
 
+	const reviewSupported = Boolean(bootstrap?.roborev.capabilities.reviewEnqueueApi)
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev.version || 'Setup required'}</span></div></div></aside>
-    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={bootstrap?.selectedRepository || ''} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.path} key={item.path}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || !repo || !bootstrap?.roborev.installed || !daemonRunning} title={bootstrap?.reviewHeadCommand ? `${bootstrap.reviewHeadCommand.executable} ${bootstrap.reviewHeadCommand.args.join(' ')}` : ''} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
-      {!loading && bootstrap && (!bootstrap.roborev.installed || !daemonRunning) && <section className="setup-banner"><Server /><div><strong>{bootstrap.roborev.installed ? 'RoboRev daemon is stopped' : 'RoboRev is not installed'}</strong><p>{bootstrap.roborev.error || (bootstrap.roborev.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev.installed && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
+    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={bootstrap?.selectedRepository || ''} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.path} key={item.path}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || !repo || !bootstrap?.roborev.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
+      {!loading && bootstrap && (!bootstrap.roborev.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
       {loading ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : activeNav === 'Reviews' || activeNav === 'Overview' ? <ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
-    {selected && <ReviewDetail job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy} />}
+    {selected && <ReviewDetail key={`${idOf(selected)}-${selected.status}-${selected.closed}-${selected.addressed}`} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy} canRerun={Boolean(bootstrap?.roborev.capabilities.frozenRerunApi)} canLoadMembers={Boolean(bootstrap?.roborev.capabilities.panelMembersApi && selected.panel_run_uuid)} />}
     <div className="toasts" aria-live="polite">{toasts.map(item => <div key={item.id} className={`toast ${item.kind}`}>{item.kind === 'success' ? <Check /> : <XCircle />}{item.message}</div>)}</div>
   </div>
 }

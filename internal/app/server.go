@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -53,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
+	s.mux.HandleFunc("GET /api/runtime", s.runtime)
 	s.mux.HandleFunc("GET /api/reviews", s.listReviews)
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
 	s.mux.HandleFunc("GET /api/reviews/{id}/prompt", s.showPrompt)
@@ -69,6 +71,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos/select", s.mutation(s.selectRepository))
 	s.mux.HandleFunc("POST /api/daemon/start", s.mutation(s.startDaemon))
 	s.mux.Handle("/", spaHandler())
+}
+
+func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.RoboRev.Installation(r.Context()))
 }
 
 func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
@@ -169,6 +175,9 @@ func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
 	raw, err := s.RoboRev.Show(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "detail")
@@ -181,6 +190,9 @@ func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
 	value, err := s.RoboRev.Prompt(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "prompt")
@@ -191,6 +203,9 @@ func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
+		return
+	}
+	if !s.authorizeJob(w, r, id) {
 		return
 	}
 	value, err := s.RoboRev.Log(r.Context(), id)
@@ -207,7 +222,37 @@ func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
 		return
 	}
+	var response struct {
+		Jobs []roborev.JobMetadata `json:"jobs"`
+	}
+	if json.Unmarshal(raw, &response) != nil || len(response.Jobs) == 0 {
+		writeError(w, http.StatusNotFound, "panel run not found", "panel-members")
+		return
+	}
+	for _, job := range response.Jobs {
+		if !s.Registry.Contains(job.RepoPath) {
+			writeError(w, http.StatusForbidden, "panel belongs to an unregistered repository", "repository")
+			return
+		}
+	}
 	writeRawJSON(w, http.StatusOK, raw)
+}
+
+func (s *Server) authorizeJob(w http.ResponseWriter, r *http.Request, id int64) bool {
+	job, err := s.RoboRev.JobMetadata(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job not found", "job")
+		return false
+	}
+	if !s.Registry.Contains(job.RepoPath) {
+		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
+		return false
+	}
+	return true
+}
+
+func mutationContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 30*time.Second)
 }
 
 type repoBody struct {
@@ -238,7 +283,9 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 			if request.Panel == "" {
 				request.Panel = "dashboard_cross"
 			}
-			raw, err := s.RoboRev.Review(r.Context(), request)
+			ctx, cancel := mutationContext()
+			defer cancel()
+			raw, err := s.RoboRev.Review(ctx, request)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, err.Error(), "enqueue")
 				return
@@ -260,7 +307,12 @@ func (s *Server) comment(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if err := s.RoboRev.Comment(r.Context(), id, body.Comment); err != nil {
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	if err := s.RoboRev.Comment(ctx, id, body.Comment); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "comment")
 		return
 	}
@@ -276,11 +328,16 @@ func (s *Server) commentClose(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if err := s.RoboRev.Comment(r.Context(), id, body.Comment); err != nil {
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	if err := s.RoboRev.Comment(ctx, id, body.Comment); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "comment")
 		return
 	}
-	if err := s.RoboRev.Close(r.Context(), id, false); err != nil {
+	if err := s.RoboRev.Close(ctx, id, false); err != nil {
 		writeError(w, http.StatusBadGateway, "comment succeeded but close failed: "+err.Error(), "close")
 		return
 	}
@@ -294,7 +351,12 @@ func (s *Server) closeOrReopen(w http.ResponseWriter, r *http.Request, reopen bo
 	if !ok {
 		return
 	}
-	if err := s.RoboRev.Close(r.Context(), id, reopen); err != nil {
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	if err := s.RoboRev.Close(ctx, id, reopen); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "close")
 		return
 	}
@@ -305,7 +367,12 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.RoboRev.Cancel(r.Context(), id); err != nil {
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	if err := s.RoboRev.Cancel(ctx, id); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "cancel")
 		return
 	}
@@ -316,7 +383,12 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.RoboRev.Rerun(r.Context(), id); err != nil {
+	if !s.authorizeJob(w, r, id) {
+		return
+	}
+	ctx, cancel := mutationContext()
+	defer cancel()
+	if err := s.RoboRev.Rerun(ctx, id); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "rerun")
 		return
 	}
@@ -347,7 +419,8 @@ func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 func (s *Server) startDaemon(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := mutationContext()
+	defer cancel()
 	if err := s.RoboRev.StartDaemon(ctx); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "daemon")
 		return

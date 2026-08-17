@@ -13,11 +13,12 @@ export type Installation = {
   installed: boolean
   binary?: string
   version?: string
-  status?: { running?: boolean; queued?: number; active?: number; [key: string]: unknown }
+  status?: { running?: boolean; known?: boolean; queued?: number; active?: number; [key: string]: unknown }
   error?: string
   capabilities: {
     reviewEnqueueApi: boolean
     frozenRerunApi: boolean
+    jobListApi: boolean
     panelReview: boolean
     panelMembersApi: boolean
     promptLazyLoad: boolean

@@ -20,15 +20,26 @@ func (fakeInspector) Inspect(_ context.Context, path string) (gitx.Repository, e
 }
 
 type fakeService struct {
-	commentErr error
-	closeCalls int
+	commentErr        error
+	closeCalls        int
+	repoPath          string
+	cancelCalls       int
+	installationCalls int
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
-	return roborev.Installation{Installed: true, Version: "v0.64.0"}
+	f.installationCalls++
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Status: json.RawMessage(`{"running":true,"known":true}`)}
 }
 func (f *fakeService) List(context.Context, string, int) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
+}
+func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
+	path := f.repoPath
+	if path == "" {
+		path = `E:\repo`
+	}
+	return roborev.JobMetadata{ID: id, RepoPath: path}, nil
 }
 func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
 	return json.RawMessage(`{"id":42}`), nil
@@ -44,7 +55,7 @@ func (f *fakeService) Review(context.Context, roborev.ReviewRequest) (json.RawMe
 func (f *fakeService) Rerun(context.Context, int64) error           { return nil }
 func (f *fakeService) Comment(context.Context, int64, string) error { return f.commentErr }
 func (f *fakeService) Close(context.Context, int64, bool) error     { f.closeCalls++; return nil }
-func (f *fakeService) Cancel(context.Context, int64) error          { return nil }
+func (f *fakeService) Cancel(context.Context, int64) error          { f.cancelCalls++; return nil }
 func (f *fakeService) StartDaemon(context.Context) error            { return nil }
 func (f *fakeService) ReviewCommand(request roborev.ReviewRequest) (roborev.CommandPreview, error) {
 	return roborev.ReviewPreview("roborev", request)
@@ -85,5 +96,37 @@ func TestMutationRequiresCSRF(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", recorder.Code)
+	}
+}
+
+func TestForeignRepositoryJobIsRejected(t *testing.T) {
+	service := &fakeService{repoPath: `E:\foreign-repo`}
+	server := setupServer(t, service)
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews/42/cancel", nil)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.cancelCalls != 0 {
+		t.Fatal("foreign job was canceled")
+	}
+}
+
+func TestRuntimeHealthDoesNotBootstrapRepositories(t *testing.T) {
+	service := &fakeService{}
+	server := setupServer(t, service)
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.installationCalls != 1 {
+		t.Fatalf("expected one lightweight installation check, got %d", service.installationCalls)
+	}
+	if !strings.Contains(recorder.Body.String(), `"version":"v0.64.0"`) {
+		t.Fatalf("runtime response missing version: %s", recorder.Body.String())
 	}
 }

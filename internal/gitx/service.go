@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -100,13 +101,7 @@ func (s *Service) Inspect(ctx context.Context, path string) (Repository, error) 
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	_, configErr := filepath.Abs(filepath.Join(root, ".roborev.toml"))
-	hasConfig := configErr == nil
-	if hasConfig {
-		if _, err := s.command(ctx, root, "ls-files", "--error-unmatch", ".roborev.toml"); err != nil {
-			// Untracked config still exists and is relevant; status contains it.
-			hasConfig = strings.Contains(status, ".roborev.toml")
-		}
-	}
+	configInfo, configErr := os.Stat(filepath.Join(root, ".roborev.toml"))
+	hasConfig := configErr == nil && !configInfo.IsDir()
 	return Repository{Name: filepath.Base(root), Path: root, Branch: branch, Head: head, HeadShort: short, CommitSubject: subject, Dirty: status != "", HasConfig: hasConfig}, nil
 }

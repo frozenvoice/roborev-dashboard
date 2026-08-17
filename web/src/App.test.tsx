@@ -5,10 +5,10 @@ import { App, CommentBox } from './App'
 
 const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', repositories: [{ name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
-  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, panelReview: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
+  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, panelReview: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
   reviewHeadCommand: { executable: 'roborev.exe', args: ['review', 'abcdef123456', '--panel', 'dashboard_cross'] },
 }
-const jobs = [{ id: 42, git_ref: 'abcdef123456', branch: 'main', status: 'done', verdict: 'finding', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', review: { output: '# Finding\nActionable issue' } }]
+const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
 
@@ -26,6 +26,7 @@ describe('App review workflow', () => {
     render(<App />)
     expect(await screen.findByRole('button', { name: 'Review HEAD' })).toBeEnabled()
     await userEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: /Rerun same target\/config/ })).toBeInTheDocument()
   })
 
@@ -33,6 +34,18 @@ describe('App review workflow', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)
     expect((await screen.findAllByText('Finding')).length).toBeGreaterThan(0)
+  })
+
+  it('searches real commit subjects and normalized verdict labels and renders elapsed timestamps', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
+    render(<App />)
+    const search = await screen.findByRole('textbox', { name: 'Search reviews' })
+    expect(await screen.findByText('25s')).toBeInTheDocument()
+    await userEvent.type(search, 'Initial dashboard')
+    expect(screen.getByText(/#42/)).toBeInTheDocument()
+    await userEvent.clear(search)
+    await userEvent.type(search, 'Finding')
+    expect(screen.getByText(/#42/)).toBeInTheDocument()
   })
 
   it('lazy-loads and renders panel member agents', async () => {
@@ -55,6 +68,45 @@ describe('App review workflow', () => {
     expect(screen.getByText('grok')).toBeInTheDocument()
     expect(screen.getByText('codex').closest('article')).toHaveTextContent('Finding')
     expect(screen.getByText('claude-code').closest('article')).toHaveTextContent('Pass')
+  })
+
+  it('renders panel member refresh errors inline', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.includes('/api/panels/')) return response({ error: 'daemon unavailable' }, 502)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Panel members' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('daemon unavailable')
+  })
+
+  it('keeps the list job ID after loading a real show response', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (init?.method === 'POST') { calls.push(path); return response({ success: true }) }
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response({ id: 7, job_id: 42, output: '# Result', closed: false, verdict: 'F' })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(calls).toContain('/api/reviews/42/close'))
+  })
+
+  it('disables Review HEAD when the enqueue capability is unavailable', async () => {
+    const unsupported = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, reviewEnqueueApi: false } } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(unsupported) : response([])))
+    render(<App />)
+    expect(await screen.findByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+    expect(await screen.findByText('RoboRev upgrade required')).toBeInTheDocument()
   })
 })
 

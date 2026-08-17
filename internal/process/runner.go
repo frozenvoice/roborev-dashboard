@@ -20,6 +20,9 @@ type Command struct {
 	Dir         string
 	Timeout     time.Duration
 	OutputLimit int
+	// AllowDetachedChildren is reserved for lifecycle commands such as
+	// `roborev daemon start` whose purpose is to leave a child process running.
+	AllowDetachedChildren bool
 }
 
 type Result struct {
@@ -95,7 +98,42 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	cmd.Stderr = io.Writer(stderr)
 
 	started := time.Now()
-	err := cmd.Run()
+	cmd.WaitDelay = 2 * time.Second
+	var treeMu sync.Mutex
+	var tree processTree
+	cmd.Cancel = func() error {
+		treeMu.Lock()
+		defer treeMu.Unlock()
+		if tree != nil {
+			return tree.Terminate()
+		}
+		if cmd.Process != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	err := cmd.Start()
+	if err == nil && !command.AllowDetachedChildren {
+		attached, attachErr := attachProcessTree(cmd)
+		if attachErr != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			err = fmt.Errorf("attach process tree: %w", attachErr)
+		} else {
+			treeMu.Lock()
+			tree = attached
+			treeMu.Unlock()
+		}
+	}
+	if err == nil {
+		err = cmd.Wait()
+	}
+	treeMu.Lock()
+	if tree != nil {
+		_ = tree.Close()
+		tree = nil
+	}
+	treeMu.Unlock()
 	result := Result{Duration: time.Since(started), ExitCode: 0}
 	result.Stdout, result.StdoutTruncated = stdout.snapshot()
 	result.Stderr, result.StderrTruncated = stderr.snapshot()
@@ -113,4 +151,9 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	}
 	result.ExitCode = -1
 	return result, fmt.Errorf("start process: %w", err)
+}
+
+type processTree interface {
+	Terminate() error
+	Close() error
 }

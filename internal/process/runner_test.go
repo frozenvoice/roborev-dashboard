@@ -3,6 +3,7 @@ package process
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -41,5 +42,27 @@ func TestExecRunnerHonorsTimeout(t *testing.T) {
 	}
 	if time.Since(started) > 3*time.Second {
 		t.Fatal("timed out process was not terminated promptly")
+	}
+}
+
+func TestExecRunnerTimeoutKillsWindowsDescendants(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows process-tree test")
+	}
+	temp := t.TempDir()
+	marker := filepath.Join(temp, "child-survived.txt")
+	childScript := filepath.Join(temp, "delayed-child.cmd")
+	script := "@echo off\r\nping 127.0.0.1 -n 4 >nul\r\necho child>\"" + marker + "\"\r\n"
+	if err := os.WriteFile(childScript, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parentCommand := "Start-Sleep -Milliseconds 300; Start-Process -WindowStyle Hidden -FilePath '" + childScript + "'; Start-Sleep -Seconds 10"
+	_, err := (ExecRunner{}).Run(context.Background(), Command{Executable: "powershell.exe", Args: []string{"-NoProfile", "-Command", parentCommand}, Timeout: time.Second})
+	if err == nil {
+		t.Fatal("expected parent timeout")
+	}
+	time.Sleep(4 * time.Second)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("descendant survived cancellation: %v", statErr)
 	}
 }

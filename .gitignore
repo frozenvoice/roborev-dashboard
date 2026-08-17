@@ -1,9 +1,10 @@
 .tmp/
 node_modules/
 web/node_modules/
-internal/webui/dist/*
-!internal/webui/dist/.keep
 dist/
+!internal/webui/dist/
+internal/webui/dist/*
+!internal/webui/dist/placeholder.txt
 coverage/
 *.log
 *.tsbuildinfo

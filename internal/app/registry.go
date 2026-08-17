@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -54,11 +55,24 @@ func (r *Registry) Load(ctx context.Context) {
 	if json.Unmarshal(data, &cfg) != nil {
 		return
 	}
+	loaded := make(map[string]string)
 	for _, path := range cfg.Recent {
-		_, _ = r.Add(ctx, path)
+		repo, inspectErr := r.inspector.Inspect(ctx, path)
+		if inspectErr == nil {
+			loaded[registryKey(repo.Path)] = repo.Path
+		}
 	}
-	if r.Contains(cfg.LastSelected) {
-		r.selected = r.paths[registryKey(cfg.LastSelected)]
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.paths = loaded
+	if selected, ok := loaded[registryKey(cfg.LastSelected)]; ok {
+		r.selected = selected
+	}
+	if r.selected == "" {
+		for _, path := range loaded {
+			r.selected = path
+			break
+		}
 	}
 }
 
@@ -73,6 +87,7 @@ func (r *Registry) saveLocked() error {
 	for _, path := range r.paths {
 		paths = append(paths, path)
 	}
+	sort.Strings(paths)
 	data, err := json.MarshalIndent(registryConfig{Recent: paths, LastSelected: r.selected}, "", "  ")
 	if err != nil {
 		return err

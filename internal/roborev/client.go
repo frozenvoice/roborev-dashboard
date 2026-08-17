@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
@@ -23,6 +24,7 @@ import (
 type Service interface {
 	Installation(context.Context) Installation
 	List(context.Context, string, int) (json.RawMessage, error)
+	JobMetadata(context.Context, int64) (JobMetadata, error)
 	Show(context.Context, int64) (json.RawMessage, error)
 	PanelMembers(context.Context, string) (json.RawMessage, error)
 	Prompt(context.Context, int64) (string, error)
@@ -41,6 +43,8 @@ type Client struct {
 	Runner    proc.Runner
 	DaemonURL string
 	HTTP      *http.Client
+	versionMu sync.RWMutex
+	version   string
 }
 
 func ResolveBinary(override string) (string, error) {
@@ -114,31 +118,51 @@ func capabilities(version string) Capabilities {
 		minor, _ = strconv.Atoi(parts[1])
 	}
 	v64 := len(parts) > 0 && parts[0] == "0" && minor >= 64
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, PanelReview: v64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, PanelReview: v64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
 	if c.Binary == "" {
 		return Installation{Installed: false, Error: "roborev executable not found", Capabilities: Capabilities{}}
 	}
-	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
+	versionValue, err := c.detectVersion(ctx)
 	if err != nil {
 		return Installation{Installed: false, Binary: c.Binary, Error: err.Error()}
+	}
+	installation := Installation{Installed: true, Binary: c.Binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`)}
+	if installation.Capabilities.ReviewEnqueueAPI {
+		if health, healthErr := c.health(ctx); healthErr == nil {
+			status, _ := json.Marshal(map[string]any{"running": true, "known": true, "health": health})
+			installation.Status = status
+		} else {
+			installation.Status = json.RawMessage(`{"running":false,"known":true}`)
+			installation.Error = "RoboRev daemon health check failed: " + healthErr.Error()
+		}
+	}
+	return installation
+}
+
+func (c *Client) detectVersion(ctx context.Context) (string, error) {
+	c.versionMu.RLock()
+	value := c.version
+	c.versionMu.RUnlock()
+	if value != "" {
+		return value, nil
+	}
+	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
+	if err != nil {
+		return "", err
 	}
 	var version struct {
 		Version string `json:"version"`
 	}
 	if json.Unmarshal([]byte(result.Stdout), &version) != nil || version.Version == "" {
-		return Installation{Installed: false, Binary: c.Binary, Error: "invalid roborev version response"}
+		return "", errors.New("invalid roborev version response")
 	}
-	installation := Installation{Installed: true, Binary: c.Binary, Version: version.Version, Capabilities: capabilities(version.Version), Status: json.RawMessage(`{"running":false}`)}
-	if installation.Capabilities.ReviewEnqueueAPI {
-		if health, healthErr := c.health(ctx); healthErr == nil {
-			status, _ := json.Marshal(map[string]any{"running": true, "health": health})
-			installation.Status = status
-		}
-	}
-	return installation
+	c.versionMu.Lock()
+	c.version = version.Version
+	c.versionMu.Unlock()
+	return version.Version, nil
 }
 
 func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
@@ -162,11 +186,46 @@ func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMessage, error) {
-	result, err := c.run(ctx, ListArgs(repo, limit), 10*time.Second, 8<<20)
-	if err != nil {
-		return nil, err
+	version, err := c.detectVersion(ctx)
+	if err != nil || !capabilities(version).JobListAPI {
+		return nil, fmt.Errorf("RoboRev %s does not support metadata-only job listing", version)
 	}
-	return decodeRaw(result.Stdout)
+	if limit < 1 || limit > 200 {
+		limit = 100
+	}
+	query := url.Values{}
+	query.Set("repo", repo)
+	query.Set("limit", strconv.Itoa(limit))
+	query.Set("omit_prompt", "true")
+	return c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 8<<20)
+}
+
+func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error) {
+	if err := validateJobID(id); err != nil {
+		return JobMetadata{}, err
+	}
+	version, err := c.detectVersion(ctx)
+	if err != nil || !capabilities(version).JobListAPI {
+		return JobMetadata{}, fmt.Errorf("RoboRev %s does not support metadata-only job lookup", version)
+	}
+	query := url.Values{}
+	query.Set("id", strconv.FormatInt(id, 10))
+	query.Set("limit", "1")
+	query.Set("omit_prompt", "true")
+	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 1<<20)
+	if err != nil {
+		return JobMetadata{}, err
+	}
+	var response struct {
+		Jobs []JobMetadata `json:"jobs"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return JobMetadata{}, errors.New("invalid job metadata response")
+	}
+	if len(response.Jobs) != 1 || response.Jobs[0].ID != id {
+		return JobMetadata{}, errors.New("job not found")
+	}
+	return response.Jobs[0], nil
 }
 
 func (c *Client) Show(ctx context.Context, id int64) (json.RawMessage, error) {
@@ -190,12 +249,15 @@ func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMess
 			return nil, errors.New("invalid panel run UUID")
 		}
 	}
-	installation := c.Installation(ctx)
-	if !installation.Installed || !installation.Capabilities.PanelMembersAPI {
-		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", installation.Version)
+	version, err := c.detectVersion(ctx)
+	if err != nil || !capabilities(version).PanelMembersAPI {
+		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", version)
 	}
-	endpoint := c.DaemonURL + "/api/jobs?panel_run=" + url.QueryEscape(runUUID) + "&limit=0&omit_prompt=true"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	return c.getDaemonJSON(ctx, "/api/jobs?panel_run="+url.QueryEscape(runUUID)+"&limit=0&omit_prompt=true", 8<<20)
+}
+
+func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +266,7 @@ func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMess
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +389,17 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 }
 
 func (c *Client) StartDaemon(ctx context.Context) error {
-	_, err := c.run(ctx, []string{"daemon", "start"}, 30*time.Second, 1<<20)
+	if c.Binary == "" {
+		return errors.New("roborev is not installed")
+	}
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: c.Binary, Args: []string{"daemon", "start"}, Timeout: 30 * time.Second, OutputLimit: 1 << 20, AllowDetachedChildren: true})
+	if err != nil {
+		message := strings.TrimSpace(result.Stderr)
+		if message == "" {
+			message = err.Error()
+		}
+		return errors.New(message)
+	}
 	return err
 }
 

@@ -14,10 +14,17 @@ type Installation struct {
 type Capabilities struct {
 	ReviewEnqueueAPI bool `json:"reviewEnqueueApi"`
 	FrozenRerunAPI   bool `json:"frozenRerunApi"`
+	JobListAPI       bool `json:"jobListApi"`
 	PanelReview      bool `json:"panelReview"`
 	PanelMembersAPI  bool `json:"panelMembersApi"`
 	PromptLazyLoad   bool `json:"promptLazyLoad"`
 	RawLog           bool `json:"rawLog"`
+}
+
+type JobMetadata struct {
+	ID           int64  `json:"id"`
+	RepoPath     string `json:"repo_path"`
+	PanelRunUUID string `json:"panel_run_uuid,omitempty"`
 }
 
 type ReviewRequest struct {

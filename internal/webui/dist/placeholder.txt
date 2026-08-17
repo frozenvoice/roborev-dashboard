@@ -1,0 +1,1 @@
+Run `npm --prefix web run build` before creating the release executable.

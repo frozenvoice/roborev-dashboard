@@ -10,8 +10,8 @@ Browser (React)
 Go localhost server
   -> Repository registry -> Git executable + args
   -> RoboRev service
-       -> stable JSON CLI (version/list/show/summary/cost)
-       -> version-gated daemon HTTP API (enqueue/rerun where CLI has no JSON receipt)
+       -> stable JSON CLI (version/show/prompt/log and typed mutations)
+       -> version-gated daemon HTTP API (metadata list/enqueue/rerun/panel members/health)
        -> typed CLI mutations (comment/close/cancel)
 RoboRev daemon -> RoboRev-owned storage
 ```
@@ -32,11 +32,11 @@ v0.64.0의 `repo list`에는 JSON이 없다. 초기 vertical slice는 Dashboard 
 
 ### process 실행
 
-외부 process는 shell 없이 executable과 argument slice로 실행한다. stdout/stderr는 분리하고 각각 상한을 적용한다. request context cancellation과 timeout을 전달하며 Windows에서는 process group/job cleanup을 별도 구현 지점으로 둔다. audit metadata에는 executable basename, args, duration, exit code, truncation 여부만 기록하며 환경 변수 전체를 남기지 않는다.
+외부 process는 shell 없이 executable과 argument slice로 실행한다. stdout/stderr는 분리하고 각각 상한을 적용한다. request cancellation과 timeout을 전달하고 `WaitDelay`로 pipe 대기를 제한한다. Windows에서는 child를 kill-on-close Job Object에 넣어 timeout/cancellation 시 descendant까지 종료한다. daemon start만 background daemon 생존을 위해 이 tree ownership을 명시적으로 제외한다. audit metadata에는 executable basename, args, duration, exit code, truncation 여부만 기록하며 환경 변수 전체를 남기지 않는다.
 
 ### repository registry
 
-server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인하고 `git -C <path> rev-parse --show-toplevel` 결과가 같은 root인지 검증한다. mutation API는 registry에 없는 path를 거부한다. recent repository와 last selection만 `os.UserConfigDir()/roborev-dashboard/config.json`에 저장하며 credential은 저장하지 않는다.
+server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인하고 `git -C <path> rev-parse --show-toplevel` 결과가 같은 root인지 검증한다. path를 받는 mutation뿐 아니라 global job ID와 panel UUID를 받는 read/mutation도 daemon의 metadata-only lookup으로 owning repository를 확인하고 registry 밖이면 거부한다. recent repository와 last selection만 `os.UserConfigDir()/roborev-dashboard/config.json`에 저장하며 credential은 저장하지 않는다.
 
 ### HTTP 보안
 
@@ -44,9 +44,9 @@ server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인�
 
 ### 데이터와 UI 상태
 
-review 목록은 가벼운 `roborev list --json` 결과를 polling한다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 parent metadata로 묶는다. mutation 성공 후 목록/detail을 다시 fetch한다.
+review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true` metadata-only 응답을 4초마다 polling한다. `list --json`은 full prompt와 diff를 포함하므로 주기 경로에서 사용하지 않는다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 panel UUID로 lazy-load한다. mutation 성공 후 목록을 RoboRev source of truth에서 다시 fetch한다.
 
-daemon 상태 polling은 v0.64.0의 작은 `/api/health`만 사용한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&omit_prompt=true`로 lazy-load한다.
+Dashboard의 `/api/runtime`은 repository inspection이나 review listing 없이 `version --json`과 v0.64.0의 작은 `/api/health`만 수행하며 UI가 10초마다 호출한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&limit=0&omit_prompt=true`로 읽으며 nonterminal member가 있는 동안 4초마다 갱신한다. upstream v0.64.0에서 `limit=0`은 unlimited로 문서화되어 있다.
 
 ## 확장 원칙
 

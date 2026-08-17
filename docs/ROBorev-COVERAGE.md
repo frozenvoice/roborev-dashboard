@@ -6,20 +6,21 @@
 
 | Command / API | Dashboard feature | Transport | 상태 | 자동 테스트 | Notes |
 |---|---|---|---|---|---|
-| `version --json` | 설치/version 감지 | JSON CLI | B | 예정 | binary override → PATH 순서 |
+| `version --json` | 설치/version 감지 | JSON CLI | B | 예 | binary override → PATH 순서 |
 | `/api/health` | daemon health | version-gated daemon API | B | 예 | 작은 health payload만 polling |
 | `status --json` | full daemon/queue diagnostics | JSON CLI | P | 아니요 | v0.64.0은 recent job prompt를 포함하므로 polling 금지 |
-| `list --json` | review 목록/filter | JSON CLI | B | 예정 | prompt/log 미포함 |
-| `show --job --json` | review detail/metadata | JSON CLI | B | 예정 | 선택 시 lazy-load |
+| `/api/jobs?repo=...&omit_prompt=true` | review 목록/filter | version-gated daemon API | B | 예 | 실제 필드 fixture; prompt/diff 없는 4초 polling |
+| `list --json` | full CLI job payload | JSON CLI | N | 아니요 | prompt/diff를 포함하므로 polling 금지 |
+| `show --job --json` | review detail/metadata | JSON CLI | B | 예 | `job_id` identity 보존, 선택 시 lazy-load |
 | `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
 | `log --raw` | raw log | CLI bytes | B | 예정 | bounded response, lazy-load |
 | `review` + `/api/enqueue` | Review HEAD/advanced enqueue | version-gated daemon API | B | 예정 | CLI에 JSON receipt가 없어 API 사용 |
 | `/api/jobs?panel_run=...&omit_prompt=true` | panel member 상태 | version-gated daemon API | B | 예 | panel tab에서만 lazy-load |
-| `/api/job/rerun` | Rerun same target/config | version-gated daemon API | B/P | 예정 | frozen target; HEAD action과 분리 |
-| `cancel <id>` | queued/running cancel | typed CLI | B | 예정 | terminal job은 UI에서 숨김 |
-| `comment --job <id> -m` | comment | typed CLI | B | 예정 | argument array, multiline 지원 |
-| `close <id>` | close | typed CLI | B | 예정 | Comment & Close 순서 보장 |
-| `close <id> --reopen` | reopen | typed CLI | B | 예정 | 독립 `reopen` command 없음 |
+| `/api/job/rerun` | Rerun same target/config | version-gated daemon API | B | 예 | frozen target; HEAD action과 분리 |
+| `cancel <id>` | queued/running cancel | typed CLI | B | 예 | terminal job은 UI에서 숨김 |
+| `comment --job <id> --message ... --commenter ...` | comment | typed CLI | B | 예 | 설치된 help로 확인; argument array, multiline 지원 |
+| `close <id>` | close | typed CLI | B | 예 | Comment & Close 순서/부분 실패 보장 |
+| `close <id> --reopen` | reopen | typed CLI | B | 예 | 독립 `reopen` command 없음 |
 | `stream --repo` | live JSONL events | JSONL CLI/SSE relay | P | 아니요 | 초기에는 4초 polling |
 | `pause`, `unpause` | queue control | typed CLI | P | 아니요 | running job 정지로 표현 금지 |
 | `daemon start/stop/restart/run` | lifecycle | typed CLI | P | 아니요 | run은 local UI에서 제외 가능 |
@@ -53,6 +54,8 @@
 ## v0.64.0 capability notes
 
 - `review`는 `--json`을 제공하지 않는다. upstream `/api/enqueue` response는 single job 또는 panel synthesis와 `member_job_ids`를 반환한다.
+- 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
+- `list --json`은 prompt와 diff를 포함한다. Dashboard 목록은 `/api/jobs?omit_prompt=true`만 사용한다.
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.
 - `stream`은 JSONL이며 UI source of truth가 충분한지 검증 전까지 polling 보조 신호로만 계획한다.
