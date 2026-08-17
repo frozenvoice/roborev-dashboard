@@ -19,6 +19,10 @@ type RepositoryInspector interface {
 	Inspect(context.Context, string) (gitx.Repository, error)
 }
 
+type repositoryMetadataInspector interface {
+	IsLinkedWorktree(context.Context, string) (bool, error)
+}
+
 type registryConfig struct {
 	Recent          []string          `json:"recentRepositories"`
 	LastSelected    string            `json:"lastSelectedRepository"`
@@ -264,6 +268,21 @@ func (r *Registry) InspectAll(ctx context.Context) []gitx.Repository {
 		}
 	}
 	return repos
+}
+
+// IsLinkedWorktree delegates checkout classification to the same Git service
+// used for repository inspection. A custom inspector that cannot provide Git
+// metadata reports an error; panel discovery then follows the conservative
+// non-suppression fallthrough for unknown layouts.
+func (r *Registry) IsLinkedWorktree(ctx context.Context, path string) (bool, error) {
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	metadata, ok := inspector.(repositoryMetadataInspector)
+	if !ok {
+		return false, errors.New("Git metadata inspection is unavailable")
+	}
+	return metadata.IsLinkedWorktree(ctx, path)
 }
 
 // Identity returns a stable, platform-aware correlation key for a registered

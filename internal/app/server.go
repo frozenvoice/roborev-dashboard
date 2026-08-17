@@ -49,7 +49,7 @@ func NewServer(service roborev.Service, registry *Registry, allowedHost string) 
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: roborev.NewPanelResolver(), AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: roborev.NewPanelResolver(registry), AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -368,7 +368,7 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "panel selection is required", "panel")
 		return
 	}
-	catalog, err := s.Panels.Resolve(repo.Path)
+	catalog, err := s.Panels.Resolve(r.Context(), repo.Path)
 	if err != nil {
 		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
 		return
@@ -431,7 +431,7 @@ func (s *Server) panelState(ctx context.Context, path string) (RepositoryPanels,
 	if err != nil {
 		return RepositoryPanels{}, err
 	}
-	catalog, err := s.Panels.Resolve(repo.Path)
+	catalog, err := s.Panels.Resolve(ctx, repo.Path)
 	if err != nil {
 		return RepositoryPanels{RepositoryIdentity: identity, Panels: []roborev.PanelInfo{}, Error: err.Error()}, nil
 	}
@@ -469,7 +469,7 @@ func (s *Server) selectRepositoryPanel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
 		return
 	}
-	catalog, err := s.Panels.Resolve(repo.Path)
+	catalog, err := s.Panels.Resolve(r.Context(), repo.Path)
 	if err != nil {
 		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
 		return

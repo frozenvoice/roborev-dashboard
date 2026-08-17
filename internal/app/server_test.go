@@ -28,7 +28,9 @@ type fakePanelResolver struct {
 	err     error
 }
 
-func (f fakePanelResolver) Resolve(string) (roborev.PanelCatalog, error) { return f.catalog, f.err }
+func (f fakePanelResolver) Resolve(context.Context, string) (roborev.PanelCatalog, error) {
+	return f.catalog, f.err
+}
 
 func testPanelCatalog() roborev.PanelCatalog {
 	return roborev.PanelCatalog{Panels: []roborev.PanelInfo{

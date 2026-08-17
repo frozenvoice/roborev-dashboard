@@ -1,12 +1,24 @@
 package roborev
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type fakeGitMetadataResolver struct {
+	linked bool
+	err    error
+}
+
+func (f fakeGitMetadataResolver) IsLinkedWorktree(context.Context, string) (bool, error) {
+	return f.linked, f.err
+}
 
 func writePanelConfig(t *testing.T, path, contents string) {
 	t.Helper()
@@ -23,7 +35,7 @@ func TestPanelResolverMergesGlobalAndLocalByWholeKey(t *testing.T) {
 	globalPath := filepath.Join(t.TempDir(), "config.toml")
 	writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.subagents.shared]\nagent='global-agent'\n[review.panels.global_only]\nmembers=['global']\nsynthesis_agent='codex'\n[review.panels.shared]\nmembers=['global']\n")
 	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "[review.subagents.local]\nagent='claude'\n[review.subagents.shared]\nagent='local-agent'\n[review.panels.local_only]\nmembers=['local']\n[review.panels.shared]\nmembers=['shared']\nsynthesis_backup_agent='backup'\n")
-	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: fakeGitMetadataResolver{linked: true}}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +62,7 @@ func TestPanelResolverNeverExposesSecretConfigFields(t *testing.T) {
 	root := t.TempDir()
 	config := "[review.subagents.audit]\nagent='codex'\nmodel='secret-model'\nprovider='secret-provider'\ninstructions='SECRET_SENTINEL_INSTRUCTIONS'\nreasoning='high'\ntimeout='2m'\n[review.panels.audit]\nmembers=['audit']\nsynthesis_model='secret-synthesis-model'\nsynthesis_backup_model='secret-backup-model'\n"
 	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), config)
-	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +93,7 @@ func TestPanelResolverFailsClosedOnInvalidConfiguration(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			writePanelConfig(t, filepath.Join(root, ".roborev.toml"), test.config)
-			catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(root)
+			catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(context.Background(), root)
 			if err == nil || len(catalog.Panels) != 0 {
 				t.Fatalf("invalid config did not fail closed: catalog=%#v err=%v", catalog, err)
 			}
@@ -92,16 +104,65 @@ func TestPanelResolverFailsClosedOnInvalidConfiguration(t *testing.T) {
 func TestPanelResolverParseErrorsDoNotEchoConfigValues(t *testing.T) {
 	root := t.TempDir()
 	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "[review.panels.bad]\nmembers='SECRET_CONFIG_VALUE'\n")
-	_, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(root)
+	_, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(context.Background(), root)
 	if err == nil || strings.Contains(err.Error(), "SECRET_CONFIG_VALUE") {
 		t.Fatalf("unsafe parser error: %v", err)
+	}
+}
+
+func TestLoadPanelConfigAllowsSmallAndNearLimitRegularFiles(t *testing.T) {
+	for _, size := range []int{1, maxPanelConfigBytes - 1, maxPanelConfigBytes} {
+		t.Run(fmt.Sprintf("%d-bytes", size), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, bytes.Repeat([]byte{'#'}, size), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadPanelConfig(path); err != nil {
+				t.Fatalf("size %d rejected: %v", size, err)
+			}
+		})
+	}
+}
+
+func TestLoadPanelConfigRejectsOversizedAndNonRegularFiles(t *testing.T) {
+	over := filepath.Join(t.TempDir(), "oversized.toml")
+	if err := os.WriteFile(over, bytes.Repeat([]byte{'#'}, maxPanelConfigBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPanelConfig(over); err == nil {
+		t.Fatal("oversized config was accepted")
+	}
+	directory := t.TempDir()
+	if _, err := loadPanelConfig(directory); err == nil {
+		t.Fatal("directory config was accepted")
+	}
+	target := filepath.Join(t.TempDir(), "target.toml")
+	if err := os.WriteFile(target, []byte("# target\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(target), "link.toml")
+	if err := os.Symlink(target, link); err == nil {
+		if _, err := loadPanelConfig(link); err == nil {
+			t.Fatal("symlink config was accepted")
+		}
+	}
+}
+
+func TestPanelResolverOversizedLocalConfigDoesNotExposeGlobalPanels(t *testing.T) {
+	root := t.TempDir()
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.panels.global]\nmembers=['global']\n")
+	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), strings.Repeat("#", maxPanelConfigBytes+1))
+	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(context.Background(), root)
+	if err == nil || len(catalog.Panels) != 0 {
+		t.Fatalf("oversized local config leaked global catalog: catalog=%#v err=%v", catalog, err)
 	}
 }
 
 func TestPanelResolverReservesBuiltinNone(t *testing.T) {
 	root := t.TempDir()
 	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "[review.panels.none]\nmembers=[]\n")
-	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +178,7 @@ func TestPanelResolverUsesDirectRegisteredRootOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	writePanelConfig(t, filepath.Join(base, "main-worktree", ".roborev.toml"), "[review.panels.parent]\nmembers=[]\n")
-	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +195,7 @@ func TestPanelResolverUsesRoboRevDataDirGlobalConfig(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := NewPanelResolver().Resolve(root)
+	catalog, err := NewPanelResolver().Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +212,7 @@ func TestPanelResolverSuppressesGlobalNamedPanelsForLinkedWorktreeWithoutDirectC
 	}
 	globalPath := filepath.Join(t.TempDir(), "config.toml")
 	writePanelConfig(t, globalPath, "[review.subagents.a]\nagent='codex'\n[review.panels.shared]\nmembers=['a']\n")
-	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: fakeGitMetadataResolver{linked: true}}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +232,7 @@ func TestPanelResolverLinkedWorktreeStillFailsClosedOnMalformedGlobalConfig(t *t
 		}
 		globalPath := filepath.Join(t.TempDir(), "config.toml")
 		writePanelConfig(t, globalPath, config)
-		catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(root)
+		catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: fakeGitMetadataResolver{linked: true}}).Resolve(context.Background(), root)
 		if err == nil || len(catalog.Panels) != 0 {
 			t.Fatalf("linked worktree bypassed malformed global config: catalog=%#v err=%v", catalog, err)
 		}
@@ -186,7 +247,7 @@ func TestPanelResolverUsesDirectConfigInLinkedWorktree(t *testing.T) {
 	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "[review.subagents.local]\nagent='codex'\n[review.panels.shared]\nmembers=['local']\n")
 	globalPath := filepath.Join(t.TempDir(), "config.toml")
 	writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.panels.shared]\nmembers=['global']\n")
-	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(root)
+	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath}).Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}

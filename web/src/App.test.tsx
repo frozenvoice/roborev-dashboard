@@ -441,6 +441,38 @@ describe('App review workflow', () => {
     await waitFor(() => expect(selector).toHaveValue(other.identity))
   })
 
+  it('loads the new repository panel catalog once and keeps Review HEAD gated until it settles', async () => {
+    const other = { ...bootstrap.repositories[0], identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'other' }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    const bPanels = deferred<Response>()
+    const panelCalls: string[] = []
+    let bootstrapCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }, repoPath => {
+      panelCalls.push(repoPath)
+      return repoPath === other.path ? bPanels.promise : response(panelConfiguration('repo-1'))
+    }))
+    render(<App />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+
+    await waitFor(() => expect(panelCalls.filter(path => path === other.path)).toHaveLength(1))
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('')
+    expect(screen.queryByRole('option', { name: 'Cross review · reviewers' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
+
+    bPanels.resolve(new Response(JSON.stringify(panelConfiguration(other.identity, [{ ...defaultPanel, name: 'bravo' }], 'bravo')), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('bravo'))
+    expect(panelCalls.filter(path => path === other.path)).toHaveLength(1)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+  })
+
   it.each([
     ['response', 200, panelConfiguration('repo-1', [{ ...defaultPanel, name: 'alpha' }], 'alpha')],
     ['error', 502, { error: 'stale A panel failure' }],

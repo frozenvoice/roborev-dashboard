@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,11 +16,74 @@ import (
 type recordingRunner struct {
 	commands []proc.Command
 	stdout   string
+	err      error
 }
 
 func (r *recordingRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
-	return proc.Result{Stdout: r.stdout}, nil
+	return proc.Result{Stdout: r.stdout}, r.err
+}
+
+func TestIsLinkedWorktreeUsesTypedMetadataCommandAndPreservesPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "한글 repository with spaces")
+	common := filepath.Join(t.TempDir(), "common")
+	gitDir := filepath.Join(t.TempDir(), "worktrees", "feature")
+	runner := &recordingRunner{stdout: gitDir + "\n" + common}
+	service := New(runner)
+	linked, err := service.IsLinkedWorktree(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !linked {
+		t.Fatal("different canonical git-dir/common-dir was not classified as linked")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("commands = %#v", runner.commands)
+	}
+	command := runner.commands[0]
+	wantArgs := []string{"-C", abs, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"}
+	if command.Executable != service.Git || !reflect.DeepEqual(command.Args, wantArgs) {
+		t.Fatalf("unexpected Git command: executable=%q args=%#v want=%#v", command.Executable, command.Args, wantArgs)
+	}
+}
+
+func TestIsLinkedWorktreeKeepsOrdinarySubmoduleAndSeparateGitDirLayouts(t *testing.T) {
+	for _, name := range []string{"ordinary", "submodule", "separate-git-dir"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			metadata := filepath.Join(root, "metadata", name)
+			linked, err := New(&recordingRunner{stdout: metadata + "\n" + metadata}).IsLinkedWorktree(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if linked {
+				t.Fatalf("layout %s was classified as linked", name)
+			}
+		})
+	}
+}
+
+func TestIsLinkedWorktreeDoesNotSuppressOnMetadataFailureOrMalformedOutput(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		stdout string
+		err    error
+	}{
+		{name: "malformed", stdout: "/only/one/path"},
+		{name: "relative", stdout: "relative/git\nrelative/common"},
+		{name: "command-error", err: errors.New("git failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			linked, err := New(&recordingRunner{stdout: test.stdout, err: test.err}).IsLinkedWorktree(context.Background(), t.TempDir())
+			if err == nil || linked {
+				t.Fatalf("metadata failure did not fail closed: linked=%v err=%v", linked, err)
+			}
+		})
+	}
 }
 
 func TestCanonicalRootRejectsBlankWithoutRunningGit(t *testing.T) {

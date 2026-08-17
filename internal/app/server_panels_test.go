@@ -14,6 +14,15 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
+type fakePanelGitMetadata struct {
+	linked bool
+	err    error
+}
+
+func (f fakePanelGitMetadata) IsLinkedWorktree(context.Context, string) (bool, error) {
+	return f.linked, f.err
+}
+
 func writeRepoPanelConfig(t *testing.T, repo, contents string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(repo, ".roborev.toml"), []byte(contents), 0o600); err != nil {
@@ -200,7 +209,7 @@ func TestLinkedWorktreeWithoutDirectConfigAllowsOnlyBuiltinNoneReview(t *testing
 		t.Fatal(err)
 	}
 	server, service, _ := panelTestServer(t, "", repo)
-	server.Panels = &roborev.PanelResolver{GlobalConfigPath: globalPath}
+	server.Panels = &roborev.PanelResolver{GlobalConfigPath: globalPath, Metadata: fakePanelGitMetadata{linked: true}}
 
 	post := func(panel string) int {
 		body, _ := json.Marshal(reviewBody{RepoPath: repo, Panel: panel})
@@ -215,5 +224,26 @@ func TestLinkedWorktreeWithoutDirectConfigAllowsOnlyBuiltinNoneReview(t *testing
 	}
 	if code := post(roborev.PanelNone); code != http.StatusCreated || service.reviewCalls != 1 || service.reviewRequest.Panel != roborev.PanelNone {
 		t.Fatalf("builtin none status=%d calls=%d request=%#v", code, service.reviewCalls, service.reviewRequest)
+	}
+}
+
+func TestSubmoduleLikeGitFileKeepsGlobalPanelReviewAuthorized(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: ../super/.git/modules/lib\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(globalPath, []byte("[review.subagents.a]\nagent='codex'\n[review.panels.shared]\nmembers=['a']\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, service, _ := panelTestServer(t, "", repo)
+	server.Panels = &roborev.PanelResolver{GlobalConfigPath: globalPath, Metadata: fakePanelGitMetadata{linked: false}}
+	body, _ := json.Marshal(reviewBody{RepoPath: repo, Panel: "shared"})
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(string(body)))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated || service.reviewCalls != 1 || service.reviewRequest.Panel != "shared" {
+		t.Fatalf("submodule-like panel review was not enqueued: status=%d calls=%d request=%#v body=%s", recorder.Code, service.reviewCalls, service.reviewRequest, recorder.Body.String())
 	}
 }

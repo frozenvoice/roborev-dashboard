@@ -24,6 +24,13 @@ type Repository struct {
 	HasConfig     bool   `json:"hasConfig"`
 }
 
+// RepositoryMetadata is the canonical Git metadata needed to classify a
+// checkout layout. Git emits these paths with --path-format=absolute.
+type RepositoryMetadata struct {
+	GitDir    string
+	CommonDir string
+}
+
 type Service struct {
 	Git    string
 	Runner proc.Runner
@@ -57,6 +64,57 @@ func RepositoryKey(path string) string {
 
 func SameRepositoryPath(left, right string) bool {
 	return RepositoryKey(left) == RepositoryKey(right)
+}
+
+// IsLinkedWorktree distinguishes an actual linked worktree from other
+// checkout layouts that happen to store .git as a file (for example a
+// submodule or a separate-git-dir checkout). A linked worktree has a private
+// git-dir whose canonical path differs from the repository's common dir.
+func (s *Service) IsLinkedWorktree(ctx context.Context, path string) (bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return false, errors.New("repository path is required")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, fmt.Errorf("absolute repository path: %w", err)
+	}
+	metadataOutput, err := s.command(ctx, abs, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+	if err != nil {
+		return false, fmt.Errorf("resolve Git metadata: %w", err)
+	}
+	lines := strings.Split(metadataOutput, "\n")
+	if len(lines) != 2 {
+		return false, errors.New("Git metadata response is malformed")
+	}
+	metadata := RepositoryMetadata{}
+	metadata.GitDir, err = canonicalMetadataPath(lines[0])
+	if err != nil {
+		return false, errors.New("Git metadata response is malformed")
+	}
+	metadata.CommonDir, err = canonicalMetadataPath(lines[1])
+	if err != nil {
+		return false, errors.New("Git metadata response is malformed")
+	}
+	return !SameRepositoryPath(metadata.GitDir, metadata.CommonDir), nil
+}
+
+func canonicalMetadataPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("empty Git metadata path")
+	}
+	path := filepath.FromSlash(value)
+	if !filepath.IsAbs(path) {
+		return "", errors.New("Git metadata path is not absolute")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = resolved
+	}
+	return filepath.Clean(abs), nil
 }
 
 func (s *Service) CanonicalRoot(ctx context.Context, input string) (string, error) {

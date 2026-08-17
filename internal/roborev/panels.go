@@ -1,8 +1,10 @@
 package roborev
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +16,11 @@ import (
 )
 
 const PanelNone = "none"
+
+// maxPanelConfigBytes keeps repository-controlled and global panel discovery
+// bounded while leaving ample room for the small TOML configuration RoboRev
+// actually consumes.
+const maxPanelConfigBytes = 1 << 20
 
 type PanelInfo struct {
 	Name                 string   `json:"name"`
@@ -40,11 +47,19 @@ func (c PanelCatalog) Find(name string) (PanelInfo, bool) {
 }
 
 type PanelCatalogResolver interface {
-	Resolve(string) (PanelCatalog, error)
+	Resolve(context.Context, string) (PanelCatalog, error)
+}
+
+// GitMetadataResolver supplies the small amount of Git metadata needed to
+// distinguish a linked worktree from other checkout layouts whose .git entry
+// is a file. Implementations must execute typed Git arguments without a shell.
+type GitMetadataResolver interface {
+	IsLinkedWorktree(context.Context, string) (bool, error)
 }
 
 type PanelResolver struct {
 	GlobalConfigPath string
+	Metadata         GitMetadataResolver
 }
 
 type panelConfigFile struct {
@@ -77,7 +92,13 @@ type panelSpec struct {
 	SynthesisBackupModel string   `toml:"synthesis_backup_model"`
 }
 
-func NewPanelResolver() *PanelResolver { return &PanelResolver{} }
+func NewPanelResolver(metadata ...GitMetadataResolver) *PanelResolver {
+	resolver := &PanelResolver{}
+	if len(metadata) > 0 {
+		resolver.Metadata = metadata[0]
+	}
+	return resolver
+}
 
 func (r *PanelResolver) globalPath() (string, error) {
 	if r != nil && strings.TrimSpace(r.GlobalConfigPath) != "" {
@@ -95,23 +116,57 @@ func (r *PanelResolver) globalPath() (string, error) {
 
 func loadPanelConfig(path string) (panelReviewConfig, error) {
 	var file panelConfigFile
-	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+	entry, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
 		return panelReviewConfig{}, nil
-	} else if err != nil {
-		return panelReviewConfig{}, fmt.Errorf("read panel config: %w", err)
 	}
-	if _, err := toml.DecodeFile(path, &file); err != nil {
+	if err != nil {
+		return panelReviewConfig{}, errors.New("panel config metadata could not be read")
+	}
+	// Lstat deliberately rejects symlinks and special files before Open. In
+	// particular, opening a repository-controlled FIFO for reading can block
+	// indefinitely before the opened-handle Stat below gets a chance to reject
+	// it. The second Stat remains necessary for TOCTOU changes after this gate.
+	if !entry.Mode().IsRegular() {
+		return panelReviewConfig{}, errors.New("panel config must be a regular file")
+	}
+	if entry.Size() < 0 || entry.Size() > maxPanelConfigBytes {
+		return panelReviewConfig{}, errors.New("panel config exceeds the maximum size")
+	}
+	handle, err := os.Open(path)
+	if err != nil {
+		return panelReviewConfig{}, errors.New("panel config could not be opened")
+	}
+	defer handle.Close()
+	info, err := handle.Stat()
+	if err != nil {
+		return panelReviewConfig{}, errors.New("panel config metadata could not be read")
+	}
+	if !info.Mode().IsRegular() {
+		return panelReviewConfig{}, errors.New("panel config must be a regular file")
+	}
+	if info.Size() < 0 || info.Size() > maxPanelConfigBytes {
+		return panelReviewConfig{}, errors.New("panel config exceeds the maximum size")
+	}
+	data, err := io.ReadAll(io.LimitReader(handle, maxPanelConfigBytes+1))
+	if err != nil {
+		return panelReviewConfig{}, errors.New("panel config could not be read")
+	}
+	if len(data) > maxPanelConfigBytes {
+		return panelReviewConfig{}, errors.New("panel config exceeds the maximum size")
+	}
+	if _, err := toml.Decode(string(data), &file); err != nil {
 		return panelReviewConfig{}, errors.New("panel config contains invalid TOML syntax or types")
 	}
 	return file.Review, nil
 }
 
-func (r *PanelResolver) Resolve(repoPath string) (PanelCatalog, error) {
+func (r *PanelResolver) Resolve(ctx context.Context, repoPath string) (PanelCatalog, error) {
 	if strings.TrimSpace(repoPath) == "" {
 		return PanelCatalog{}, errors.New("repository path is required")
 	}
 	localPath := filepath.Join(repoPath, ".roborev.toml")
-	suppressGlobalNamed := linkedWorktreeWithoutDirectConfig(repoPath, localPath)
+	suppressGlobalNamed := linkedWorktreeWithoutDirectConfig(ctx, repoPath, localPath, r.Metadata)
 	globalPath, err := r.globalPath()
 	if err != nil {
 		return PanelCatalog{}, err
@@ -191,12 +246,15 @@ func builtinNoneCatalog() PanelCatalog {
 	return PanelCatalog{Panels: []PanelInfo{{Name: PanelNone, Kind: "single", Members: []string{}, Origin: "builtin", Valid: true}}}
 }
 
-func linkedWorktreeWithoutDirectConfig(repoPath, localPath string) bool {
+func linkedWorktreeWithoutDirectConfig(ctx context.Context, repoPath, localPath string, metadata GitMetadataResolver) bool {
 	if _, err := os.Stat(localPath); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
-	gitInfo, err := os.Stat(filepath.Join(repoPath, ".git"))
-	return err == nil && !gitInfo.IsDir()
+	if metadata == nil {
+		return false
+	}
+	linked, err := metadata.IsLinkedWorktree(ctx, repoPath)
+	return err == nil && linked
 }
 
 func validateConfiguredPanel(name string, panel panelSpec, subagents map[string]panelSubagentSpec) error {

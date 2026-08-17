@@ -269,6 +269,7 @@ export function App() {
   const [panelConfiguration, setPanelConfiguration] = useState<PanelConfiguration | null>(null)
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState('')
+  const [panelLoadEpoch, setPanelLoadEpoch] = useState(0)
   const [repoSwitching, setRepoSwitching] = useState(false)
   const reviewGeneration = useRef(0)
   const reviewActionGeneration = useRef(0)
@@ -338,7 +339,7 @@ export function App() {
     }
     void loadPanels(repo.path, repo.identity)
     return () => { panelGeneration.current++ }
-  }, [initialized, loadPanels, repo?.identity, repo?.path])
+  }, [initialized, loadPanels, panelLoadEpoch, repo?.identity, repo?.path])
   const canPollReviews = Boolean(bootstrap?.roborev.installed && bootstrap.roborev.capabilities.jobListApi && bootstrap.roborev.status?.running)
   useEffect(() => {
     if (!initialized) return
@@ -486,12 +487,10 @@ export function App() {
       setBootstrap(data)
       const restored = data.repositories.find(item => item.identity === data.selectedRepositoryIdentity)
       if (!restored) throw new APIError('The selected repository metadata was missing from bootstrap.')
+      setPanelLoadEpoch(epoch => epoch + 1)
       if (selectError) toast('error', selectError.message)
       else toast('success', 'RoboRev state updated.')
-      await Promise.all([
-        loadReviews(data.selectedRepository, data.selectedRepositoryIdentity),
-        loadPanels(restored.path, restored.identity),
-      ])
+      await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
     } catch (error) {
       if (generation !== repoSwitchGeneration.current) return
       toast('error', selectError?.message ?? (error as Error).message)
