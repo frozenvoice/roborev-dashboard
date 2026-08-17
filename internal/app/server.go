@@ -26,6 +26,11 @@ type Server struct {
 	mux         *http.ServeMux
 }
 
+type RepositoryDTO struct {
+	gitx.Repository
+	Identity string `json:"identity"`
+}
+
 func NewServer(service roborev.Service, registry *Registry, allowedHost string) (*Server, error) {
 	if service == nil || registry == nil {
 		return nil, errors.New("service and repository registry are required")
@@ -141,8 +146,23 @@ func (s *Server) repoForRequest(w http.ResponseWriter, path string) (string, boo
 
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	repos := s.Registry.InspectAll(r.Context())
+	repositoryDTOs := make([]RepositoryDTO, 0, len(repos))
+	for _, repo := range repos {
+		if dto, err := s.repositoryDTO(repo); err == nil {
+			repositoryDTOs = append(repositoryDTOs, dto)
+		}
+	}
+	selectedIdentity, _ := s.Registry.Identity("")
 	installation := s.RoboRev.Installation(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": s.csrfToken, "repositories": repos, "selectedRepository": s.Registry.Selected(), "roborev": installation})
+	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": s.csrfToken, "repositories": repositoryDTOs, "selectedRepository": s.Registry.Selected(), "selectedRepositoryIdentity": selectedIdentity, "roborev": installation})
+}
+
+func (s *Server) repositoryDTO(repo gitx.Repository) (RepositoryDTO, error) {
+	identity, err := s.Registry.Identity(repo.Path)
+	if err != nil {
+		return RepositoryDTO{}, err
+	}
+	return RepositoryDTO{Repository: repo, Identity: identity}, nil
 }
 
 func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +292,11 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	if request.Panel == "" {
 		request.Panel = "dashboard_cross"
 	}
+	target, err := s.repositoryDTO(repo)
+	if err != nil {
+		writeError(w, http.StatusConflict, "repository identity is unavailable: "+err.Error(), "repository")
+		return
+	}
 	ctx, cancel := mutationContext()
 	defer cancel()
 	receipt, err := s.RoboRev.Review(ctx, request)
@@ -281,8 +306,8 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, struct {
 		Receipt json.RawMessage `json:"receipt"`
-		Target  gitx.Repository `json:"target"`
-	}{Receipt: receipt, Target: repo})
+		Target  RepositoryDTO   `json:"target"`
+	}{Receipt: receipt, Target: target})
 }
 
 func (s *Server) comment(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +417,12 @@ func (s *Server) addRepository(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "repository")
 		return
 	}
-	writeJSON(w, http.StatusCreated, repo)
+	dto, err := s.repositoryDTO(repo)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "repository identity is unavailable: "+err.Error(), "repository")
+		return
+	}
+	writeJSON(w, http.StatusCreated, dto)
 }
 func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	var body repoBody

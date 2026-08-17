@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -110,5 +112,65 @@ func TestRegistrySelectPersistenceFailureKeepsPreviousSelection(t *testing.T) {
 	}
 	if got := registry.Selected(); got != "repo-one" {
 		t.Fatalf("selection changed after failed save: %q", got)
+	}
+}
+
+func TestRegistryInspectRejectsCanonicalRootDrift(t *testing.T) {
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		"registered": {Path: "different-root"},
+	}}, "")
+	registry.paths[registryKey("registered")] = "registered"
+	registry.selected = "registered"
+
+	_, err := registry.Inspect(context.Background(), "registered")
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("expected clear root mismatch error, got %v", err)
+	}
+}
+
+func TestRegistryInspectCaseEquivalenceFollowsPlatform(t *testing.T) {
+	registered := `E:\Workspace\Repo`
+	inspected := strings.ToLower(registered)
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		registered: {Path: inspected},
+	}}, "")
+	registry.paths[registryKey(registered)] = registered
+	registry.selected = registered
+
+	_, err := registry.Inspect(context.Background(), registered)
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Fatalf("Windows-equivalent casing was rejected: %v", err)
+		}
+	} else if err == nil {
+		t.Fatal("case-sensitive platform accepted differently-cased root")
+	}
+}
+
+func TestRegistryInspectAllOmitsDriftedRoots(t *testing.T) {
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		"valid-root":   {Path: "valid-root", Head: "valid"},
+		"drifted-root": {Path: "replacement-root", Head: "drifted"},
+	}}, "")
+	registry.paths[registryKey("valid-root")] = "valid-root"
+	registry.paths[registryKey("drifted-root")] = "drifted-root"
+
+	repos := registry.InspectAll(context.Background())
+	if len(repos) != 1 || repos[0].Path != "valid-root" {
+		t.Fatalf("expected only valid registered root, got %#v", repos)
+	}
+}
+
+func TestRegistryIdentityUsesSelectedAndPlatformKey(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\Workspace\Repo`); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity != gitx.RepositoryKey(`E:\Workspace\Repo`) {
+		t.Fatalf("identity = %q", identity)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -162,10 +163,21 @@ func (r *Registry) Inspect(ctx context.Context, path string) (gitx.Repository, e
 	if err != nil {
 		return gitx.Repository{}, err
 	}
+	return r.inspectResolved(ctx, resolved)
+}
+
+func (r *Registry) inspectResolved(ctx context.Context, resolved string) (gitx.Repository, error) {
 	if r.inspector == nil {
 		return gitx.Repository{}, errors.New("repository inspector is unavailable")
 	}
-	return r.inspector.Inspect(ctx, resolved)
+	repo, err := r.inspector.Inspect(ctx, resolved)
+	if err != nil {
+		return gitx.Repository{}, err
+	}
+	if !gitx.SameRepositoryPath(repo.Path, resolved) {
+		return gitx.Repository{}, fmt.Errorf("inspected Git root %q does not match registered repository path %q", repo.Path, resolved)
+	}
+	return repo, nil
 }
 
 func (r *Registry) InspectAll(ctx context.Context) []gitx.Repository {
@@ -177,11 +189,22 @@ func (r *Registry) InspectAll(ctx context.Context) []gitx.Repository {
 	r.mu.RUnlock()
 	repos := make([]gitx.Repository, 0, len(paths))
 	for _, path := range paths {
-		if repo, err := r.inspector.Inspect(ctx, path); err == nil {
+		if repo, err := r.inspectResolved(ctx, path); err == nil {
 			repos = append(repos, repo)
 		}
 	}
 	return repos
+}
+
+// Identity returns a stable, platform-aware correlation key for a registered
+// repository. It does not grant authorization; mutations continue to resolve
+// and authorize repository paths through the registry.
+func (r *Registry) Identity(path string) (string, error) {
+	resolved, err := r.Resolve(path)
+	if err != nil {
+		return "", err
+	}
+	return registryKey(resolved), nil
 }
 
 func (r *Registry) Selected() string { r.mu.RLock(); defer r.mu.RUnlock(); return r.selected }

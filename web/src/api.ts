@@ -1,4 +1,5 @@
 export type Repository = {
+  identity: string
   name: string
   path: string
   branch: string
@@ -30,6 +31,7 @@ export type Bootstrap = {
   csrfToken: string
   repositories: Repository[]
   selectedRepository: string
+  selectedRepositoryIdentity: string
   roborev: Installation
 }
 

@@ -25,7 +25,9 @@ type mutableInspector struct {
 
 func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
 	repo := m.repository
-	repo.Path = path
+	if repo.Path == "" {
+		repo.Path = path
+	}
 	return repo, nil
 }
 
@@ -38,6 +40,7 @@ type fakeService struct {
 	panelRaw          json.RawMessage
 	reviewRequest     roborev.ReviewRequest
 	reviewReceipt     json.RawMessage
+	reviewCalls       int
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -66,6 +69,7 @@ func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, er
 func (f *fakeService) Prompt(context.Context, int64) (string, error) { return "prompt", nil }
 func (f *fakeService) Log(context.Context, int64) (string, error)    { return "log", nil }
 func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
+	f.reviewCalls++
 	f.reviewRequest = request
 	if f.reviewReceipt != nil {
 		return f.reviewReceipt, nil
@@ -197,12 +201,12 @@ func TestCreateReviewReturnsFreshPinnedTargetAndReceipt(t *testing.T) {
 		Receipt struct {
 			JobID int64 `json:"job_id"`
 		} `json:"receipt"`
-		Target gitx.Repository `json:"target"`
+		Target RepositoryDTO `json:"target"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Receipt.JobID != 50 || response.Target.Head != "fresh-pinned-sha" || response.Target.Branch != "feature/fresh" || !response.Target.Dirty {
+	if response.Receipt.JobID != 50 || response.Target.Head != "fresh-pinned-sha" || response.Target.Branch != "feature/fresh" || !response.Target.Dirty || response.Target.Identity != gitx.RepositoryKey(`E:\repo`) {
 		t.Fatalf("unexpected review metadata: %#v", response)
 	}
 }
@@ -217,5 +221,98 @@ func TestBootstrapDoesNotAdvertiseFictionalReviewCLICommand(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "reviewHeadCommand") {
 		t.Fatalf("bootstrap still contains command preview: %s", recorder.Body.String())
+	}
+}
+
+func TestCreateReviewRejectsCanonicalRootDriftBeforeEnqueue(t *testing.T) {
+	inspector := &mutableInspector{repository: gitx.Repository{Path: `E:\registered`, Head: "initial"}}
+	registry := NewRegistry(inspector, "")
+	if _, err := registry.Add(context.Background(), `E:\registered`); err != nil {
+		t.Fatal(err)
+	}
+	inspector.repository = gitx.Repository{Path: `E:\replacement`, Head: "replacement-head"}
+	service := &fakeService{}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(`{"repoPath":"E:\\registered","panel":"dashboard_cross"}`))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.reviewCalls != 0 {
+		t.Fatalf("drifted repository was enqueued %d times", service.reviewCalls)
+	}
+}
+
+func TestBootstrapRepositoryIdentitiesCorrelateWithSelection(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Repositories               []RepositoryDTO `json:"repositories"`
+		SelectedRepository         string          `json:"selectedRepository"`
+		SelectedRepositoryIdentity string          `json:"selectedRepositoryIdentity"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Repositories) != 1 {
+		t.Fatalf("repositories = %#v", response.Repositories)
+	}
+	if response.Repositories[0].Path != response.SelectedRepository || response.Repositories[0].Identity != response.SelectedRepositoryIdentity || response.SelectedRepositoryIdentity != gitx.RepositoryKey(`E:\repo`) {
+		t.Fatalf("identity correlation failed: %#v", response)
+	}
+}
+
+func TestBootstrapOmitsRepositoryWhoseCanonicalRootDrifted(t *testing.T) {
+	inspector := &mutableInspector{repository: gitx.Repository{Path: `E:\registered`, Head: "initial"}}
+	registry := NewRegistry(inspector, "")
+	if _, err := registry.Add(context.Background(), `E:\registered`); err != nil {
+		t.Fatal(err)
+	}
+	inspector.repository = gitx.Repository{Path: `E:\replacement`, Head: "replacement"}
+	server, err := NewServer(&fakeService{}, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Repositories []RepositoryDTO `json:"repositories"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Repositories) != 0 {
+		t.Fatalf("drifted repository was exposed by bootstrap: %#v", response.Repositories)
+	}
+}
+
+func TestAddRepositoryResponseCarriesRegistryIdentity(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodPost, "/api/repos", strings.NewReader(`{"repoPath":"E:\\new repo"}`))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response RepositoryDTO
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Path != `E:\new repo` || response.Identity != gitx.RepositoryKey(response.Path) {
+		t.Fatalf("unexpected repository DTO: %#v", response)
 	}
 }
