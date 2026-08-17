@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -172,5 +173,100 @@ func TestRegistryIdentityUsesSelectedAndPlatformKey(t *testing.T) {
 	}
 	if identity != gitx.RepositoryKey(`E:\Workspace\Repo`) {
 		t.Fatalf("identity = %q", identity)
+	}
+}
+
+func writeRegistryConfig(t *testing.T, recent []string, selected string) string {
+	t.Helper()
+	configFile := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(registryConfig{Recent: recent, LastSelected: selected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configFile, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configFile
+}
+
+func TestRegistryLoadRejectsPersistedPathWhoseCanonicalTargetDrifted(t *testing.T) {
+	configFile := writeRegistryConfig(t, []string{"approved-root"}, "approved-root")
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		"approved-root": {Path: "secret-root"},
+	}}, configFile)
+	// A reused Registry must not retain state from an earlier successful load.
+	registry.paths[registryKey("approved-root")] = "approved-root"
+	registry.selected = "approved-root"
+
+	registry.Load(context.Background())
+	if registry.Contains("approved-root") || registry.Contains("secret-root") {
+		t.Fatal("drifted persisted path authorized an approved or replacement alias")
+	}
+	if _, err := registry.Resolve("approved-root"); err == nil {
+		t.Fatal("approved alias resolved after canonical target drift")
+	}
+	if _, err := registry.Resolve("secret-root"); err == nil {
+		t.Fatal("replacement alias resolved after canonical target drift")
+	}
+	if got := registry.Selected(); got != "" {
+		t.Fatalf("drift-only load retained selection %q", got)
+	}
+}
+
+func TestRegistryLoadAcceptsPersistedRepositoryWithSameIdentity(t *testing.T) {
+	configFile := writeRegistryConfig(t, []string{"approved-root"}, "approved-root")
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		"approved-root": {Path: "approved-root", Head: "fresh-head"},
+	}}, configFile)
+	registry.Load(context.Background())
+
+	resolved, err := registry.Resolve("approved-root")
+	if err != nil || resolved != "approved-root" {
+		t.Fatalf("same-identity load failed: resolved=%q err=%v", resolved, err)
+	}
+	if got := registry.Selected(); got != "approved-root" {
+		t.Fatalf("selected = %q", got)
+	}
+}
+
+func TestRegistryLoadFallsBackToFirstValidRepositoryWhenSelectedDrifted(t *testing.T) {
+	configFile := writeRegistryConfig(t, []string{"drifted-root", "valid-root"}, "drifted-root")
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		"drifted-root": {Path: "replacement-root"},
+		"valid-root":   {Path: "valid-root"},
+	}}, configFile)
+	registry.Load(context.Background())
+
+	if registry.Contains("drifted-root") || registry.Contains("replacement-root") {
+		t.Fatal("drifted selected repository remained authorized")
+	}
+	if got := registry.Selected(); got != "valid-root" {
+		t.Fatalf("fallback selected = %q, want valid-root", got)
+	}
+	if resolved, err := registry.Resolve(""); err != nil || resolved != "valid-root" {
+		t.Fatalf("selected resolve = %q, %v", resolved, err)
+	}
+}
+
+func TestRegistryLoadCaseOnlyIdentityFollowsPlatform(t *testing.T) {
+	approved := `E:\Workspace\Repo`
+	inspected := strings.ToLower(approved)
+	configFile := writeRegistryConfig(t, []string{approved}, approved)
+	registry := NewRegistry(mappingInspector{repositories: map[string]gitx.Repository{
+		approved: {Path: inspected},
+	}}, configFile)
+	registry.Load(context.Background())
+
+	if runtime.GOOS == "windows" {
+		if resolved, err := registry.Resolve(approved); err != nil || !gitx.SameRepositoryPath(resolved, approved) {
+			t.Fatalf("Windows-equivalent persisted path rejected: %q, %v", resolved, err)
+		}
+		if registry.Selected() == "" {
+			t.Fatal("Windows-equivalent repository was not selected")
+		}
+		return
+	}
+	if registry.Contains(approved) || registry.Selected() != "" {
+		t.Fatal("case-sensitive platform accepted case-only canonical target change")
 	}
 }

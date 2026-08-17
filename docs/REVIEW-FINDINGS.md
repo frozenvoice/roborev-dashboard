@@ -14,6 +14,7 @@
 | 41 | `497abbf` | Finding | replacement request loading ownership, lazy error/retry UI, bounded terminal refresh retry, review 전환 시 전체 lazy generation invalidation을 수정 |
 | 49 | `3341e11` | Finding | platform-aware path identity, serialized polling, registry persistence rollback, PowerShell native failure propagation, startup timeout 분리, 실제 daemon review receipt/fresh HEAD metadata, background error dedupe와 focused contract tests를 수정 |
 | 53 | `2acdc6b` | Finding | fresh repository identity 재검증, backend opaque identity 기반 frontend matching/dedup, first review fetch loading gate를 수정 |
+| 54 | `d9e9181` | Finding | persisted repository load에도 platform-aware identity 재검증을 적용해 restart 사이 root drift authorization을 차단 |
 
 ## 적용한 핵심 finding
 

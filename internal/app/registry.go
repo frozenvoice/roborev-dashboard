@@ -53,7 +53,7 @@ func (r *Registry) Load(ctx context.Context) {
 	loaded := make(map[string]string)
 	firstLoaded := ""
 	for _, path := range cfg.Recent {
-		repo, inspectErr := r.inspector.Inspect(ctx, path)
+		repo, inspectErr := r.inspectExpected(ctx, path)
 		if inspectErr == nil {
 			loaded[registryKey(repo.Path)] = repo.Path
 			if firstLoaded == "" {
@@ -64,12 +64,14 @@ func (r *Registry) Load(ctx context.Context) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.paths = loaded
+	selectedPath := ""
 	if selected, ok := loaded[registryKey(cfg.LastSelected)]; ok {
-		r.selected = selected
+		selectedPath = selected
 	}
-	if r.selected == "" {
-		r.selected = firstLoaded
+	if selectedPath == "" {
+		selectedPath = firstLoaded
 	}
+	r.selected = selectedPath
 }
 
 func (r *Registry) saveState(pathsByKey map[string]string, selected string) error {
@@ -163,19 +165,19 @@ func (r *Registry) Inspect(ctx context.Context, path string) (gitx.Repository, e
 	if err != nil {
 		return gitx.Repository{}, err
 	}
-	return r.inspectResolved(ctx, resolved)
+	return r.inspectExpected(ctx, resolved)
 }
 
-func (r *Registry) inspectResolved(ctx context.Context, resolved string) (gitx.Repository, error) {
+func (r *Registry) inspectExpected(ctx context.Context, expectedPath string) (gitx.Repository, error) {
 	if r.inspector == nil {
 		return gitx.Repository{}, errors.New("repository inspector is unavailable")
 	}
-	repo, err := r.inspector.Inspect(ctx, resolved)
+	repo, err := r.inspector.Inspect(ctx, expectedPath)
 	if err != nil {
 		return gitx.Repository{}, err
 	}
-	if !gitx.SameRepositoryPath(repo.Path, resolved) {
-		return gitx.Repository{}, fmt.Errorf("inspected Git root %q does not match registered repository path %q", repo.Path, resolved)
+	if !gitx.SameRepositoryPath(repo.Path, expectedPath) {
+		return gitx.Repository{}, fmt.Errorf("inspected Git root %q does not match expected repository path %q", repo.Path, expectedPath)
 	}
 	return repo, nil
 }
@@ -189,7 +191,7 @@ func (r *Registry) InspectAll(ctx context.Context) []gitx.Repository {
 	r.mu.RUnlock()
 	repos := make([]gitx.Repository, 0, len(paths))
 	for _, path := range paths {
-		if repo, err := r.inspectResolved(ctx, path); err == nil {
+		if repo, err := r.inspectExpected(ctx, path); err == nil {
 			repos = append(repos, repo)
 		}
 	}
