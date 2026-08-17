@@ -13,6 +13,14 @@ review_type = "default"
 timeout = "12m"
 instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
 
+[review.subagents.grok_fast]
+agent = "grok"
+model = "grok-4.6"
+reasoning = "fast"
+review_type = "default"
+timeout = "12m"
+instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
+
 [review.subagents.grok]
 agent = "grok"
 model = "grok-4.6"
@@ -22,7 +30,11 @@ timeout = "12m"
 instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
 
 [review.panels.dashboard_cross]
-members = ["gpt", "claude", "grok"]
+members = ["gpt", "claude", "grok_fast"]
 synthesis_agent = "codex"
 synthesis_backup_agent = "claude-code"
 
+[review.panels.dashboard_deep]
+members = ["gpt", "claude", "grok"]
+synthesis_agent = "codex"
+synthesis_backup_agent = "claude-code"
