@@ -42,8 +42,8 @@ describe('App review workflow', () => {
       if (path.startsWith('/api/reviews?')) return response(jobs)
       if (path === '/api/reviews/42') return response(jobs[0])
       if (path.includes('/api/panels/')) return response({ jobs: [
-        { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'finding', agent: 'codex' },
-        { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'pass', agent: 'claude-code' },
+        { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
+        { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
         { id: 45, panel_role: 'member', panel_member_index: 2, status: 'running', agent: 'grok' },
       ] })
       return response({ success: true })
@@ -53,6 +53,8 @@ describe('App review workflow', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Panel members' }))
     expect(await screen.findByText('claude-code')).toBeInTheDocument()
     expect(screen.getByText('grok')).toBeInTheDocument()
+    expect(screen.getByText('codex').closest('article')).toHaveTextContent('Finding')
+    expect(screen.getByText('claude-code').closest('article')).toHaveTextContent('Pass')
   })
 })
 

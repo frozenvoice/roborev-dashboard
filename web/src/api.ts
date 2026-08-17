@@ -45,6 +45,7 @@ export type ReviewJob = {
   commit_sha?: string
   branch?: string
   subject?: string
+  commit_subject?: string
   job_type?: string
   agent?: string
   model?: string
@@ -57,6 +58,9 @@ export type ReviewJob = {
   closed?: boolean
   created_at?: string
   completed_at?: string
+  enqueued_at?: string
+  started_at?: string
+  finished_at?: string
   panel_name?: string
   panel_run_uuid?: string
   panel_role?: string

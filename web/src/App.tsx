@@ -14,8 +14,8 @@ const navigation = [
 
 function statusOf(job: ReviewJob) { return String(job.verdict || job.review && typeof job.review === 'object' && job.review.verdict || job.status || 'queued').toLowerCase() }
 function statusLabel(value: string) {
-  if (value === 'pass' || value === 'passed') return 'Pass'
-  if (value === 'fail' || value === 'finding' || value === 'failed_review') return 'Finding'
+  if (value === 'p' || value === 'pass' || value === 'passed') return 'Pass'
+  if (value === 'f' || value === 'fail' || value === 'finding' || value === 'failed_review') return 'Finding'
   if (value === 'done') return 'Done'
   if (value === 'running' || value === 'queued') return value[0].toUpperCase() + value.slice(1)
   if (value === 'canceled' || value === 'cancelled') return 'Canceled'
@@ -32,9 +32,11 @@ function isRunning(job: ReviewJob) { return ['queued', 'running'].includes(Strin
 function isClosed(job: ReviewJob) { return Boolean(job.addressed || job.closed) }
 function elapsed(job: ReviewJob) {
   if (job.duration_ms) return `${(job.duration_ms / 1000).toFixed(1)}s`
-  if (!job.created_at) return '—'
-  const end = job.completed_at ? Date.parse(job.completed_at) : Date.now()
-  const seconds = Math.max(0, Math.floor((end - Date.parse(job.created_at)) / 1000))
+  const start = job.started_at || job.created_at || job.enqueued_at
+  if (!start) return '—'
+  const finished = job.finished_at || job.completed_at
+  const end = finished ? Date.parse(finished) : Date.now()
+  const seconds = Math.max(0, Math.floor((end - Date.parse(start)) / 1000))
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
@@ -102,7 +104,7 @@ function ReviewDetail({ job, jobs, close, mutate, busy }: { job: ReviewJob; jobs
   const text = outputOf(current)
   const terminal = !isRunning(current)
   return <aside className="detail-panel" aria-label="Review detail">
-    <header className="detail-header"><div><span className="eyebrow">Review #{id}</span><h2>{current.subject || current.git_ref || current.commit_sha || 'Review detail'}</h2></div><button className="icon-button" aria-label="Close detail" onClick={close}><X /></button></header>
+    <header className="detail-header"><div><span className="eyebrow">Review #{id}</span><h2>{current.commit_subject || current.subject || current.git_ref || current.commit_sha || 'Review detail'}</h2></div><button className="icon-button" aria-label="Close detail" onClick={close}><X /></button></header>
     <div className="detail-summary"><StatusPill job={current} /><span><Bot size={14} />{current.panel_name || current.agent || 'default'}</span><span><Clock3 size={14} />{elapsed(current)}</span></div>
     <nav className="tabs" aria-label="Review detail tabs">
       {(['review', 'members', 'log', 'prompt', 'comments', 'metadata'] as Tab[]).map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'members' ? 'Panel members' : item[0].toUpperCase() + item.slice(1)}</button>)}
@@ -132,7 +134,7 @@ function ReviewList({ jobs, selected, onSelect }: { jobs: ReviewJob[]; selected?
   return <section className="review-section">
     <header className="section-heading"><div><span className="eyebrow">Review operations</span><h1>Review queue</h1><p>Live RoboRev jobs for the selected repository. Heavy content loads on demand.</p></div><div className="search"><Search size={16} /><input aria-label="Search reviews" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search jobs, agents, refs…" /></div></header>
     <div className="table-wrap"><table><thead><tr><th>Status</th><th>Target</th><th>Reviewer</th><th>Branch</th><th>Elapsed</th><th>State</th><th /></tr></thead><tbody>
-      {filtered.map(job => <tr key={idOf(job)} className={selected === idOf(job) ? 'selected' : ''} onClick={() => onSelect(job)}><td><StatusPill job={job} /></td><td><strong>#{idOf(job)} · {job.subject || job.git_ref || job.commit_sha || 'Custom task'}</strong><small>{job.job_type || (job.panel_name ? 'Panel synthesis' : 'Review')}</small></td><td><span className="agent"><Bot size={14} />{job.panel_name || job.agent || 'default'}</span><small>{job.model || job.reasoning || ''}</small></td><td>{job.branch || '—'}</td><td>{elapsed(job)}</td><td><span className={isClosed(job) ? 'muted' : 'open-state'}>{isClosed(job) ? 'Closed' : 'Open'}</span></td><td><ChevronRight size={17} /></td></tr>)}
+      {filtered.map(job => <tr key={idOf(job)} className={selected === idOf(job) ? 'selected' : ''} onClick={() => onSelect(job)}><td><StatusPill job={job} /></td><td><strong>#{idOf(job)} · {job.commit_subject || job.subject || job.git_ref || job.commit_sha || 'Custom task'}</strong><small>{job.job_type || (job.panel_name ? 'Panel synthesis' : 'Review')}</small></td><td><span className="agent"><Bot size={14} />{job.panel_name || job.agent || 'default'}</span><small>{job.model || job.reasoning || ''}</small></td><td>{job.branch || '—'}</td><td>{elapsed(job)}</td><td><span className={isClosed(job) ? 'muted' : 'open-state'}>{isClosed(job) ? 'Closed' : 'Open'}</span></td><td><ChevronRight size={17} /></td></tr>)}
     </tbody></table>{!filtered.length && <Empty title="No reviews found" body={query ? 'Try a different filter.' : 'Create a new review of HEAD to start.'} />}</div>
   </section>
 }

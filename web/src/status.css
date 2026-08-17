@@ -1,0 +1,9 @@
+.status-p {
+  color: var(--good);
+  background: #eaf8f2;
+}
+
+.status-f {
+  color: #b3263d;
+  background: #fff0f2;
+}
