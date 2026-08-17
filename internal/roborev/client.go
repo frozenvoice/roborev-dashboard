@@ -24,6 +24,7 @@ type Service interface {
 	Installation(context.Context) Installation
 	List(context.Context, string, int) (json.RawMessage, error)
 	Show(context.Context, int64) (json.RawMessage, error)
+	PanelMembers(context.Context, string) (json.RawMessage, error)
 	Prompt(context.Context, int64) (string, error)
 	Log(context.Context, int64) (string, error)
 	Review(context.Context, ReviewRequest) (json.RawMessage, error)
@@ -113,7 +114,7 @@ func capabilities(version string) Capabilities {
 		minor, _ = strconv.Atoi(parts[1])
 	}
 	v64 := len(parts) > 0 && parts[0] == "0" && minor >= 64
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, PanelReview: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, PanelReview: v64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
@@ -130,16 +131,34 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	if json.Unmarshal([]byte(result.Stdout), &version) != nil || version.Version == "" {
 		return Installation{Installed: false, Binary: c.Binary, Error: "invalid roborev version response"}
 	}
-	installation := Installation{Installed: true, Binary: c.Binary, Version: version.Version, Capabilities: capabilities(version.Version)}
-	status, statusErr := c.run(ctx, []string{"status", "--json"}, 5*time.Second, 256<<10)
-	if statusErr != nil {
-		installation.Error = statusErr.Error()
-		return installation
-	}
-	if raw, rawErr := decodeRaw(status.Stdout); rawErr == nil {
-		installation.Status = raw
+	installation := Installation{Installed: true, Binary: c.Binary, Version: version.Version, Capabilities: capabilities(version.Version), Status: json.RawMessage(`{"running":false}`)}
+	if installation.Capabilities.ReviewEnqueueAPI {
+		if health, healthErr := c.health(ctx); healthErr == nil {
+			status, _ := json.Marshal(map[string]any{"running": true, "health": health})
+			installation.Status = status
+		}
 	}
 	return installation
+}
+
+func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+"/api/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("health endpoint returned %d", resp.StatusCode)
+	}
+	return decodeRaw(string(data))
 }
 
 func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMessage, error) {
@@ -160,6 +179,39 @@ func (c *Client) Show(ctx context.Context, id int64) (json.RawMessage, error) {
 		return nil, err
 	}
 	return decodeRaw(result.Stdout)
+}
+
+func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMessage, error) {
+	if len(runUUID) != 36 {
+		return nil, errors.New("invalid panel run UUID")
+	}
+	for _, char := range runUUID {
+		if !(char == '-' || char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return nil, errors.New("invalid panel run UUID")
+		}
+	}
+	installation := c.Installation(ctx)
+	if !installation.Installed || !installation.Capabilities.PanelMembersAPI {
+		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", installation.Version)
+	}
+	endpoint := c.DaemonURL + "/api/jobs?panel_run=" + url.QueryEscape(runUUID) + "&limit=0&omit_prompt=true"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RoboRev daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return decodeRaw(string(data))
 }
 
 func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {

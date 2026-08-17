@@ -7,12 +7,14 @@
 | Command / API | Dashboard feature | Transport | 상태 | 자동 테스트 | Notes |
 |---|---|---|---|---|---|
 | `version --json` | 설치/version 감지 | JSON CLI | B | 예정 | binary override → PATH 순서 |
-| `status --json` | daemon health/queue | JSON CLI | B | 예정 | running false도 정상 상태 |
+| `/api/health` | daemon health | version-gated daemon API | B | 예 | 작은 health payload만 polling |
+| `status --json` | full daemon/queue diagnostics | JSON CLI | P | 아니요 | v0.64.0은 recent job prompt를 포함하므로 polling 금지 |
 | `list --json` | review 목록/filter | JSON CLI | B | 예정 | prompt/log 미포함 |
 | `show --job --json` | review detail/metadata | JSON CLI | B | 예정 | 선택 시 lazy-load |
 | `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
 | `log --raw` | raw log | CLI bytes | B | 예정 | bounded response, lazy-load |
 | `review` + `/api/enqueue` | Review HEAD/advanced enqueue | version-gated daemon API | B | 예정 | CLI에 JSON receipt가 없어 API 사용 |
+| `/api/jobs?panel_run=...&omit_prompt=true` | panel member 상태 | version-gated daemon API | B | 예 | panel tab에서만 lazy-load |
 | `/api/job/rerun` | Rerun same target/config | version-gated daemon API | B/P | 예정 | frozen target; HEAD action과 분리 |
 | `cancel <id>` | queued/running cancel | typed CLI | B | 예정 | terminal job은 UI에서 숨김 |
 | `comment --job <id> -m` | comment | typed CLI | B | 예정 | argument array, multiline 지원 |
@@ -54,4 +56,3 @@
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.
 - `stream`은 JSONL이며 UI source of truth가 충분한지 검증 전까지 polling 보조 신호로만 계획한다.
-

@@ -79,16 +79,24 @@ function ReviewDetail({ job, jobs, close, mutate, busy }: { job: ReviewJob; jobs
   const [tab, setTab] = useState<Tab>('review')
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
+  const [memberJobs, setMemberJobs] = useState<ReviewJob[]>([])
   const [loading, setLoading] = useState(false)
   const id = idOf(job)
-  const members = useMemo(() => jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs])
+  const members = useMemo(() => memberJobs.length ? memberJobs : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs, memberJobs])
 
-  useEffect(() => { setDetail(null); setLazy({}); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(setDetail).catch(() => setDetail(job)).finally(() => setLoading(false)) }, [id])
+  useEffect(() => { setDetail(null); setLazy({}); setMemberJobs([]); setTab('review'); setLoading(true); request<ReviewJob>(`/api/reviews/${id}`).then(setDetail).catch(() => setDetail(job)).finally(() => setLoading(false)) }, [id])
   useEffect(() => {
     if (!['prompt', 'log'].includes(tab) || lazy[tab]) return
     setLoading(true)
     request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => setLazy(old => ({ ...old, [tab]: value.text }))).finally(() => setLoading(false))
   }, [id, lazy, tab])
+  useEffect(() => {
+    if (tab !== 'members' || !job.panel_run_uuid || memberJobs.length) return
+    setLoading(true)
+    request<unknown>(`/api/panels/${encodeURIComponent(job.panel_run_uuid)}/members`)
+      .then(value => setMemberJobs(jobsFromPayload(value).filter(member => member.panel_role === 'member').sort((a, b) => (a.panel_member_index ?? 0) - (b.panel_member_index ?? 0))))
+      .finally(() => setLoading(false))
+  }, [job.panel_run_uuid, memberJobs.length, tab])
 
   const current = detail ?? job
   const text = outputOf(current)
@@ -150,6 +158,10 @@ export function App() {
 
   useEffect(() => { loadBootstrap().catch(error => toast('error', (error as Error).message)).finally(() => setLoading(false)) }, [loadBootstrap, toast])
   useEffect(() => { const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000); return () => clearInterval(timer) }, [bootstrap?.selectedRepository, loadReviews])
+  useEffect(() => {
+    const timer = setInterval(() => loadBootstrap().catch(error => toast('error', (error as Error).message)), 10_000)
+    return () => clearInterval(timer)
+  }, [loadBootstrap, toast])
 
   const mutate = useCallback(async (path: string, body?: unknown) => {
     setBusy(true)
@@ -195,4 +207,3 @@ function Repositories({ bootstrap, mutate, busy }: { bootstrap: Bootstrap | null
 function Setup({ installation, mutate, busy }: { installation?: Bootstrap['roborev']; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
   return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">Runtime health</span><h1>Agents & Setup</h1><p>Dashboard uses existing agent CLI authentication and never stores tokens.</p></div></header><article className="setup-card"><Server /><div><h3>RoboRev {installation?.version || 'not detected'}</h3><code>{installation?.binary || 'PATH lookup failed'}</code><p>{installation?.status?.running ? 'Daemon is running.' : installation?.error || 'Daemon is stopped.'}</p></div>{installation?.installed && !installation.status?.running && <button className="button primary" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</article></section>
 }
-

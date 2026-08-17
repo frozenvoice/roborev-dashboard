@@ -2,6 +2,8 @@ package roborev
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -27,7 +29,12 @@ func buildFakeRoboRev(t *testing.T) string {
 
 func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	binary := buildFakeRoboRev(t)
-	client, err := NewClient(binary, proc.ExecRunner{}, "127.0.0.1:7373")
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":true,"version":"v0.64.0"}`))
+	}))
+	defer health.Close()
+	client, err := NewClient(binary, proc.ExecRunner{}, health.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

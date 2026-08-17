@@ -10,7 +10,7 @@ Browser (React)
 Go localhost server
   -> Repository registry -> Git executable + args
   -> RoboRev service
-       -> stable JSON CLI (version/status/list/show/summary/cost)
+       -> stable JSON CLI (version/list/show/summary/cost)
        -> version-gated daemon HTTP API (enqueue/rerun where CLI has no JSON receipt)
        -> typed CLI mutations (comment/close/cancel)
 RoboRev daemon -> RoboRev-owned storage
@@ -46,7 +46,8 @@ server가 canonical absolute path만 등록한다. 등록 시 `.git`을 확인�
 
 review 목록은 가벼운 `roborev list --json` 결과를 polling한다. detail, prompt와 log는 별도 endpoint에서 사용자가 tab을 선택할 때만 읽는다. panel synthesis를 우선 표시하고 member jobs는 parent metadata로 묶는다. mutation 성공 후 목록/detail을 다시 fetch한다.
 
+daemon 상태 polling은 v0.64.0의 작은 `/api/health`만 사용한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&omit_prompt=true`로 lazy-load한다.
+
 ## 확장 원칙
 
 각 RoboRev 기능은 service method, typed request, command builder, capability, HTTP route, confirmation 정책과 테스트를 함께 추가한다. CLI help에서 확인되지 않은 flag를 추측해 만들지 않는다. 중요한 변경은 이 문서와 coverage matrix를 함께 갱신한다.
-

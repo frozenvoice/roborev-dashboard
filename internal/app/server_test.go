@@ -33,6 +33,9 @@ func (f *fakeService) List(context.Context, string, int) (json.RawMessage, error
 func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
 	return json.RawMessage(`{"id":42}`), nil
 }
+func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"jobs":[]}`), nil
+}
 func (f *fakeService) Prompt(context.Context, int64) (string, error) { return "prompt", nil }
 func (f *fakeService) Log(context.Context, int64) (string, error)    { return "log", nil }
 func (f *fakeService) Review(context.Context, roborev.ReviewRequest) (json.RawMessage, error) {

@@ -19,6 +19,7 @@ export type Installation = {
     reviewEnqueueApi: boolean
     frozenRerunApi: boolean
     panelReview: boolean
+    panelMembersApi: boolean
     promptLazyLoad: boolean
     rawLog: boolean
   }
@@ -60,6 +61,7 @@ export type ReviewJob = {
   panel_run_uuid?: string
   panel_role?: string
   parent_job_id?: number
+  panel_member_index?: number
   member_job_ids?: number[]
   duration_ms?: number
   [key: string]: unknown
@@ -98,4 +100,3 @@ export function jobsFromPayload(value: unknown): ReviewJob[] {
   }
   return []
 }
-

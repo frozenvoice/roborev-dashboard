@@ -5,10 +5,10 @@ import { App, CommentBox } from './App'
 
 const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', repositories: [{ name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
-  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, panelReview: true, promptLazyLoad: true, rawLog: true } },
+  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, panelReview: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
   reviewHeadCommand: { executable: 'roborev.exe', args: ['review', 'abcdef123456', '--panel', 'dashboard_cross'] },
 }
-const jobs = [{ id: 42, git_ref: 'abcdef123456', branch: 'main', status: 'done', verdict: 'finding', panel_name: 'dashboard_cross', review: { output: '# Finding\nActionable issue' } }]
+const jobs = [{ id: 42, git_ref: 'abcdef123456', branch: 'main', status: 'done', verdict: 'finding', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', review: { output: '# Finding\nActionable issue' } }]
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
 
@@ -33,6 +33,26 @@ describe('App review workflow', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)
     expect((await screen.findAllByText('Finding')).length).toBeGreaterThan(0)
+  })
+
+  it('lazy-loads and renders panel member agents', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.includes('/api/panels/')) return response({ jobs: [
+        { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'finding', agent: 'codex' },
+        { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'pass', agent: 'claude-code' },
+        { id: 45, panel_role: 'member', panel_member_index: 2, status: 'running', agent: 'grok' },
+      ] })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Panel members' }))
+    expect(await screen.findByText('claude-code')).toBeInTheDocument()
+    expect(screen.getByText('grok')).toBeInTheDocument()
   })
 })
 

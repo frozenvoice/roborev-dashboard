@@ -15,6 +15,7 @@ type Capabilities struct {
 	ReviewEnqueueAPI bool `json:"reviewEnqueueApi"`
 	FrozenRerunAPI   bool `json:"frozenRerunApi"`
 	PanelReview      bool `json:"panelReview"`
+	PanelMembersAPI  bool `json:"panelMembersApi"`
 	PromptLazyLoad   bool `json:"promptLazyLoad"`
 	RawLog           bool `json:"rawLog"`
 }

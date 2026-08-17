@@ -1,8 +1,11 @@
 package roborev
 
 import (
+	"context"
 	"reflect"
 	"testing"
+
+	"github.com/froze/roborev-dashboard/internal/process"
 )
 
 func TestCommentArgsKeepUserTextInOneArgument(t *testing.T) {
@@ -48,4 +51,20 @@ func TestMalformedMachineOutputIsRejected(t *testing.T) {
 	if _, err := decodeRaw("not-json"); err == nil {
 		t.Fatal("expected malformed JSON error")
 	}
+}
+
+func TestPanelMembersRejectsUntrustedRunIdentifier(t *testing.T) {
+	client, err := NewClient("roborev", fakeRunner{}, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PanelMembers(context.Background(), "../../api/secrets"); err == nil {
+		t.Fatal("expected invalid panel run identifier error")
+	}
+}
+
+type fakeRunner struct{}
+
+func (fakeRunner) Run(context.Context, process.Command) (process.Result, error) {
+	return process.Result{}, nil
 }

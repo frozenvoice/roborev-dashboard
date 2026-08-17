@@ -57,6 +57,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
 	s.mux.HandleFunc("GET /api/reviews/{id}/prompt", s.showPrompt)
 	s.mux.HandleFunc("GET /api/reviews/{id}/log", s.showLog)
+	s.mux.HandleFunc("GET /api/panels/{run}/members", s.panelMembers)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
@@ -198,6 +199,15 @@ func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"text": value})
+}
+
+func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.RoboRev.PanelMembers(r.Context(), r.PathValue("run"))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, raw)
 }
 
 type repoBody struct {
@@ -352,10 +362,20 @@ func spaHandler() http.Handler {
 		return http.NotFoundHandler()
 	}
 	files := http.FileServer(http.FS(assets))
+	serveIndex := func(w http.ResponseWriter) {
+		data, readErr := fs.ReadFile(assets, "index.html")
+		if readErr != nil {
+			http.Error(w, "frontend assets are not built; run scripts/build.ps1", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(data)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
-		if path == "" {
-			path = "index.html"
+		if path == "" || path == "index.html" {
+			serveIndex(w)
+			return
 		}
 		if _, err := fs.Stat(assets, path); err == nil {
 			clone := r.Clone(r.Context())
@@ -363,13 +383,7 @@ func spaHandler() http.Handler {
 			files.ServeHTTP(w, clone)
 			return
 		}
-		if _, err := fs.Stat(assets, "index.html"); err != nil {
-			http.Error(w, "frontend assets are not built; run scripts/build.ps1", http.StatusServiceUnavailable)
-			return
-		}
-		clone := r.Clone(r.Context())
-		clone.URL.Path = "/index.html"
-		files.ServeHTTP(w, clone)
+		serveIndex(w)
 	})
 }
 

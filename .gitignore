@@ -6,6 +6,9 @@ internal/webui/dist/*
 dist/
 coverage/
 *.log
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
 *.exe
 !.github/**/*.exe
 .env
