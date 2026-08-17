@@ -93,7 +93,7 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	stderr := newLimitedBuffer(command.OutputLimit)
 	cmd := exec.CommandContext(ctx, command.Executable, command.Args...)
 	cmd.Dir = command.Dir
-	prepareCommand(cmd)
+	prepareCommand(cmd, !command.AllowDetachedChildren)
 	cmd.Stdout = io.Writer(stdout)
 	cmd.Stderr = io.Writer(stderr)
 
@@ -122,7 +122,15 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 		} else {
 			treeMu.Lock()
 			tree = attached
+			if tree != nil {
+				attachErr = tree.Resume()
+			}
 			treeMu.Unlock()
+			if attachErr != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				err = fmt.Errorf("resume process tree: %w", attachErr)
+			}
 		}
 	}
 	if err == nil {
@@ -154,6 +162,7 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 }
 
 type processTree interface {
+	Resume() error
 	Terminate() error
 	Close() error
 }

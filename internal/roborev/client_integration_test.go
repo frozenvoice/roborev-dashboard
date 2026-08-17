@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +41,24 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 			if request.URL.Query().Get("omit_prompt") != "true" {
 				t.Error("job list did not omit prompts")
 			}
-			_, _ = w.Write([]byte(`{"jobs":[{"id":42,"repo_path":"E:\\한글 프로젝트\\repo","status":"done","verdict":"F","commit_subject":"Observed metadata","enqueued_at":"2026-08-17T00:00:00Z","started_at":"2026-08-17T00:00:05Z","finished_at":"2026-08-17T00:00:30Z","panel_role":"member","panel_member_index":0}],"has_more":false}`))
+			query := request.URL.Query()
+			job := map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "status": "running", "verdict": "F", "commit_subject": "Observed metadata", "enqueued_at": "2026-08-17T00:00:00Z", "started_at": "2026-08-17T00:00:05Z", "prompt": strings.Repeat("large-active-prompt", 140_000), "diff_content": "secret diff"}
+			switch {
+			case query.Get("id") == "42":
+				if query.Get("limit") != "1" {
+					t.Error("single job lookup did not request limit=1")
+				}
+			case query.Get("panel_run") == "986d3bfa-05da-4621-aeca-66f493a19ea3":
+				job["id"] = 43
+				job["panel_role"] = "member"
+				job["panel_member_index"] = 0
+			case query.Get("repo") == `E:\한글 프로젝트\repo`:
+				job["finished_at"] = "2026-08-17T00:00:30Z"
+			default:
+				http.Error(w, "unexpected jobs query", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []any{job}, "has_more": false})
 		default:
 			http.NotFound(w, request)
 		}
@@ -62,6 +80,19 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	}
 	if json.Unmarshal(installation.Status, &status) != nil || !status.Running || !status.Known {
 		t.Fatalf("unexpected daemon health status: %s", installation.Status)
+	}
+	client.versionMu.Lock()
+	client.version = "v0.63.0"
+	client.versionAt = time.Now()
+	client.versionMu.Unlock()
+	if version, _ := client.detectVersion(ctx); version != "v0.63.0" {
+		t.Fatalf("fresh cached version was not reused: %q", version)
+	}
+	client.versionMu.Lock()
+	client.versionAt = time.Now().Add(-time.Minute)
+	client.versionMu.Unlock()
+	if version, _ := client.detectVersion(ctx); version != "v0.64.0" {
+		t.Fatalf("expired version cache was not refreshed: %q", version)
 	}
 	jobs, err := client.List(ctx, `E:\한글 프로젝트\repo`, 100)
 	if err != nil || len(jobs) == 0 {

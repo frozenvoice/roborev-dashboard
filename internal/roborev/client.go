@@ -45,6 +45,7 @@ type Client struct {
 	HTTP      *http.Client
 	versionMu sync.RWMutex
 	version   string
+	versionAt time.Time
 }
 
 func ResolveBinary(override string) (string, error) {
@@ -145,8 +146,9 @@ func (c *Client) Installation(ctx context.Context) Installation {
 func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	c.versionMu.RLock()
 	value := c.version
+	detectedAt := c.versionAt
 	c.versionMu.RUnlock()
-	if value != "" {
+	if value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
 	}
 	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
@@ -161,6 +163,7 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	}
 	c.versionMu.Lock()
 	c.version = version.Version
+	c.versionAt = time.Now()
 	c.versionMu.Unlock()
 	return version.Version, nil
 }
@@ -187,7 +190,10 @@ func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
 
 func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMessage, error) {
 	version, err := c.detectVersion(ctx)
-	if err != nil || !capabilities(version).JobListAPI {
+	if err != nil {
+		return nil, err
+	}
+	if !capabilities(version).JobListAPI {
 		return nil, fmt.Errorf("RoboRev %s does not support metadata-only job listing", version)
 	}
 	if limit < 1 || limit > 200 {
@@ -197,7 +203,11 @@ func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMess
 	query.Set("repo", repo)
 	query.Set("limit", strconv.Itoa(limit))
 	query.Set("omit_prompt", "true")
-	return c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 8<<20)
+	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 64<<20)
+	if err != nil {
+		return nil, err
+	}
+	return stripHeavyJobFields(raw)
 }
 
 func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error) {
@@ -205,14 +215,17 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 		return JobMetadata{}, err
 	}
 	version, err := c.detectVersion(ctx)
-	if err != nil || !capabilities(version).JobListAPI {
+	if err != nil {
+		return JobMetadata{}, err
+	}
+	if !capabilities(version).JobListAPI {
 		return JobMetadata{}, fmt.Errorf("RoboRev %s does not support metadata-only job lookup", version)
 	}
 	query := url.Values{}
 	query.Set("id", strconv.FormatInt(id, 10))
 	query.Set("limit", "1")
 	query.Set("omit_prompt", "true")
-	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 1<<20)
+	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 64<<20)
 	if err != nil {
 		return JobMetadata{}, err
 	}
@@ -250,10 +263,43 @@ func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMess
 		}
 	}
 	version, err := c.detectVersion(ctx)
-	if err != nil || !capabilities(version).PanelMembersAPI {
+	if err != nil {
+		return nil, err
+	}
+	if !capabilities(version).PanelMembersAPI {
 		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", version)
 	}
-	return c.getDaemonJSON(ctx, "/api/jobs?panel_run="+url.QueryEscape(runUUID)+"&limit=0&omit_prompt=true", 8<<20)
+	raw, err := c.getDaemonJSON(ctx, "/api/jobs?panel_run="+url.QueryEscape(runUUID)+"&limit=0&omit_prompt=true", 64<<20)
+	if err != nil {
+		return nil, err
+	}
+	return stripHeavyJobFields(raw)
+}
+
+func stripHeavyJobFields(raw json.RawMessage) (json.RawMessage, error) {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, errors.New("invalid job list response")
+	}
+	var jobs []map[string]json.RawMessage
+	if err := json.Unmarshal(response["jobs"], &jobs); err != nil {
+		return nil, errors.New("invalid jobs payload")
+	}
+	for _, job := range jobs {
+		delete(job, "prompt")
+		delete(job, "diff_content")
+		delete(job, "patch")
+	}
+	jobsJSON, err := json.Marshal(jobs)
+	if err != nil {
+		return nil, err
+	}
+	response["jobs"] = jobsJSON
+	clean, err := json.Marshal(response)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(clean), nil
 }
 
 func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (json.RawMessage, error) {

@@ -12,7 +12,7 @@ const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashbo
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('App review workflow', () => {
   it('keeps Review HEAD distinct from frozen rerun', async () => {
@@ -99,6 +99,26 @@ describe('App review workflow', () => {
     await userEvent.click(await screen.findByText(/#42/))
     await userEvent.click(await screen.findByRole('button', { name: 'Close' }))
     await waitFor(() => expect(calls).toContain('/api/reviews/42/close'))
+  })
+
+  it('reconciles a selected running job when polling reaches a terminal state', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let listCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined }
+    const done = { ...jobs[0], status: 'done', verdict: 'P' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) { listCalls++; return response(listCalls === 1 ? [running] : [done]) }
+      if (path === '/api/reviews/42') return response(listCalls === 1 ? running : done)
+      return response({ success: true })
+    }))
+    render(<App />)
+    fireEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(4100)
+    expect((await screen.findAllByText('Pass')).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
   it('disables Review HEAD when the enqueue capability is unavailable', async () => {

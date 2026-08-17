@@ -26,13 +26,6 @@ func validatePanel(panel string) error {
 	return nil
 }
 
-func ListArgs(repo string, limit int) []string {
-	if limit < 1 || limit > 200 {
-		limit = 100
-	}
-	return []string{"list", "--json", "--repo", repo, "--limit", strconv.Itoa(limit)}
-}
-
 func ShowArgs(id int64) ([]string, error) {
 	if err := validateJobID(id); err != nil {
 		return nil, err

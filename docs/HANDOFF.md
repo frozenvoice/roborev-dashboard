@@ -13,6 +13,8 @@
 - 현재 작업 트리는 job authorization, Windows Job Object cleanup, clean-checkout embed placeholder, registry persistence, lightweight runtime polling, panel-member refresh/race/error, real payload fixture와 capability gating을 반영한다.
 - Go 전체 테스트와 React/Vitest 8 tests, Vite production build, embedded EXE HTTP/browser smoke가 통과했다. 실제 job 21 detail에서 commit title/Finding/20s와 Codex·Claude·Grok member 상태를 확인했다.
 - 최종 hardening commit 뒤 clean-checkout compile 검증과 새 HEAD panel review를 수행한다.
+- `666086c`의 새 panel job 25를 완료했다. active-job prompt stripping, verified `id=` lookup, suspended Job Object attach, selected polling reconciliation, version TTL, poll gating, panel handler coverage와 deterministic registry fallback을 후속 작업 트리에 반영했다.
+- 후속 React/Vitest 9 tests와 Vite production build가 통과했다. Go packages/test binaries는 모두 컴파일됐고 app/process suites는 explicit test EXE로 통과했다. 실행 도중 Windows Application Control이 새 unsigned Go binary hash를 차단하기 시작해 roborev suite와 최신 EXE 재실행은 정책상 차단됐다. 차단 전 `666086c` build의 전체 Go tests/EXE browser smoke는 통과했다.
 
 ## 결정
 

@@ -25,6 +25,7 @@ type fakeService struct {
 	repoPath          string
 	cancelCalls       int
 	installationCalls int
+	panelRaw          json.RawMessage
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -45,6 +46,9 @@ func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
 	return json.RawMessage(`{"id":42}`), nil
 }
 func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, error) {
+	if f.panelRaw != nil {
+		return f.panelRaw, nil
+	}
 	return json.RawMessage(`{"jobs":[]}`), nil
 }
 func (f *fakeService) Prompt(context.Context, int64) (string, error) { return "prompt", nil }
@@ -128,5 +132,28 @@ func TestRuntimeHealthDoesNotBootstrapRepositories(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"version":"v0.64.0"`) {
 		t.Fatalf("runtime response missing version: %s", recorder.Body.String())
+	}
+}
+
+func TestPanelMembersEnforcesRepositoryBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"registered", `{"jobs":[{"id":1,"repo_path":"E:\\repo"}]}`, http.StatusOK},
+		{"foreign", `{"jobs":[{"id":1,"repo_path":"E:\\foreign"}]}`, http.StatusForbidden},
+		{"empty", `{"jobs":[]}`, http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := setupServer(t, &fakeService{panelRaw: json.RawMessage(test.raw)})
+			request := httptest.NewRequest(http.MethodGet, "/api/panels/986d3bfa-05da-4621-aeca-66f493a19ea3/members", nil)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, request)
+			if recorder.Code != test.want {
+				t.Fatalf("expected %d, got %d: %s", test.want, recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }

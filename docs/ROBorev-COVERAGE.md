@@ -9,7 +9,8 @@
 | `version --json` | 설치/version 감지 | JSON CLI | B | 예 | binary override → PATH 순서 |
 | `/api/health` | daemon health | version-gated daemon API | B | 예 | 작은 health payload만 polling |
 | `status --json` | full daemon/queue diagnostics | JSON CLI | P | 아니요 | v0.64.0은 recent job prompt를 포함하므로 polling 금지 |
-| `/api/jobs?repo=...&omit_prompt=true` | review 목록/filter | version-gated daemon API | B | 예 | 실제 필드 fixture; prompt/diff 없는 4초 polling |
+| `/api/jobs?repo=...&omit_prompt=true` | review 목록/filter | version-gated daemon API | B | 예 | active prompt도 adapter가 strip하는 4초 polling |
+| `/api/jobs?id=...&omit_prompt=true` | job owning-repo authorization | version-gated daemon API | B | 예 | upstream v0.64 source와 query-sensitive oversized fixture로 검증 |
 | `list --json` | full CLI job payload | JSON CLI | N | 아니요 | prompt/diff를 포함하므로 polling 금지 |
 | `show --job --json` | review detail/metadata | JSON CLI | B | 예 | `job_id` identity 보존, 선택 시 lazy-load |
 | `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
@@ -55,7 +56,7 @@
 
 - `review`는 `--json`을 제공하지 않는다. upstream `/api/enqueue` response는 single job 또는 panel synthesis와 `member_job_ids`를 반환한다.
 - 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
-- `list --json`은 prompt와 diff를 포함한다. Dashboard 목록은 `/api/jobs?omit_prompt=true`만 사용한다.
+- `list --json`은 prompt와 diff를 포함한다. v0.64 daemon도 `omit_prompt=true`에서 queued/running prompt를 유지하므로 Dashboard adapter가 status와 무관하게 heavy fields를 제거한다.
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.
 - `stream`은 JSONL이며 UI source of truth가 충분한지 검증 전까지 polling 보조 신호로만 계획한다.

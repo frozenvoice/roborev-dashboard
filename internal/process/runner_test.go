@@ -56,7 +56,7 @@ func TestExecRunnerTimeoutKillsWindowsDescendants(t *testing.T) {
 	if err := os.WriteFile(childScript, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	parentCommand := "Start-Sleep -Milliseconds 300; Start-Process -WindowStyle Hidden -FilePath '" + childScript + "'; Start-Sleep -Seconds 10"
+	parentCommand := "Start-Process -WindowStyle Hidden -FilePath '" + childScript + "'; Start-Sleep -Seconds 10"
 	_, err := (ExecRunner{}).Run(context.Background(), Command{Executable: "powershell.exe", Args: []string{"-NoProfile", "-Command", parentCommand}, Timeout: time.Second})
 	if err == nil {
 		t.Fatal("expected parent timeout")

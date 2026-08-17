@@ -56,10 +56,14 @@ func (r *Registry) Load(ctx context.Context) {
 		return
 	}
 	loaded := make(map[string]string)
+	firstLoaded := ""
 	for _, path := range cfg.Recent {
 		repo, inspectErr := r.inspector.Inspect(ctx, path)
 		if inspectErr == nil {
 			loaded[registryKey(repo.Path)] = repo.Path
+			if firstLoaded == "" {
+				firstLoaded = repo.Path
+			}
 		}
 	}
 	r.mu.Lock()
@@ -69,10 +73,7 @@ func (r *Registry) Load(ctx context.Context) {
 		r.selected = selected
 	}
 	if r.selected == "" {
-		for _, path := range loaded {
-			r.selected = path
-			break
-		}
+		r.selected = firstLoaded
 	}
 }
 

@@ -7,6 +7,7 @@
 | 13 | `fb88aa9` | Finding | repository job-ID authorization, Windows descendant cleanup, embed placeholder, registry load, repo-switch race, capability gating, show identity, metadata-only listing, config detection, detached mutation을 수정 |
 | 17 | `cff6d45` | Finding | panel UUID repository authorization, member refresh/race/error, lightweight runtime endpoint, unknown health state와 diagnostic, daemon HTTP fixture를 수정 |
 | 21 | `d3ed6b2` | Finding | visible commit subject/normalized verdict search, real v0.64 lifecycle fixture와 elapsed assertion, status palette duplication을 수정 |
+| 25 | `666086c` | Finding | active-job heavy field strip, verified `id=` authorization fixture, suspended-before-Job-Object resume, selected state sync, version TTL, poll gating, panel handler tests, deterministic registry fallback을 수정 |
 
 ## 적용한 핵심 finding
 
@@ -17,6 +18,8 @@
 - panel member 요청은 panel UUID 단위 cleanup을 수행하고 nonterminal 상태 동안 갱신하며 오류를 inline 표시한다.
 - 10초 runtime poll은 repository Git inspection과 review list를 반복하지 않는다.
 - 실제 v0.64 응답에서 관찰한 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `P`/`F`를 fixture와 UI test에 반영했다.
+- v0.64 `omit_prompt=true`가 queued/running prompt를 유지하는 upstream 계약을 재확인하고 adapter가 `prompt`, `diff_content`, `patch`를 상태와 무관하게 제거하도록 했다. 1 MiB를 넘는 active prompt fixture로 list와 job authorization을 검증한다.
+- Windows process는 suspended 상태로 만들고 Job Object에 할당한 뒤 resume하며, delay 없이 descendant를 spawn하는 timeout test로 race window를 검증한다.
 
 ## 적용하지 않은 지적과 근거
 

@@ -177,7 +177,10 @@ export function App() {
 		const generation = ++reviewGeneration.current
 		try {
 			const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))
-			if (generation === reviewGeneration.current) setJobs(next)
+      if (generation === reviewGeneration.current) {
+        setJobs(next)
+        setSelected(current => current ? next.find(job => idOf(job) === idOf(current)) ?? current : current)
+      }
 			return generation === reviewGeneration.current ? next : []
 		} catch (error) {
 			if (!(error instanceof APIError && error.message.includes('daemon not running'))) toast('error', (error as Error).message)
@@ -185,11 +188,17 @@ export function App() {
 		}
   }, [toast])
   const loadBootstrap = useCallback(async () => {
-    const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data); await loadReviews(data.selectedRepository)
+    const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data)
+    if (data.roborev.installed && data.roborev.capabilities.jobListApi && data.roborev.status?.running) await loadReviews(data.selectedRepository)
   }, [loadReviews])
 
   useEffect(() => { loadBootstrap().catch(error => toast('error', (error as Error).message)).finally(() => setLoading(false)) }, [loadBootstrap, toast])
-  useEffect(() => { const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000); return () => clearInterval(timer) }, [bootstrap?.selectedRepository, loadReviews])
+  const canPollReviews = Boolean(bootstrap?.roborev.installed && bootstrap.roborev.capabilities.jobListApi && bootstrap.roborev.status?.running)
+  useEffect(() => {
+    if (!canPollReviews) return
+    const timer = setInterval(() => loadReviews(bootstrap?.selectedRepository), 4000)
+    return () => clearInterval(timer)
+  }, [bootstrap?.selectedRepository, canPollReviews, loadReviews])
   useEffect(() => {
     const timer = setInterval(() => request<Installation>('/api/runtime').then(runtime => setBootstrap(current => current ? { ...current, roborev: runtime } : current)).catch(error => toast('error', (error as Error).message)), 10_000)
     return () => clearInterval(timer)

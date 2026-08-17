@@ -9,10 +9,17 @@ import (
 	"unsafe"
 )
 
-const createNoWindow = 0x08000000
+const (
+	createNoWindow  = 0x08000000
+	createSuspended = 0x00000004
+)
 
-func prepareCommand(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
+func prepareCommand(cmd *exec.Cmd, suspended bool) {
+	flags := uint32(createNoWindow)
+	if suspended {
+		flags |= createSuspended
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
 }
 
 const (
@@ -20,6 +27,7 @@ const (
 	jobObjectLimitKillOnJobClose    = 0x00002000
 	processTerminate                = 0x0001
 	processSetQuota                 = 0x0100
+	processSuspendResume            = 0x0800
 )
 
 var (
@@ -30,6 +38,7 @@ var (
 	assignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
 	terminateJobObject       = kernel32.NewProc("TerminateJobObject")
 	closeHandle              = kernel32.NewProc("CloseHandle")
+	ntResumeProcess          = syscall.NewLazyDLL("ntdll.dll").NewProc("NtResumeProcess")
 )
 
 type jobObjectBasicLimitInformation struct {
@@ -62,7 +71,10 @@ type jobObjectExtendedLimitInformation struct {
 	PeakJobMemoryUsed     uintptr
 }
 
-type windowsJob struct{ handle uintptr }
+type windowsJob struct {
+	handle        uintptr
+	processHandle uintptr
+}
 
 func winCallError(name string, callErr error) error {
 	if callErr == nil || callErr == syscall.Errno(0) {
@@ -90,17 +102,36 @@ func attachProcessTree(cmd *exec.Cmd) (processTree, error) {
 		return nil, winCallError("SetInformationJobObject", callErr)
 	}
 
-	processHandle, _, callErr := openProcess.Call(processTerminate|processSetQuota, 0, uintptr(cmd.Process.Pid))
+	processHandle, _, callErr := openProcess.Call(processTerminate|processSetQuota|processSuspendResume, 0, uintptr(cmd.Process.Pid))
 	if processHandle == 0 {
 		return nil, winCallError("OpenProcess", callErr)
 	}
-	defer func() { _, _, _ = closeHandle.Call(processHandle) }()
+	closeProcess := true
+	defer func() {
+		if closeProcess {
+			_, _, _ = closeHandle.Call(processHandle)
+		}
+	}()
 	ok, _, callErr = assignProcessToJobObject.Call(job, processHandle)
 	if ok == 0 {
 		return nil, winCallError("AssignProcessToJobObject", callErr)
 	}
 	closeJob = false
-	return &windowsJob{handle: job}, nil
+	closeProcess = false
+	return &windowsJob{handle: job, processHandle: processHandle}, nil
+}
+
+func (j *windowsJob) Resume() error {
+	if j.processHandle == 0 {
+		return nil
+	}
+	status, _, _ := ntResumeProcess.Call(j.processHandle)
+	_, _, _ = closeHandle.Call(j.processHandle)
+	j.processHandle = 0
+	if status != 0 {
+		return fmt.Errorf("NtResumeProcess failed with status 0x%x", status)
+	}
+	return nil
 }
 
 func (j *windowsJob) Terminate() error {
@@ -115,6 +146,10 @@ func (j *windowsJob) Terminate() error {
 }
 
 func (j *windowsJob) Close() error {
+	if j.processHandle != 0 {
+		_, _, _ = closeHandle.Call(j.processHandle)
+		j.processHandle = 0
+	}
 	if j.handle == 0 {
 		return nil
 	}
