@@ -7,8 +7,9 @@ instructions = "Independently review this change for correctness, regressions, c
 
 [review.subagents.claude]
 agent = "claude-code"
+model = "sonnet"
+reasoning = "standard"
 review_type = "default"
-reasoning = "thorough"
 timeout = "12m"
 instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
 

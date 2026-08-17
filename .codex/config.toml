@@ -9,7 +9,7 @@ enabled = true
 
 # 별도 모델 지정 없이 spawn하면 기본 Luna
 default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "max"
+default_subagent_reasoning_effort = "xhigh"
 
 # 처음에는 너무 많이 풀지 않는 걸 추천
 max_concurrent_threads_per_session = 4
