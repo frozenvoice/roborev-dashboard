@@ -22,7 +22,7 @@
 - production은 React assets를 Go binary에 embed한 단일 exe다.
 - detail/prompt/log는 stable CLI를 사용한다. prompt/diff 없는 목록과 job ownership lookup, review enqueue, frozen rerun, panel members, health는 v0.64.0 daemon HTTP API를 version-gated로 사용한다.
 - repository registry는 canonical Git root만 허용하고 runtime fresh inspection과 startup persisted-path inspection 결과가 expected identity와 일치하는지 같은 platform-aware 규칙으로 재검증한다. Frontend는 backend 제공 opaque identity만 비교한다.
-- panel discovery는 v0.64.0에 enumeration API가 없어 typed TOML fallback으로 global/local map merge를 재현한다. registered root direct `.roborev.toml`만 지원하며, direct config 없는 linked worktree는 main-config 상속을 추측하지 않고 built-in `none`만 허용한다.
+- panel discovery는 v0.64.0에 enumeration API가 없어 typed TOML fallback으로 global/local map merge를 재현한다. registered root direct `.roborev.toml`만 지원하며, config는 플랫폼별 no-follow handle로 bounded read한다. direct config 없는 `.git` regular-file layout은 metadata를 확인하고, metadata 실패 시 global named panel discovery/mutation을 fail closed하며 actual linked worktree는 main-config 상속을 추측하지 않고 built-in `none`만 허용한다.
 - panel preference는 Dashboard config에 repository identity별로 저장하되 current catalog를 매번 다시 authorization한다. malformed config는 fail closed한다.
 - Fix Prompt는 terminal F single/synthesis/individual member의 bounded `show --json` subset으로 로컬에서 결정적으로 생성하며 LLM이나 mutation을 호출하지 않는다.
 - review list는 각 요청 완료 4초 뒤, 작은 `/api/runtime` health 상태는 각 요청 완료 10초 뒤 다음 poll을 예약한다. `/api/runtime`은 repository inspect/list를 수행하지 않는다. `status --json`과 `list --json`은 full prompt/diff를 포함할 수 있어 polling에 사용하지 않는다.

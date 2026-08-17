@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -245,5 +246,32 @@ func TestSubmoduleLikeGitFileKeepsGlobalPanelReviewAuthorized(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated || service.reviewCalls != 1 || service.reviewRequest.Panel != "shared" {
 		t.Fatalf("submodule-like panel review was not enqueued: status=%d calls=%d request=%#v body=%s", recorder.Code, service.reviewCalls, service.reviewRequest, recorder.Body.String())
+	}
+}
+
+func TestLinkedLikeGitFileMetadataFailureBlocksReviewMutation(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: ../main/.git/worktrees/linked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(globalPath, []byte("[review.subagents.a]\nagent='codex'\n[review.panels.shared]\nmembers=['a']\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, service, _ := panelTestServer(t, "", repo)
+	server.Panels = &roborev.PanelResolver{GlobalConfigPath: globalPath, Metadata: fakePanelGitMetadata{err: errors.New("SECRET_METADATA_FAILURE")}}
+
+	state := requestPanels(t, server, repo)
+	if state.Error == "" || len(state.Panels) != 0 || strings.Contains(state.Error, "SECRET_METADATA_FAILURE") {
+		t.Fatalf("metadata failure was not reported as unavailable: %#v", state)
+	}
+
+	body, _ := json.Marshal(reviewBody{RepoPath: repo, Panel: "shared"})
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(string(body)))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict || service.reviewCalls != 0 {
+		t.Fatalf("metadata failure allowed mutation: status=%d calls=%d body=%s", recorder.Code, service.reviewCalls, recorder.Body.String())
 	}
 }

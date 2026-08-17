@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,17 @@ type fakeGitMetadataResolver struct {
 }
 
 func (f fakeGitMetadataResolver) IsLinkedWorktree(context.Context, string) (bool, error) {
+	return f.linked, f.err
+}
+
+type countingGitMetadataResolver struct {
+	calls  int
+	linked bool
+	err    error
+}
+
+func (f *countingGitMetadataResolver) IsLinkedWorktree(context.Context, string) (bool, error) {
+	f.calls++
 	return f.linked, f.err
 }
 
@@ -117,7 +130,7 @@ func TestLoadPanelConfigAllowsSmallAndNearLimitRegularFiles(t *testing.T) {
 			if err := os.WriteFile(path, bytes.Repeat([]byte{'#'}, size), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := loadPanelConfig(path); err != nil {
+			if _, _, err := loadPanelConfig(path); err != nil {
 				t.Fatalf("size %d rejected: %v", size, err)
 			}
 		})
@@ -129,11 +142,11 @@ func TestLoadPanelConfigRejectsOversizedAndNonRegularFiles(t *testing.T) {
 	if err := os.WriteFile(over, bytes.Repeat([]byte{'#'}, maxPanelConfigBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadPanelConfig(over); err == nil {
+	if _, _, err := loadPanelConfig(over); err == nil {
 		t.Fatal("oversized config was accepted")
 	}
 	directory := t.TempDir()
-	if _, err := loadPanelConfig(directory); err == nil {
+	if _, _, err := loadPanelConfig(directory); err == nil {
 		t.Fatal("directory config was accepted")
 	}
 	target := filepath.Join(t.TempDir(), "target.toml")
@@ -142,9 +155,37 @@ func TestLoadPanelConfigRejectsOversizedAndNonRegularFiles(t *testing.T) {
 	}
 	link := filepath.Join(filepath.Dir(target), "link.toml")
 	if err := os.Symlink(target, link); err == nil {
-		if _, err := loadPanelConfig(link); err == nil {
+		if _, _, err := loadPanelConfig(link); err == nil {
 			t.Fatal("symlink config was accepted")
 		}
+	}
+}
+
+func TestLoadPanelConfigReadsOpenedHandleAfterPathReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	want := []byte("# original panel config\n")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handle, err := openPanelConfigNoFollow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Close()
+	replacement := path + ".moved"
+	if err := os.Rename(path, replacement); err != nil {
+		t.Skipf("path replacement unavailable: %v", err)
+	}
+	defer os.Remove(replacement)
+	if err := os.WriteFile(path, []byte("# replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("opened handle changed after pathname replacement: got %q want %q", got, want)
 	}
 }
 
@@ -254,5 +295,77 @@ func TestPanelResolverUsesDirectConfigInLinkedWorktree(t *testing.T) {
 	shared, ok := catalog.Find("shared")
 	if !ok || shared.Origin != "local" || len(shared.Members) != 1 || shared.Members[0] != "local" {
 		t.Fatalf("direct linked-worktree config was not applied: %#v", catalog.Panels)
+	}
+}
+
+func TestPanelResolverDirectEmptyConfigBypassesAmbiguousGitMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: not parsed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".roborev.toml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.panels.global]\nmembers=['global']\n")
+	metadata := &countingGitMetadataResolver{err: errors.New("metadata failure")}
+	catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: metadata}).Resolve(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.calls != 0 {
+		t.Fatalf("metadata calls = %d, want 0", metadata.calls)
+	}
+	if _, ok := catalog.Find("global"); !ok {
+		t.Fatalf("global panel missing: %#v", catalog.Panels)
+	}
+}
+
+func TestPanelResolverUnambiguousGitLayoutsDoNotCallMetadata(t *testing.T) {
+	for _, layout := range []string{"absent", "directory"} {
+		t.Run(layout, func(t *testing.T) {
+			root := t.TempDir()
+			if layout == "directory" {
+				if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			globalPath := filepath.Join(t.TempDir(), "config.toml")
+			writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.panels.global]\nmembers=['global']\n")
+			metadata := &countingGitMetadataResolver{err: errors.New("metadata failure")}
+			catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: metadata}).Resolve(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.calls != 0 {
+				t.Fatalf("metadata calls = %d, want 0", metadata.calls)
+			}
+			if _, ok := catalog.Find("global"); !ok {
+				t.Fatalf("global panel missing: %#v", catalog.Panels)
+			}
+		})
+	}
+}
+
+func TestPanelResolverAmbiguousGitMetadataFailureFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		metadata GitMetadataResolver
+	}{
+		{name: "nil", metadata: nil},
+		{name: "error", metadata: fakeGitMetadataResolver{err: errors.New("SECRET_METADATA_ERROR")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: not parsed\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			globalPath := filepath.Join(t.TempDir(), "config.toml")
+			writePanelConfig(t, globalPath, "[review.subagents.global]\nagent='codex'\n[review.panels.global]\nmembers=['global']\n")
+			catalog, err := (&PanelResolver{GlobalConfigPath: globalPath, Metadata: test.metadata}).Resolve(context.Background(), root)
+			if err == nil || len(catalog.Panels) != 0 || strings.Contains(err.Error(), "SECRET_METADATA_ERROR") {
+				t.Fatalf("ambiguous metadata did not fail closed: catalog=%#v err=%v", catalog, err)
+			}
+		})
 	}
 }

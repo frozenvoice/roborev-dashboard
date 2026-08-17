@@ -19,7 +19,7 @@ func TestLoadPanelConfigRejectsFIFOWithoutBlocking(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := loadPanelConfig(path)
+		_, _, err := loadPanelConfig(path)
 		result <- err
 	}()
 	select {
