@@ -52,6 +52,29 @@ type setupInstaller struct{ target string }
 func (i setupInstaller) Target() string                          { return i.target }
 func (i setupInstaller) Install(context.Context) (string, error) { return i.target, nil }
 
+type retryLifecycleRunner struct {
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (r *retryLifecycleRunner) Run(ctx context.Context, command proc.Command) (proc.Result, error) {
+	if len(command.Args) > 0 && command.Args[0] == "version" {
+		return proc.Result{Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
+	}
+	if len(command.Args) == 2 && command.Args[0] == "daemon" && command.Args[1] == "start" {
+		close(r.started)
+		select {
+		case <-ctx.Done():
+			close(r.canceled)
+			return proc.Result{}, ctx.Err()
+		case <-r.release:
+			return proc.Result{}, nil
+		}
+	}
+	return proc.Result{}, nil
+}
+
 type requestLifecycleSetupInstaller struct {
 	target   string
 	started  chan struct{}
@@ -352,6 +375,93 @@ func TestSetupRetryEndpointStartsHealthyExistingDaemonWithoutDownload(t *testing
 	if got := installer.calls.Load(); got != 0 {
 		t.Fatalf("installer calls = %d", got)
 	}
+}
+
+func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
+	var healthy atomic.Bool
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !healthy.Load() {
+			http.Error(w, "daemon stopped", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":true}`))
+	}))
+	defer health.Close()
+	binary := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(binary, []byte("fake RoboRev binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &retryLifecycleRunner{started: make(chan struct{}), release: make(chan struct{}), canceled: make(chan struct{})}
+	client, err := roborev.NewClient(binary, runner, health.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := setup.NewManager(client, setupInstaller{target: filepath.Join(t.TempDir(), "managed.exe")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerWithSetup(client, registry, "", operation.NewGate(), manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
+	// Prime the setup status so Retry takes the daemon-only path.
+	if state := manager.Status(context.Background()); state.Phase != setup.PhaseReady || state.DaemonRunning {
+		t.Fatalf("initial setup state = %#v", state)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/setup/roborev/retry", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		response.Body.Close()
+		t.Fatalf("retry status = %d", response.StatusCode)
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-runner.started
+	select {
+	case <-runner.canceled:
+		t.Fatal("accepted daemon recovery canceled when HTTP request ended")
+	case <-time.After(50 * time.Millisecond):
+	}
+	healthy.Store(true)
+	close(runner.release)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		getResponse, getErr := http.Get(httpServer.URL + "/api/setup/roborev")
+		if getErr == nil {
+			var state setup.State
+			decodeErr := json.NewDecoder(getResponse.Body).Decode(&state)
+			_ = getResponse.Body.Close()
+			if decodeErr == nil && getResponse.StatusCode == http.StatusOK && state.Phase == setup.PhaseReady && !state.OperationActive && state.DaemonRunning {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("daemon recovery did not reach ready: %#v", manager.Status(context.Background()))
 }
 
 func TestBlockedInstallEndpointReturnsConflictWithoutRedownload(t *testing.T) {

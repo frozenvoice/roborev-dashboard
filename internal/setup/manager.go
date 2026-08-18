@@ -22,7 +22,8 @@ import (
 type Phase string
 
 const (
-	defaultSetupCeiling = 20 * time.Minute
+	defaultSetupCeiling    = 20 * time.Minute
+	defaultRecoveryCeiling = 2 * time.Minute
 
 	PhaseIdle             Phase = "idle"
 	PhaseChecking         Phase = "checking"
@@ -116,16 +117,20 @@ type Installer interface {
 type progressInstaller interface{ SetProgress(func(string, int)) }
 
 type Manager struct {
-	client       Prober
-	installer    Installer
-	mu           sync.RWMutex
-	state        State
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	gate         *operation.Gate
-	wait         func(context.Context, time.Duration) error
-	gateRelease  func()
-	setupCeiling time.Duration
+	client          Prober
+	installer       Installer
+	mu              sync.RWMutex
+	state           State
+	root            context.Context
+	rootCancel      context.CancelFunc
+	cancel          context.CancelFunc
+	closing         bool
+	wg              sync.WaitGroup
+	gate            *operation.Gate
+	wait            func(context.Context, time.Duration) error
+	gateRelease     func()
+	setupCeiling    time.Duration
+	recoveryCeiling time.Duration
 }
 
 func NewManager(client Prober, installer Installer) (*Manager, error) {
@@ -136,7 +141,8 @@ func NewManagerWithGate(client Prober, installer Installer, gate *operation.Gate
 	if client == nil || installer == nil {
 		return nil, errors.New("RoboRev setup dependencies are required")
 	}
-	m := &Manager{client: client, installer: installer, gate: gate, wait: waitSetupContext, setupCeiling: defaultSetupCeiling}
+	root, rootCancel := context.WithCancel(context.Background())
+	m := &Manager{client: client, installer: installer, root: root, rootCancel: rootCancel, gate: gate, wait: waitSetupContext, setupCeiling: defaultSetupCeiling, recoveryCeiling: defaultRecoveryCeiling}
 	m.state = m.newState(PhaseIdle)
 	if progress, ok := installer.(progressInstaller); ok {
 		progress.SetProgress(m.progress)
@@ -150,7 +156,7 @@ func NewManagerWithGate(client Prober, installer Installer, gate *operation.Gate
 func (m *Manager) SetGate(gate *operation.Gate) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.gateRelease == nil {
+	if !m.closing && m.cancel == nil && !m.state.InProgress {
 		m.gate = gate
 	}
 }
@@ -293,10 +299,79 @@ func (m *Manager) refresh(ctx context.Context) {
 	m.state = state
 }
 
+// acceptAsync atomically accepts a process-scoped setup operation after its
+// caller has acquired the shared setup gate. The request context is consulted
+// only for final synchronous acceptance; the worker derives its lifetime from
+// the manager root so an HTTP request ending cannot cancel an accepted job.
+func (m *Manager) acceptAsync(parent context.Context, release func(), ceiling time.Duration, prepare func(State) State, worker func(context.Context)) (State, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	m.mu.Lock()
+	if m.closing || m.cancel != nil || m.state.InProgress {
+		state := m.state
+		m.mu.Unlock()
+		if release != nil {
+			release()
+		}
+		return state, ErrBusy
+	}
+	if err := parent.Err(); err != nil {
+		state := m.state
+		m.mu.Unlock()
+		if release != nil {
+			release()
+		}
+		return state, err
+	}
+	ctx, cancel := context.WithTimeout(m.root, ceiling)
+	state := prepare(m.state)
+	state.InProgress = true
+	m.state = state
+	m.cancel = cancel
+	m.gateRelease = release
+	m.wg.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			// The worker has published its terminal state before this lifecycle
+			// cleanup runs. Clear active fields while holding the manager lock,
+			// then release the shared gate before allowing Shutdown to return.
+			cancel()
+			m.mu.Lock()
+			m.cancel = nil
+			gateRelease := m.gateRelease
+			m.gateRelease = nil
+			m.mu.Unlock()
+			if gateRelease != nil {
+				gateRelease()
+			}
+			m.wg.Done()
+		}()
+		worker(ctx)
+	}()
+	return state, nil
+}
+
 func (m *Manager) StartInstall(parent context.Context) (State, error) {
 	if m == nil {
 		return State{}, ErrIneligible
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	m.mu.RLock()
+	if m.closing || m.cancel != nil || m.state.InProgress {
+		state := m.state
+		m.mu.RUnlock()
+		return state, ErrBusy
+	}
+	if err := parent.Err(); err != nil {
+		state := m.state
+		m.mu.RUnlock()
+		return state, err
+	}
+	m.mu.RUnlock()
 	if m.client.HasExplicitOverride() {
 		return m.stateCopy(), fmt.Errorf("%w: explicit RoboRev path", ErrIneligible)
 	}
@@ -329,56 +404,21 @@ func (m *Manager) StartInstall(parent context.Context) (State, error) {
 			return current, fmt.Errorf("%w: %v", ErrBusy, gateErr)
 		}
 	}
-	m.mu.Lock()
-	if m.state.InProgress {
-		state := m.state
-		m.mu.Unlock()
-		if release != nil {
-			release()
-		}
-		return state, ErrBusy
-	}
-	// Eligibility and validation above intentionally use the request context,
-	// but an accepted installation belongs to the dashboard process. A
-	// net/http request context is canceled as soon as its handler returns, so
-	// using it here would cancel a 202-accepted install when the browser closes
-	// the request. Keep the safety ceiling while detaching the operation from
-	// that request lifetime; Shutdown still calls m.cancel below.
-	ctx, cancel := context.WithTimeout(context.Background(), m.setupCeiling)
-	m.cancel = cancel
-	m.gateRelease = release
-	state := m.newState(PhaseChecking)
-	state.InProgress = true
-	state.Progress = 5
-	state.Binary = current.Binary
-	state.Version = current.Version
-	state.Installed = current.Installed
-	state.Supported = current.Supported
-	state.Message = "Checking RoboRev setup"
-	state.InstallAvailable = true
-	state.CanInstall = true
-	m.state = state
-	m.wg.Add(1)
-	m.mu.Unlock()
-	go func() {
-		defer cancel()
-		m.install(ctx)
-	}()
-	return state, nil
+	return m.acceptAsync(parent, release, m.setupCeiling, func(_ State) State {
+		state := m.newState(PhaseChecking)
+		state.Progress = 5
+		state.Binary = current.Binary
+		state.Version = current.Version
+		state.Installed = current.Installed
+		state.Supported = current.Supported
+		state.Message = "Checking RoboRev setup"
+		state.InstallAvailable = true
+		state.CanInstall = true
+		return state
+	}, m.install)
 }
 
 func (m *Manager) install(ctx context.Context) {
-	defer m.wg.Done()
-	defer func() {
-		m.mu.Lock()
-		m.cancel = nil
-		release := m.gateRelease
-		m.gateRelease = nil
-		m.mu.Unlock()
-		if release != nil {
-			release()
-		}
-	}()
 	path, err := m.installer.Install(ctx)
 	bound := false
 	if err != nil {
@@ -407,6 +447,29 @@ func (m *Manager) install(ctx context.Context) {
 }
 
 func (m *Manager) completeBound(ctx context.Context, path string, installation roborev.Installation) error {
+	return m.completeBoundMode(ctx, path, installation, false)
+}
+
+func (m *Manager) completeBoundBlocked(ctx context.Context, path string, installation roborev.Installation) error {
+	return m.completeBoundMode(ctx, path, installation, true)
+}
+
+func (m *Manager) completeBoundMode(ctx context.Context, path string, installation roborev.Installation, blockedRecovery bool) error {
+	finishCanceled := func(err error) {
+		if blockedRecovery {
+			m.finishBlockedCanceled(path, err)
+			return
+		}
+		if installation.Installed && roborevcompat.IsSupportedVersion(installation.Version) {
+			m.finishDaemonError(path, installation, err)
+			return
+		}
+		m.finishError(ctx, err, path)
+	}
+	if err := ctx.Err(); err != nil {
+		finishCanceled(err)
+		return err
+	}
 	if !installation.Installed || !roborevcompat.IsSupportedVersion(installation.Version) {
 		detail := installation.Error
 		if detail == "" {
@@ -418,21 +481,53 @@ func (m *Manager) completeBound(ctx context.Context, path string, installation r
 	}
 	if !daemonRunning(installation.Status) {
 		if starter, ok := m.client.(daemonStarter); ok {
+			if err := ctx.Err(); err != nil {
+				finishCanceled(err)
+				return err
+			}
 			m.progress("starting_daemon", 92)
 			if err := starter.StartDaemon(ctx); err != nil {
-				if healthy := m.client.Installation(ctx); daemonRunning(healthy.Status) {
+				if ctx.Err() != nil {
+					finishCanceled(ctx.Err())
+					return ctx.Err()
+				}
+				healthy := m.client.Installation(ctx)
+				if ctx.Err() != nil {
+					finishCanceled(ctx.Err())
+					return ctx.Err()
+				}
+				if daemonRunning(healthy.Status) {
 					m.finishReady(path, healthy)
 					return nil
 				}
 				m.finishDaemonError(path, installation, err)
 				return err
 			}
+			if err := ctx.Err(); err != nil {
+				finishCanceled(err)
+				return err
+			}
 			m.progress("waiting_for_daemon", 95)
 			if err := m.waitForDaemon(ctx); err != nil {
+				if ctx.Err() != nil {
+					finishCanceled(ctx.Err())
+					return ctx.Err()
+				}
 				m.finishDaemonError(path, installation, err)
 				return err
 			}
-			installation = m.client.Installation(ctx)
+			if err := ctx.Err(); err != nil {
+				finishCanceled(err)
+				return err
+			}
+			previous := installation
+			probe := m.client.Installation(ctx)
+			if err := ctx.Err(); err != nil {
+				installation = previous
+				finishCanceled(err)
+				return err
+			}
+			installation = probe
 		}
 	}
 	m.finishReady(path, installation)
@@ -471,7 +566,13 @@ func (m *Manager) waitForDaemon(ctx context.Context) error {
 		wait = waitSetupContext
 	}
 	for _, delay := range []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, time.Second} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		installation := m.client.Installation(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if daemonRunning(installation.Status) {
 			return nil
 		}
@@ -506,6 +607,31 @@ func (m *Manager) finishDaemonError(path string, installation roborev.Installati
 	state.FailureCode = "daemon_start_failed"
 	state.CompletedAt = ptrTime(time.Now().UTC())
 	m.state = state
+}
+
+func (m *Manager) finishBlockedCanceled(path string, err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	m.mu.Lock()
+	state := m.newState(PhaseBlocked)
+	state.Installed = true
+	state.Supported = false
+	state.Binary = path
+	state.Blocked = true
+	state.Error = fmt.Errorf("blocked RoboRev recovery canceled: %w", err).Error()
+	state.Message = "Windows Application Control blocked the verified RoboRev binary; recovery can be retried"
+	state.FailureCode = "application_control"
+	compatible := false
+	state.Compatible = &compatible
+	state.PanelRefineCompatible = &compatible
+	state.Retryable, state.CanRetry = true, true
+	state.InstallAvailable, state.CanInstall = false, false
+	state.CanStartDaemon = false
+	state.CompletedAt = ptrTime(time.Now().UTC())
+	state.UpdatedAt = time.Now().UTC()
+	m.state = state
+	m.mu.Unlock()
 }
 
 func (m *Manager) finishError(ctx context.Context, err error, path string) {
@@ -667,6 +793,9 @@ func (m *Manager) stateCopy() State { m.mu.RLock(); defer m.mu.RUnlock(); return
 // with an unhealthy daemon takes the daemon-only path and never downloads
 // another archive.
 func (m *Manager) Retry(ctx context.Context) (State, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state := m.stateCopy()
 	if state.InProgress {
 		return state, ErrBusy
@@ -685,10 +814,7 @@ func (m *Manager) Retry(ctx context.Context) (State, error) {
 		if !ok {
 			return state, errors.New("RoboRev daemon start is unavailable")
 		}
-		if err := m.startDaemonOnly(ctx, starter); err != nil {
-			return m.stateCopy(), err
-		}
-		return m.stateCopy(), nil
+		return m.startDaemonOnly(ctx, starter, state)
 	}
 	return m.StartInstall(ctx)
 }
@@ -696,6 +822,12 @@ func (m *Manager) Retry(ctx context.Context) (State, error) {
 // retryBlocked performs verification-only recovery for a policy-blocked
 // managed binary. It never invokes the installer or downloader.
 func (m *Manager) retryBlocked(parent context.Context, path string) (State, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if err := parent.Err(); err != nil {
+		return m.stateCopy(), err
+	}
 	if !regularFile(path) {
 		m.mu.Lock()
 		m.state.InProgress = false
@@ -721,39 +853,44 @@ func (m *Manager) retryBlocked(parent context.Context, path string) (State, erro
 			return m.stateCopy(), fmt.Errorf("%w: %v", ErrBusy, err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
-	defer cancel()
-	defer func() {
-		if release != nil {
-			release()
+	return m.acceptAsync(parent, release, m.recoveryCeiling, func(current State) State {
+		current.Phase, current.Status = PhaseBinding, PhaseBinding
+		current.Binary = path
+		current.Installed = true
+		current.Blocked = true
+		current.CanRetry, current.CanInstall, current.InstallAvailable = false, false, false
+		current.UpdatedAt = time.Now().UTC()
+		return current
+	}, func(ctx context.Context) {
+		if err := ctx.Err(); err != nil {
+			m.finishBlockedCanceled(path, err)
+			return
 		}
-	}()
-	m.mu.Lock()
-	if m.state.InProgress {
-		state := m.state
-		m.mu.Unlock()
-		return state, ErrBusy
-	}
-	m.state.InProgress = true
-	m.state.Phase, m.state.Status = PhaseBinding, PhaseBinding
-	m.state.Binary = path
-	m.state.Installed = true
-	m.state.Blocked = true
-	m.state.CanRetry, m.state.CanInstall, m.state.InstallAvailable = false, false, false
-	m.state.UpdatedAt = time.Now().UTC()
-	m.mu.Unlock()
-	if err := m.client.Rebind(ctx, path); err != nil {
-		m.finishError(ctx, err, path)
-		return m.stateCopy(), err
-	}
-	installation := m.client.Installation(ctx)
-	err := m.completeBound(ctx, path, installation)
-	return m.stateCopy(), err
+		if err := m.client.Rebind(ctx, path); err != nil {
+			if ctx.Err() != nil {
+				m.finishBlockedCanceled(path, ctx.Err())
+				return
+			}
+			m.finishError(ctx, err, path)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			m.finishBlockedCanceled(path, err)
+			return
+		}
+		installation := m.client.Installation(ctx)
+		if err := ctx.Err(); err != nil {
+			m.finishBlockedCanceled(path, err)
+			return
+		}
+		_ = m.completeBoundBlocked(ctx, path, installation)
+	})
 }
 
-func (m *Manager) startDaemonOnly(parent context.Context, starter daemonStarter) error {
-	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
-	defer cancel()
+func (m *Manager) startDaemonOnly(parent context.Context, starter daemonStarter, current State) (State, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	var release func()
 	m.mu.RLock()
 	gate := m.gate
@@ -762,65 +899,93 @@ func (m *Manager) startDaemonOnly(parent context.Context, starter daemonStarter)
 		var err error
 		release, err = gate.AcquireSetup()
 		if err != nil {
-			return fmt.Errorf("%w: %v", ErrBusy, err)
+			return m.stateCopy(), fmt.Errorf("%w: %v", ErrBusy, err)
 		}
-		defer release()
 	}
-	m.mu.Lock()
-	if m.state.InProgress {
-		state := m.state
-		m.mu.Unlock()
-		_ = state
-		return ErrBusy
-	}
-	m.state.InProgress = true
-	m.state.Phase, m.state.Status = PhaseStartingDaemon, PhaseStartingDaemon
-	m.state.CanRetry, m.state.CanStartDaemon = false, false
-	m.state.UpdatedAt = time.Now().UTC()
-	m.mu.Unlock()
-	defer func() { m.mu.Lock(); m.state.InProgress = false; m.state.UpdatedAt = time.Now().UTC(); m.mu.Unlock() }()
-	if err := starter.StartDaemon(ctx); err != nil {
-		if installation := m.client.Installation(ctx); daemonRunning(installation.Status) {
-			m.mu.Lock()
-			m.state.Phase, m.state.Status = PhaseReady, PhaseReady
-			m.state.InProgress, m.state.DaemonRunning = false, true
-			m.state.CanRetry, m.state.CanStartDaemon, m.state.Retryable = false, false, false
-			m.state.Error, m.state.FailureCode, m.state.CompletedAt = "", "", ptrTime(time.Now().UTC())
-			m.mu.Unlock()
-			return nil
+	return m.acceptAsync(parent, release, m.recoveryCeiling, func(currentState State) State {
+		if currentState.Binary == "" {
+			currentState.Binary = current.Binary
 		}
-		m.mu.Lock()
-		m.state.Phase, m.state.Status = PhaseFailed, PhaseFailed
-		m.state.FailureCode = "daemon_start_failed"
-		m.state.Error = err.Error()
-		m.state.CanRetry, m.state.CanStartDaemon, m.state.Retryable = true, true, true
-		m.mu.Unlock()
-		return err
-	}
-	if err := m.waitForDaemon(ctx); err != nil {
-		m.mu.Lock()
-		m.state.Phase, m.state.Status = PhaseFailed, PhaseFailed
-		m.state.FailureCode = "daemon_start_failed"
-		m.state.Error = err.Error()
-		m.state.CanRetry, m.state.CanStartDaemon, m.state.Retryable = true, true, true
-		m.mu.Unlock()
-		return err
-	}
-	m.mu.Lock()
-	m.state.Phase, m.state.Status = PhaseReady, PhaseReady
-	m.state.DaemonRunning, m.state.CanStartDaemon, m.state.CanRetry = true, false, false
-	m.state.Error, m.state.FailureCode, m.state.CompletedAt = "", "", ptrTime(time.Now().UTC())
-	m.state.Message = "RoboRev is ready"
-	m.mu.Unlock()
-	return nil
+		if currentState.Version == "" {
+			currentState.Version = current.Version
+		}
+		currentState.Installed, currentState.Supported = true, true
+		currentState.Phase, currentState.Status = PhaseStartingDaemon, PhaseStartingDaemon
+		currentState.CanRetry, currentState.CanStartDaemon = false, false
+		currentState.UpdatedAt = time.Now().UTC()
+		return currentState
+	}, func(ctx context.Context) {
+		path := current.Binary
+		version := current.Version
+		installation := roborev.Installation{Installed: true, Binary: path, Version: version}
+		if err := ctx.Err(); err != nil {
+			m.finishDaemonError(path, installation, err)
+			return
+		}
+		if err := starter.StartDaemon(ctx); err != nil {
+			if ctx.Err() != nil {
+				m.finishDaemonError(path, installation, ctx.Err())
+				return
+			}
+			previous := installation
+			probe := m.client.Installation(ctx)
+			if ctx.Err() != nil {
+				m.finishDaemonError(path, previous, ctx.Err())
+				return
+			}
+			installation = probe
+			if daemonRunning(installation.Status) {
+				m.finishReady(path, installation)
+				return
+			}
+			m.finishDaemonError(path, installation, err)
+			return
+		}
+		if err := m.waitForDaemon(ctx); err != nil {
+			if ctx.Err() != nil {
+				m.finishDaemonError(path, installation, ctx.Err())
+				return
+			}
+			previous := installation
+			probe := m.client.Installation(ctx)
+			if ctx.Err() != nil {
+				m.finishDaemonError(path, previous, ctx.Err())
+				return
+			}
+			installation = probe
+			m.finishDaemonError(path, installation, err)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			m.finishDaemonError(path, installation, err)
+			return
+		}
+		previous := installation
+		probe := m.client.Installation(ctx)
+		if err := ctx.Err(); err != nil {
+			m.finishDaemonError(path, previous, err)
+			return
+		}
+		installation = probe
+		m.finishReady(path, installation)
+	})
 }
 
 func (m *Manager) Shutdown(ctx context.Context) error {
-	m.mu.Lock()
-	if m.cancel != nil {
-		m.cancel()
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	m.mu.Lock()
+	m.closing = true
+	rootCancel := m.rootCancel
+	activeCancel := m.cancel
 	m.mu.Unlock()
+	if rootCancel != nil {
+		rootCancel()
+	}
+	if activeCancel != nil {
+		activeCancel()
+	}
 	done := make(chan struct{})
 	go func() { m.wg.Wait(); close(done) }()
 	select {

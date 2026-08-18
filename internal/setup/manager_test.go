@@ -18,19 +18,33 @@ import (
 )
 
 type fakeProber struct {
-	mu          sync.Mutex
-	binary      string
-	override    bool
-	version     string
-	err         string
-	failureCode string
-	rebindErr   error
-	rebinds     []string
+	mu            sync.Mutex
+	binary        string
+	override      bool
+	version       string
+	err           string
+	failureCode   string
+	rebindErr     error
+	rebinds       []string
+	rebindStarted chan struct{}
+	rebindRelease <-chan struct{}
+	rebindCtxErr  chan error
 }
 
 func (f *fakeProber) BinaryPath() string        { f.mu.Lock(); defer f.mu.Unlock(); return f.binary }
 func (f *fakeProber) HasExplicitOverride() bool { return f.override }
-func (f *fakeProber) Rebind(_ context.Context, path string) error {
+func (f *fakeProber) Rebind(ctx context.Context, path string) error {
+	if f.rebindStarted != nil {
+		close(f.rebindStarted)
+		select {
+		case <-ctx.Done():
+			if f.rebindCtxErr != nil {
+				f.rebindCtxErr <- ctx.Err()
+			}
+			return ctx.Err()
+		case <-f.rebindRelease:
+		}
+	}
 	f.mu.Lock()
 	if f.rebindErr != nil {
 		err := f.rebindErr
@@ -58,6 +72,17 @@ type fakeInstaller struct {
 	install func(context.Context) (string, error)
 }
 
+type preflightCancelProber struct {
+	*fakeProber
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (p *preflightCancelProber) Installation(ctx context.Context) roborev.Installation {
+	p.once.Do(p.cancel)
+	return p.fakeProber.Installation(ctx)
+}
+
 type daemonProber struct {
 	mu            sync.Mutex
 	binary        string
@@ -66,6 +91,9 @@ type daemonProber struct {
 	installations int
 	starts        int
 	startErrors   int
+	startStarted  chan struct{}
+	startRelease  <-chan struct{}
+	startCtxErr   chan error
 }
 
 func (p *daemonProber) BinaryPath() string        { p.mu.Lock(); defer p.mu.Unlock(); return p.binary }
@@ -87,7 +115,18 @@ func (p *daemonProber) Installation(context.Context) roborev.Installation {
 	status, _ := json.Marshal(map[string]bool{"running": running, "known": true})
 	return roborev.Installation{Installed: true, Binary: p.binary, Version: p.version, Status: status}
 }
-func (p *daemonProber) StartDaemon(context.Context) error {
+func (p *daemonProber) StartDaemon(ctx context.Context) error {
+	if p.startStarted != nil {
+		close(p.startStarted)
+		select {
+		case <-ctx.Done():
+			if p.startCtxErr != nil {
+				p.startCtxErr <- ctx.Err()
+			}
+			return ctx.Err()
+		case <-p.startRelease:
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.starts++
@@ -258,6 +297,330 @@ func TestRetryInstallOutlivesRequestContextCancellation(t *testing.T) {
 	}
 }
 
+func cleanupSetupManager(t *testing.T, manager *Manager) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+}
+
+func assertSetupGateReleased(t *testing.T, gate *operation.Gate) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		release, err := gate.AcquireMutation()
+		if err == nil {
+			release()
+			return
+		}
+		if !errors.Is(err, operation.ErrBusy) {
+			t.Fatalf("gate remains held: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("gate was not released")
+}
+
+func TestPreCanceledStartInstallDoesNotAcceptOperation(t *testing.T) {
+	gate := operation.NewGate()
+	installer := &fakeInstaller{install: func(context.Context) (string, error) {
+		t.Fatal("pre-canceled install invoked installer")
+		return "", nil
+	}}
+	manager, err := NewManagerWithGate(&fakeProber{}, installer, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSetupManager(t, manager)
+	request, cancel := context.WithCancel(context.Background())
+	cancel()
+	state, err := manager.StartInstall(request)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled start error = %v", err)
+	}
+	if state.InProgress || manager.stateCopy().InProgress {
+		t.Fatalf("pre-canceled start became active: %#v", state)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("pre-canceled installer calls = %d", calls)
+	}
+	assertSetupGateReleased(t, gate)
+}
+
+func TestPreflightCancellationRejectsFinalInstallAcceptance(t *testing.T) {
+	gate := operation.NewGate()
+	request, cancel := context.WithCancel(context.Background())
+	client := &preflightCancelProber{fakeProber: &fakeProber{}, cancel: cancel}
+	installer := &fakeInstaller{install: func(context.Context) (string, error) {
+		t.Fatal("preflight-canceled install invoked installer")
+		return "", nil
+	}}
+	manager, err := NewManagerWithGate(client, installer, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSetupManager(t, manager)
+	state, err := manager.StartInstall(request)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("preflight cancellation error = %v", err)
+	}
+	if state.InProgress || manager.stateCopy().InProgress {
+		t.Fatalf("preflight cancellation became active: %#v", state)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("preflight-canceled installer calls = %d", calls)
+	}
+	assertSetupGateReleased(t, gate)
+}
+
+func newBlockedRecoveryManager(t *testing.T, gate *operation.Gate, rebindRelease <-chan struct{}, rebindCtxErr chan error) (*Manager, *fakeProber, string) {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(target, []byte("blocked binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeProber{binary: target, err: "blocked", failureCode: "application_control", rebindStarted: make(chan struct{}), rebindRelease: rebindRelease, rebindCtxErr: rebindCtxErr}
+	installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) {
+		return target, errors.New("installer must not run for blocked recovery")
+	}}
+	manager, err := NewManagerWithGate(client, installer, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := manager.Status(context.Background()); state.Phase != PhaseBlocked {
+		t.Fatalf("blocked setup state = %#v", state)
+	}
+	client.mu.Lock()
+	client.err, client.failureCode, client.version, client.rebindErr = "", "", "v0.64.0", nil
+	client.mu.Unlock()
+	cleanupSetupManager(t, manager)
+	return manager, client, target
+}
+
+func TestBlockedRetryOutlivesRequestContextCancellation(t *testing.T) {
+	gate := operation.NewGate()
+	rebindRelease := make(chan struct{})
+	rebindCtxErr := make(chan error, 1)
+	manager, client, _ := newBlockedRecoveryManager(t, gate, rebindRelease, rebindCtxErr)
+	request, cancel := context.WithCancel(context.Background())
+	state, err := manager.Retry(request)
+	if err != nil || !state.InProgress || state.Phase != PhaseBinding {
+		t.Fatalf("blocked retry acceptance = %#v, %v", state, err)
+	}
+	cancel()
+	<-client.rebindStarted
+	select {
+	case err := <-rebindCtxErr:
+		t.Fatalf("blocked retry observed request cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(rebindRelease)
+	state = waitSetupLong(t, manager)
+	if state.Phase != PhaseReady || state.InProgress {
+		t.Fatalf("blocked retry final state = %#v", state)
+	}
+	assertSetupGateReleased(t, gate)
+}
+
+func newDaemonRecoveryManager(t *testing.T, gate *operation.Gate, startRelease <-chan struct{}, startCtxErr chan error) (*Manager, *daemonProber) {
+	t.Helper()
+	client := &daemonProber{binary: `C:\managed\roborev.exe`, version: "v0.64.0", healthyAfter: 2, startStarted: make(chan struct{}), startRelease: startRelease, startCtxErr: startCtxErr}
+	installer := &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) {
+		return "", errors.New("installer must not run for daemon recovery")
+	}}
+	manager, err := NewManagerWithGate(client, installer, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.wait = func(ctx context.Context, _ time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	if state := manager.Status(context.Background()); state.Phase != PhaseReady || state.DaemonRunning {
+		t.Fatalf("daemon setup state = %#v", state)
+	}
+	cleanupSetupManager(t, manager)
+	return manager, client
+}
+
+func TestDaemonRetryOutlivesRequestContextCancellation(t *testing.T) {
+	gate := operation.NewGate()
+	startRelease := make(chan struct{})
+	startCtxErr := make(chan error, 1)
+	manager, client := newDaemonRecoveryManager(t, gate, startRelease, startCtxErr)
+	request, cancel := context.WithCancel(context.Background())
+	state, err := manager.Retry(request)
+	if err != nil || !state.InProgress || state.Phase != PhaseStartingDaemon {
+		t.Fatalf("daemon retry acceptance = %#v, %v", state, err)
+	}
+	cancel()
+	<-client.startStarted
+	select {
+	case err := <-startCtxErr:
+		t.Fatalf("daemon retry observed request cancellation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(startRelease)
+	state = waitSetupLong(t, manager)
+	if state.Phase != PhaseReady || !state.DaemonRunning || state.InProgress {
+		t.Fatalf("daemon retry final state = %#v", state)
+	}
+	assertSetupGateReleased(t, gate)
+}
+
+func TestPreCanceledRecoveryRetryDoesNotStartWorker(t *testing.T) {
+	t.Run("blocked", func(t *testing.T) {
+		gate := operation.NewGate()
+		manager, client, _ := newBlockedRecoveryManager(t, gate, make(chan struct{}), make(chan error, 1))
+		request, cancel := context.WithCancel(context.Background())
+		cancel()
+		state, err := manager.Retry(request)
+		if !errors.Is(err, context.Canceled) || state.InProgress || manager.stateCopy().InProgress {
+			t.Fatalf("pre-canceled blocked retry = %#v, %v", state, err)
+		}
+		select {
+		case <-client.rebindStarted:
+			t.Fatal("pre-canceled blocked retry started Rebind")
+		default:
+		}
+		assertSetupGateReleased(t, gate)
+	})
+	t.Run("daemon", func(t *testing.T) {
+		gate := operation.NewGate()
+		manager, client := newDaemonRecoveryManager(t, gate, make(chan struct{}), make(chan error, 1))
+		request, cancel := context.WithCancel(context.Background())
+		cancel()
+		state, err := manager.Retry(request)
+		if !errors.Is(err, context.Canceled) || state.InProgress || manager.stateCopy().InProgress {
+			t.Fatalf("pre-canceled daemon retry = %#v, %v", state, err)
+		}
+		select {
+		case <-client.startStarted:
+			t.Fatal("pre-canceled daemon retry started daemon")
+		default:
+		}
+		assertSetupGateReleased(t, gate)
+	})
+}
+
+func TestShutdownCancelsBlockedAndDaemonRecovery(t *testing.T) {
+	t.Run("blocked", func(t *testing.T) {
+		gate := operation.NewGate()
+		rebindCtxErr := make(chan error, 1)
+		manager, client, _ := newBlockedRecoveryManager(t, gate, make(chan struct{}), rebindCtxErr)
+		if _, err := manager.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		<-client.rebindStarted
+		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdown); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-rebindCtxErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("blocked shutdown context error = %v", err)
+			}
+		default:
+			t.Fatal("blocked Rebind did not observe shutdown cancellation")
+		}
+		state := manager.stateCopy()
+		if state.Phase != PhaseBlocked || !state.Installed || !state.Blocked || !state.CanRetry || !state.Retryable || state.CanInstall || state.InProgress || state.Compatible == nil || *state.Compatible || state.PanelRefineCompatible == nil || *state.PanelRefineCompatible {
+			t.Fatalf("blocked shutdown state = %#v", state)
+		}
+		assertSetupGateReleased(t, gate)
+	})
+	t.Run("daemon", func(t *testing.T) {
+		gate := operation.NewGate()
+		startCtxErr := make(chan error, 1)
+		manager, client := newDaemonRecoveryManager(t, gate, make(chan struct{}), startCtxErr)
+		if _, err := manager.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		<-client.startStarted
+		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(shutdown); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-startCtxErr:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("daemon shutdown context error = %v", err)
+			}
+		default:
+			t.Fatal("daemon StartDaemon did not observe shutdown cancellation")
+		}
+		state := manager.stateCopy()
+		if state.Phase != PhaseFailed || !state.Installed || !state.Supported || state.DaemonRunning || !state.CanStartDaemon || !state.CanRetry || !state.Retryable || state.FailureCode != "daemon_start_failed" || state.InProgress {
+			t.Fatalf("daemon shutdown state = %#v", state)
+		}
+		assertSetupGateReleased(t, gate)
+	})
+}
+
+func TestRecoverySafetyCeilingCancelsBlockedAndDaemon(t *testing.T) {
+	t.Run("blocked", func(t *testing.T) {
+		gate := operation.NewGate()
+		rebindCtxErr := make(chan error, 1)
+		manager, client, _ := newBlockedRecoveryManager(t, gate, make(chan struct{}), rebindCtxErr)
+		manager.recoveryCeiling = 20 * time.Millisecond
+		if _, err := manager.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		<-client.rebindStarted
+		state := waitSetupLong(t, manager)
+		select {
+		case err := <-rebindCtxErr:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("blocked timeout context error = %v", err)
+			}
+		default:
+			t.Fatal("blocked Rebind did not observe recovery ceiling")
+		}
+		if state.Phase != PhaseBlocked || !state.Installed || !state.Blocked || !state.CanRetry || !state.Retryable || state.CanInstall || state.InProgress || state.Compatible == nil || *state.Compatible || state.PanelRefineCompatible == nil || *state.PanelRefineCompatible {
+			t.Fatalf("blocked timeout state = %#v", state)
+		}
+		assertSetupGateReleased(t, gate)
+	})
+	t.Run("daemon", func(t *testing.T) {
+		gate := operation.NewGate()
+		startCtxErr := make(chan error, 1)
+		manager, client := newDaemonRecoveryManager(t, gate, make(chan struct{}), startCtxErr)
+		manager.recoveryCeiling = 20 * time.Millisecond
+		if _, err := manager.Retry(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		<-client.startStarted
+		state := waitSetupLong(t, manager)
+		select {
+		case err := <-startCtxErr:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("daemon timeout context error = %v", err)
+			}
+		default:
+			t.Fatal("daemon StartDaemon did not observe recovery ceiling")
+		}
+		if state.Phase != PhaseFailed || !state.Installed || !state.Supported || state.DaemonRunning || !state.CanStartDaemon || !state.CanRetry || !state.Retryable || state.FailureCode != "daemon_start_failed" || state.InProgress {
+			t.Fatalf("daemon timeout state = %#v", state)
+		}
+		assertSetupGateReleased(t, gate)
+	})
+}
+
 func TestSupportedVersionDoesNotDownloadAgain(t *testing.T) {
 	client := &fakeProber{binary: `C:\roborev.exe`, version: "v0.64.0"}
 	installer := &fakeInstaller{install: func(context.Context) (string, error) { return "", errors.New("must not download") }}
@@ -342,8 +705,12 @@ func TestExistingBlockedBinaryVerificationRetryDoesNotInstall(t *testing.T) {
 	client.err, client.failureCode, client.version = "", "", "v0.64.0"
 	client.mu.Unlock()
 	state, err := manager.Retry(context.Background())
-	if err != nil || state.Phase != PhaseReady {
+	if err != nil {
 		t.Fatalf("startup verification retry = %#v, %v", state, err)
+	}
+	state = waitSetup(t, manager)
+	if state.Phase != PhaseReady {
+		t.Fatalf("startup verification retry final state = %#v", state)
 	}
 	installer.mu.Lock()
 	calls := installer.calls
@@ -427,8 +794,12 @@ func TestBlockedPublishedTargetRetriesVerificationWithoutInstaller(t *testing.T)
 	client.version = "v0.64.0"
 	client.mu.Unlock()
 	state, err := manager.Retry(context.Background())
-	if err != nil || state.Phase != PhaseReady {
+	if err != nil {
 		t.Fatalf("verification retry = %#v, %v", state, err)
+	}
+	state = waitSetup(t, manager)
+	if state.Phase != PhaseReady {
+		t.Fatalf("verification retry final state = %#v", state)
 	}
 	installer.mu.Lock()
 	calls := installer.calls
@@ -453,10 +824,10 @@ func TestBlockedPublishedTargetStaysBlockedWhenVerificationFails(t *testing.T) {
 	if state.Phase != PhaseBlocked || !state.CanRetry {
 		t.Fatalf("blocked state = %#v", state)
 	}
-	if _, err := manager.Retry(context.Background()); err == nil {
-		t.Fatal("blocked verification unexpectedly succeeded")
+	if _, err := manager.Retry(context.Background()); err != nil {
+		t.Fatalf("blocked verification retry acceptance = %v", err)
 	}
-	state = manager.Status(context.Background())
+	state = waitSetup(t, manager)
 	if state.Phase != PhaseBlocked || !state.Installed || !state.CanRetry || state.CanInstall {
 		t.Fatalf("retry state = %#v", state)
 	}
@@ -705,5 +1076,70 @@ func TestInstallSafetyCeilingCancelsBackgroundOperation(t *testing.T) {
 	}
 	if state.Phase != PhaseCanceled || state.FailureCode != "canceled" {
 		t.Fatalf("timeout state = %#v", state)
+	}
+}
+
+func TestInstallDaemonCancellationPreservesRetryableInstalledState(t *testing.T) {
+	tests := []struct {
+		name        string
+		ceiling     time.Duration
+		wantErr     error
+		useShutdown bool
+	}{
+		{name: "shutdown", wantErr: context.Canceled, useShutdown: true},
+		{name: "timeout", ceiling: 20 * time.Millisecond, wantErr: context.DeadlineExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gate := operation.NewGate()
+			startCtxErr := make(chan error, 1)
+			client := &daemonProber{healthyAfter: 100, startStarted: make(chan struct{}), startRelease: make(chan struct{}), startCtxErr: startCtxErr}
+			target := filepath.Join(t.TempDir(), "roborev.exe")
+			installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) { return target, nil }}
+			manager, err := NewManagerWithGate(client, installer, gate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanupSetupManager(t, manager)
+			if test.ceiling > 0 {
+				manager.setupCeiling = test.ceiling
+			}
+			if _, err := manager.StartInstall(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			<-client.startStarted
+			client.mu.Lock()
+			installationsBeforeCancel := client.installations
+			client.mu.Unlock()
+			if test.useShutdown {
+				shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+				if err := manager.Shutdown(shutdown); err != nil {
+					cancel()
+					t.Fatal(err)
+				}
+				cancel()
+			} else {
+				_ = waitSetupLong(t, manager)
+			}
+			select {
+			case err := <-startCtxErr:
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("daemon context error = %v, want %v", err, test.wantErr)
+				}
+			default:
+				t.Fatal("daemon start did not observe cancellation")
+			}
+			state := manager.stateCopy()
+			if state.Phase != PhaseFailed || !state.Installed || !state.Supported || state.DaemonRunning || !state.CanStartDaemon || !state.CanRetry || !state.Retryable || state.FailureCode != "daemon_start_failed" || state.InProgress {
+				t.Fatalf("install daemon cancellation state = %#v", state)
+			}
+			client.mu.Lock()
+			installationsAfterCancel := client.installations
+			client.mu.Unlock()
+			if installationsAfterCancel != installationsBeforeCancel {
+				t.Fatalf("health probes after cancellation = %d, before = %d", installationsAfterCancel, installationsBeforeCancel)
+			}
+			assertSetupGateReleased(t, gate)
+		})
 	}
 }
