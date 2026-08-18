@@ -24,7 +24,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 describe('RoboRev setup', () => {
   const readySetup = { ...baseState, status: 'ready' as const, phase: 'ready' as const, operationActive: false, installed: true, canInstall: false, installAvailable: false, canStartDaemon: false, daemonRunning: true, compatible: true, panelRefineCompatible: true }
   const runningRuntime: RuntimeControlState = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
-  const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+  const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', repositoryIdentity: 'repo-1', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
 
   it('does not health-check on render and checks only the confirmed canonical agent', async () => {
     const onCheck = vi.fn().mockResolvedValue(undefined)

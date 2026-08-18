@@ -2,13 +2,18 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/froze/roborev-dashboard/internal/agentstatus"
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
+
+var errAgentRepositoryChanged = errors.New("selected repository changed; refresh agent status and retry")
 
 type configuredAgentDTO struct {
 	Name            string `json:"name"`
@@ -24,8 +29,28 @@ type configuredAgentDTO struct {
 }
 
 type agentsDTO struct {
-	RoboRevVersion string               `json:"roborevVersion,omitempty"`
-	Configured     []configuredAgentDTO `json:"configured"`
+	RoboRevVersion     string               `json:"roborevVersion,omitempty"`
+	RepositoryIdentity string               `json:"repositoryIdentity"`
+	Configured         []configuredAgentDTO `json:"configured"`
+}
+
+func (s *Server) currentAgentScope(ctx context.Context) (agentstatus.RepositoryScope, error) {
+	if s.Registry == nil {
+		return agentstatus.RepositoryScope{}, fmt.Errorf("repository registry is unavailable")
+	}
+	repo, err := s.Registry.Resolve("")
+	if err != nil {
+		return agentstatus.RepositoryScope{}, err
+	}
+	identity, err := s.Registry.Identity(repo)
+	if err != nil {
+		return agentstatus.RepositoryScope{}, err
+	}
+	return agentstatus.RepositoryScope{Root: repo, Identity: identity}, nil
+}
+
+func sameAgentScope(left, right agentstatus.RepositoryScope) bool {
+	return left.Identity == right.Identity && gitx.SameRepositoryPath(left.Root, right.Root)
 }
 
 func (s *Server) agentStatuses(w http.ResponseWriter, r *http.Request) {
@@ -37,17 +62,17 @@ func (s *Server) agentStatuses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, err.Error(), "agents")
 		return
 	}
-	repo, err := s.Registry.Resolve("")
+	scope, err := s.currentAgentScope(r.Context())
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error(), "repository")
 		return
 	}
-	statuses, err := s.Agents.Discover(r.Context(), repo)
+	statuses, err := s.Agents.Discover(r.Context(), scope)
 	if err != nil {
 		writeError(w, http.StatusConflict, "agent configuration is unavailable: "+err.Error(), "agents")
 		return
 	}
-	response := agentsDTO{Configured: []configuredAgentDTO{}}
+	response := agentsDTO{Configured: []configuredAgentDTO{}, RepositoryIdentity: scope.Identity}
 	installation := s.RoboRev.Installation(r.Context())
 	response.RoboRevVersion = installation.Version
 	for _, status := range statuses {
@@ -92,7 +117,8 @@ func commandIsCustom(agent, command string) bool {
 }
 
 type agentCheckBody struct {
-	Agent string `json:"agent"`
+	Agent              string `json:"agent"`
+	RepositoryIdentity string `json:"repositoryIdentity"`
 }
 
 func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
@@ -112,13 +138,54 @@ func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent is not allowed", "agent")
 		return
 	}
-	repo, err := s.Registry.Resolve("")
+	scope, err := s.currentAgentScope(r.Context())
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error(), "repository")
 		return
 	}
-	result, err := s.Agents.CheckInRepo(r.Context(), repo, body.Agent)
+	if strings.TrimSpace(body.RepositoryIdentity) == "" {
+		writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
+		return
+	}
+	if body.RepositoryIdentity != scope.Identity {
+		writeError(w, http.StatusConflict, "repository identity is stale; refresh agent status and retry", "repository")
+		return
+	}
+	statuses, err := s.Agents.Discover(r.Context(), scope)
 	if err != nil {
+		writeError(w, http.StatusConflict, "agent configuration is unavailable: "+err.Error(), "agents")
+		return
+	}
+	canonical, _ := roborev.CanonicalAgentName(body.Agent)
+	eligible := false
+	for _, status := range statuses {
+		if status.Name == canonical && status.Configured && status.Available {
+			eligible = true
+			break
+		}
+	}
+	if !eligible {
+		writeError(w, http.StatusConflict, "agent is not configured and detected for this repository", "agent")
+		return
+	}
+	// Re-resolve immediately before the quota-bearing runner. A stale browser
+	// card must not cause a check against a repository selected in the interim.
+	guard := func() error {
+		current, guardErr := s.currentAgentScope(r.Context())
+		if guardErr != nil {
+			return guardErr
+		}
+		if body.RepositoryIdentity != current.Identity || !sameAgentScope(scope, current) {
+			return errAgentRepositoryChanged
+		}
+		return nil
+	}
+	result, err := s.Agents.CheckInRepo(r.Context(), scope, canonical, guard)
+	if err != nil {
+		if errors.Is(err, errAgentRepositoryChanged) {
+			writeError(w, http.StatusConflict, err.Error(), "repository")
+			return
+		}
 		writeError(w, http.StatusBadGateway, err.Error(), "agent-check")
 		return
 	}

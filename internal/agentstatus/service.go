@@ -96,7 +96,7 @@ func (r processIdentityProbeRunner) Run(ctx context.Context, executable string, 
 		Executable: executable,
 		Args:       append([]string(nil), args...),
 		Dir:        os.TempDir(),
-		Env:        proc.StripUntrustedEnv(os.Environ()),
+		Env:        proc.MinimalProbeEnv(os.Environ()),
 		Timeout:    identityProbeTimeout,
 		WaitDelay:  identityProbeWaitDelay,
 		// ExecRunner bounds each stream independently. The combined length
@@ -117,6 +117,23 @@ var SystemIdentityProbeRunner IdentityProbeRunner = processIdentityProbeRunner{r
 type configuredHealth struct {
 	result roborev.AgentHealthResult
 	set    bool
+}
+
+// RepositoryScope identifies the registered repository for one discovery or
+// health operation.  The identity is supplied by the application registry so
+// health results cannot bleed between repositories that happen to use the
+// same path spelling on a different platform or through a symlink.
+type RepositoryScope struct {
+	Root     string
+	Identity string
+}
+
+func (s RepositoryScope) valid() bool {
+	return strings.TrimSpace(s.Root) != "" && strings.TrimSpace(s.Identity) != ""
+}
+
+func healthKey(scope RepositoryScope, canonical string) string {
+	return scope.Identity + "\x00" + canonical
 }
 
 // Status is the safe GET-equivalent representation of one built-in agent.
@@ -179,12 +196,15 @@ func NewServiceWithSeams(panels *roborev.PanelResolver, checker HealthChecker, r
 
 // Discover performs bounded PATH/config discovery only. It never calls the
 // health checker and never sends a prompt to an agent.
-func (s *Service) Discover(ctx context.Context, repoPath string) ([]Status, error) {
+func (s *Service) Discover(ctx context.Context, scope RepositoryScope) ([]Status, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if s == nil {
 		return nil, errors.New("agent status service is nil")
+	}
+	if !scope.valid() {
+		return nil, errors.New("repository scope is required")
 	}
 	resolver := s.Resolver
 	if resolver == nil {
@@ -198,7 +218,7 @@ func (s *Service) Discover(ctx context.Context, repoPath string) ([]Status, erro
 	if panels == nil {
 		panels = roborev.NewPanelResolver()
 	}
-	configuration, err := panels.ResolveAgentConfiguration(ctx, repoPath)
+	configuration, err := panels.ResolveAgentConfiguration(ctx, scope.Root)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +254,7 @@ func (s *Service) Discover(ctx context.Context, repoPath string) ([]Status, erro
 			Subagents:  append([]roborev.ConfiguredSubagent(nil), configured[descriptor.Name]...),
 		}
 		s.mu.RLock()
-		if state, ok := s.health[descriptor.Name]; ok && state.set && state.result.Status != "" {
+		if state, ok := s.health[healthKey(scope, descriptor.Name)]; ok && state.set && state.result.Status != "" {
 			status.Health = state.result.Status
 		}
 		s.mu.RUnlock()
@@ -251,15 +271,49 @@ func (s *Service) Discover(ctx context.Context, repoPath string) ([]Status, erro
 
 // Check runs one explicit manual check-agents request and stores its small
 // status in memory for later discovery responses.
-func (s *Service) Check(ctx context.Context, agent string) (roborev.AgentHealthResult, error) {
+func (s *Service) Check(ctx context.Context, scope RepositoryScope, agent string) (roborev.AgentHealthResult, error) {
+	return s.checkInScope(ctx, scope, agent)
+}
+
+func (s *Service) checkInScope(ctx context.Context, scope RepositoryScope, agent string, guards ...func() error) (roborev.AgentHealthResult, error) {
 	if s == nil || s.HealthChecker == nil {
 		return roborev.AgentHealthResult{}, errors.New("agent health checker is unavailable")
+	}
+	if !scope.valid() {
+		return roborev.AgentHealthResult{}, errors.New("repository scope is required")
 	}
 	canonical, ok := roborev.CanonicalAgentName(agent)
 	if !ok {
 		return roborev.AgentHealthResult{}, errors.New("agent is not allowed")
 	}
-	result, err := s.HealthChecker.CheckAgent(ctx, canonical)
+	// Discovery is deliberately repeated immediately before the quota-bearing
+	// operation. This protects against stale frontend cards and configuration
+	// changes after a previous GET response.
+	statuses, err := s.Discover(ctx, scope)
+	if err != nil {
+		return roborev.AgentHealthResult{}, err
+	}
+	eligible := false
+	for _, status := range statuses {
+		if status.Name == canonical && status.Configured && status.Available {
+			eligible = true
+			break
+		}
+	}
+	if !eligible {
+		return roborev.AgentHealthResult{}, errors.New("agent is not configured and detected for this repository")
+	}
+	if len(guards) > 0 && guards[0] != nil {
+		if err := guards[0](); err != nil {
+			return roborev.AgentHealthResult{}, err
+		}
+	}
+	var result roborev.AgentHealthResult
+	if checker, ok := s.HealthChecker.(RepositoryHealthChecker); ok {
+		result, err = checker.CheckAgentInRepo(ctx, scope.Root, canonical)
+	} else {
+		result, err = s.HealthChecker.CheckAgent(ctx, canonical)
+	}
 	if err != nil {
 		return roborev.AgentHealthResult{}, err
 	}
@@ -267,7 +321,7 @@ func (s *Service) Check(ctx context.Context, agent string) (roborev.AgentHealthR
 	if s.health == nil {
 		s.health = make(map[string]configuredHealth)
 	}
-	s.health[canonical] = configuredHealth{result: result, set: true}
+	s.health[healthKey(scope, canonical)] = configuredHealth{result: result, set: true}
 	s.mu.Unlock()
 	return result, nil
 }
@@ -275,43 +329,19 @@ func (s *Service) Check(ctx context.Context, agent string) (roborev.AgentHealthR
 // CheckInRepo is the repository-aware form used by the app handler after it
 // has resolved a registered repository. Fakes that only implement the legacy
 // HealthChecker interface remain usable for tests and embedding.
-func (s *Service) CheckInRepo(ctx context.Context, repoPath, agent string) (roborev.AgentHealthResult, error) {
-	if s == nil || s.HealthChecker == nil {
-		return roborev.AgentHealthResult{}, errors.New("agent health checker is unavailable")
-	}
-	if strings.TrimSpace(repoPath) == "" {
-		return roborev.AgentHealthResult{}, errors.New("repository path is required")
-	}
-	canonical, ok := roborev.CanonicalAgentName(agent)
-	if !ok {
-		return roborev.AgentHealthResult{}, errors.New("agent is not allowed")
-	}
-	checker, ok := s.HealthChecker.(RepositoryHealthChecker)
-	if !ok {
-		return s.Check(ctx, canonical)
-	}
-	result, err := checker.CheckAgentInRepo(ctx, repoPath, canonical)
-	if err != nil {
-		return roborev.AgentHealthResult{}, err
-	}
-	s.mu.Lock()
-	if s.health == nil {
-		s.health = make(map[string]configuredHealth)
-	}
-	s.health[canonical] = configuredHealth{result: result, set: true}
-	s.mu.Unlock()
-	return result, nil
+func (s *Service) CheckInRepo(ctx context.Context, scope RepositoryScope, agent string, guard ...func() error) (roborev.AgentHealthResult, error) {
+	return s.checkInScope(ctx, scope, agent, guard...)
 }
 
 // Health returns the last explicit health result without invoking a runner.
-func (s *Service) Health(agent string) (roborev.AgentHealthResult, bool) {
+func (s *Service) Health(scope RepositoryScope, agent string) (roborev.AgentHealthResult, bool) {
 	canonical, ok := roborev.CanonicalAgentName(agent)
-	if !ok || s == nil {
+	if !ok || s == nil || !scope.valid() {
 		return roborev.AgentHealthResult{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	state, ok := s.health[canonical]
+	state, ok := s.health[healthKey(scope, canonical)]
 	if !ok || !state.set {
 		return roborev.AgentHealthResult{}, false
 	}

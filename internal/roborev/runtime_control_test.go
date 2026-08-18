@@ -3,12 +3,15 @@ package roborev
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/process"
 )
@@ -101,7 +104,7 @@ func TestQueueControlUsesExactHTTPContractsAndVerifiesResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.SetQueuePaused(context.Background(), true); err != nil {
+	if _, err := client.SetQueuePaused(context.Background(), true); err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"GET /api/status", "POST /api/queue/pause"}; !reflect.DeepEqual(requests, want) {
@@ -122,7 +125,7 @@ func TestQueueControlRejectsMismatchAndMalformedState(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = client.SetQueuePaused(context.Background(), true)
+		_, err = client.SetQueuePaused(context.Background(), true)
 		srv.Close()
 		if response == `{"queue_paused":false}` {
 			if !errors.Is(err, ErrQueueStateMismatch) {
@@ -136,9 +139,12 @@ func TestQueueControlRejectsMismatchAndMalformedState(t *testing.T) {
 
 func TestQueueStatusOffline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"queue_paused":false}`))
 	}))
-	client, err := NewClient("roborev", &runtimeCommandRunner{}, srv.URL)
+	address := srv.URL
+	srv.Close()
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +152,149 @@ func TestQueueStatusOffline(t *testing.T) {
 	if !errors.Is(err, ErrDaemonOffline) || state.Known {
 		t.Fatalf("offline result = %#v, %v", state, err)
 	}
-	srv.Close()
+}
+
+func TestQueueStatusDoesNotMisclassifyReachableOrTimedOutFailuresAsOffline(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "server error", status: http.StatusInternalServerError, body: `daemon exploded`},
+		{name: "malformed response", status: http.StatusOK, body: `{`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer srv.Close()
+			client, err := NewClient("roborev", &runtimeCommandRunner{}, srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.QueueStatus(context.Background())
+			if err == nil || errors.Is(err, ErrDaemonOffline) {
+				t.Fatalf("queue status error = %v, want non-offline error", err)
+			}
+		})
+	}
+
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP = &http.Client{Transport: timeoutRoundTripper{}}
+	_, err = client.QueueStatus(context.Background())
+	if err == nil || errors.Is(err, ErrDaemonOffline) {
+		t.Fatalf("timed out queue status error = %v, want non-offline error", err)
+	}
+}
+
+type timeoutRoundTripper struct{}
+
+func (timeoutRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("synthetic timeout: %w", context.DeadlineExceeded)
+}
+
+type runtimeErrorRoundTripper struct{ err error }
+
+func (r runtimeErrorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, r.err
+}
+
+type genericTimeoutError struct{}
+
+func (genericTimeoutError) Error() string   { return "synthetic generic timeout" }
+func (genericTimeoutError) Timeout() bool   { return true }
+func (genericTimeoutError) Temporary() bool { return true }
+
+type blockingRoundTripper struct{}
+
+func (blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+func TestDaemonHealthTransportClassificationIsErrnoOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		offline bool
+	}{
+		{name: "wrapped connection refused", err: fmt.Errorf("outer: %w", syscall.Errno(10061)), offline: true},
+		{name: "wrapped host unreachable", err: fmt.Errorf("outer: %w", syscall.EHOSTUNREACH), offline: true},
+		{name: "generic net timeout", err: genericTimeoutError{}, offline: false},
+		{name: "wrapped context deadline", err: fmt.Errorf("outer: %w", context.DeadlineExceeded), offline: false},
+		{name: "wrapped context canceled", err: fmt.Errorf("outer: %w", context.Canceled), offline: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := NewClient("roborev", &runtimeCommandRunner{}, "127.0.0.1:7373")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.HTTP = &http.Client{Transport: runtimeErrorRoundTripper{err: test.err}}
+			online, healthErr := client.DaemonHealth(context.Background())
+			if test.offline {
+				if online || healthErr != nil {
+					t.Fatalf("health = online:%v err:%v, want confirmed offline", online, healthErr)
+				}
+				return
+			}
+			if !online || healthErr == nil {
+				t.Fatalf("health = online:%v err:%v, want reachable/unknown error", online, healthErr)
+			}
+		})
+	}
+
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP = &http.Client{Timeout: 20 * time.Millisecond, Transport: blockingRoundTripper{}}
+	online, healthErr := client.DaemonHealth(context.Background())
+	if !online || healthErr == nil || errors.Is(healthErr, ErrDaemonOffline) {
+		t.Fatalf("client timeout health = online:%v err:%v, want non-offline error", online, healthErr)
+	}
+
+	for _, errno := range []error{syscall.Errno(10061), syscall.EHOSTUNREACH} {
+		client.HTTP = &http.Client{Transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped: %w", errno)}}
+		state, queueErr := client.QueueStatus(context.Background())
+		if !errors.Is(queueErr, ErrDaemonOffline) || state.Known {
+			t.Fatalf("queue transport error %v = state:%#v err:%v, want confirmed offline", errno, state, queueErr)
+		}
+	}
+}
+
+func TestDaemonHealthContextCancellationIsNotOffline(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{name: "canceled", ctx: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, cancel
+		}, want: context.Canceled},
+		{name: "deadline", ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := NewClient("roborev", &runtimeCommandRunner{}, "127.0.0.1:7373")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := test.ctx()
+			defer cancel()
+			online, healthErr := client.DaemonHealth(ctx)
+			if online || !errors.Is(healthErr, test.want) || errors.Is(healthErr, ErrDaemonOffline) {
+				t.Fatalf("health = online:%v err:%v, want context error", online, healthErr)
+			}
+		})
+	}
 }
 
 func TestDaemonHealthDistinguishesUnreachableFromReachableInvalidResponses(t *testing.T) {

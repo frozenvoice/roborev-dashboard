@@ -12,9 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -150,21 +148,33 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 }
 
 func isUnreachableHealthError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		var netErr net.Error
-		if errors.As(urlErr.Err, &netErr) {
-			return true
-		}
-		if errors.Is(urlErr.Err, syscall.ECONNREFUSED) || errors.Is(urlErr.Err, syscall.ECONNRESET) || errors.Is(urlErr.Err, syscall.EHOSTUNREACH) {
+	// Do not classify every net.Error (especially timeout errors) as proof
+	// that the daemon is offline.  The HTTP client wraps transport failures in
+	// url.Error/net.OpError/os.SyscallError; errors.Is follows those wrappers
+	// and lets us accept only concrete connection-loss errno values.
+	for _, errno := range []error{
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.ECONNABORTED,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+		// Windows Winsock errno values are not exposed through the portable
+		// syscall.E* aliases above. Keep the transport classification
+		// platform-neutral by matching the documented WSA values directly.
+		syscall.Errno(10061), // WSAECONNREFUSED
+		syscall.Errno(10054), // WSAECONNRESET
+		syscall.Errno(10053), // WSAECONNABORTED
+		syscall.Errno(10065), // WSAEHOSTUNREACH
+		syscall.Errno(10051), // WSAENETUNREACH
+	} {
+		if errors.Is(err, errno) {
 			return true
 		}
 	}
-	var netErr net.Error
-	return errors.As(err, &netErr)
+	return false
 }
 
 // QueueStatus reads GET /api/status with a bounded body and extracts only the
@@ -176,7 +186,7 @@ func (c *Client) QueueStatus(ctx context.Context) (QueueState, error) {
 	}
 	raw, err := c.getDaemonJSONBounded(ctx, "/api/status", runtimeControlResponseLimit)
 	if err != nil {
-		if ctx.Err() == nil {
+		if isUnreachableHealthError(err) {
 			return QueueState{}, fmt.Errorf("%w: %v", ErrDaemonOffline, err)
 		}
 		return QueueState{}, err
@@ -202,12 +212,14 @@ func (c *Client) QueuePaused(ctx context.Context) (bool, error) {
 // SetQueuePaused performs the exact v0.64 queue operation.  The status read
 // before POST is intentional: queue controls are disabled while the daemon is
 // offline, and the POST response is verified rather than assumed successful.
-func (c *Client) SetQueuePaused(ctx context.Context, paused bool) error {
+// The returned state is the authoritative state from that POST response; a
+// caller must not perform a second GET that could race with this mutation.
+func (c *Client) SetQueuePaused(ctx context.Context, paused bool) (QueueState, error) {
 	if c == nil {
-		return errors.New("RoboRev client is unavailable")
+		return QueueState{}, errors.New("RoboRev client is unavailable")
 	}
 	if _, err := c.QueueStatus(ctx); err != nil {
-		return err
+		return QueueState{}, err
 	}
 	path := "/api/queue/unpause"
 	if paused {
@@ -215,23 +227,24 @@ func (c *Client) SetQueuePaused(ctx context.Context, paused bool) error {
 	}
 	raw, err := c.postEmptyJSON(ctx, path)
 	if err != nil {
-		return err
+		return QueueState{}, err
 	}
 	actual, err := decodeQueuePaused(raw)
 	if err != nil {
-		return err
+		return QueueState{}, err
 	}
+	state := QueueState{Known: true, Paused: actual}
 	if actual != paused {
-		return fmt.Errorf("%w: requested %t, daemon returned %t", ErrQueueStateMismatch, paused, actual)
+		return state, fmt.Errorf("%w: requested %t, daemon returned %t", ErrQueueStateMismatch, paused, actual)
 	}
-	return nil
+	return state, nil
 }
 
-func (c *Client) PauseQueue(ctx context.Context) error {
+func (c *Client) PauseQueue(ctx context.Context) (QueueState, error) {
 	return c.SetQueuePaused(ctx, true)
 }
 
-func (c *Client) ResumeQueue(ctx context.Context) error {
+func (c *Client) ResumeQueue(ctx context.Context) (QueueState, error) {
 	return c.SetQueuePaused(ctx, false)
 }
 

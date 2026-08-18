@@ -92,6 +92,7 @@ export type ConfiguredReviewAgent = {
 }
 
 export type AgentsResponse = {
+  repositoryIdentity: string
   roborevVersion?: string
   configured: ConfiguredReviewAgent[]
 }
@@ -156,7 +157,7 @@ function normalizeAgentCommand(value: unknown): AgentCommand {
 /** Parse the machine-readable configured-agent response. Unknown fields are ignored. */
 export function normalizeAgentsResponse(value: unknown): AgentsResponse | null {
   const object = objectValue(value)
-  if (!object || !Array.isArray(object.configured)) return null
+  if (!object || typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || !Array.isArray(object.configured)) return null
   const configured: ConfiguredReviewAgent[] = []
   for (const item of object.configured) {
     const agent = objectValue(item)
@@ -175,7 +176,7 @@ export function normalizeAgentsResponse(value: unknown): AgentsResponse | null {
       lastCheckedAt: optionalString(readAlias(agent, 'lastCheckedAt', 'last_checked_at')),
     })
   }
-  return { roborevVersion: optionalString(readAlias(object, 'roborevVersion', 'roborev_version')), configured }
+  return { repositoryIdentity: object.repositoryIdentity, roborevVersion: optionalString(readAlias(object, 'roborevVersion', 'roborev_version')), configured }
 }
 
 /** Parse runtime/queue capabilities and fail closed to unknown queue controls. */

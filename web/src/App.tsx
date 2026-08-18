@@ -283,6 +283,7 @@ export function App() {
   const [setupReloadEpoch, setSetupReloadEpoch] = useState(0)
   const [setupConfirming, setSetupConfirming] = useState(false)
   const [agents, setAgents] = useState<AgentsResponse | null>(null)
+  const [loadedAgentsIdentity, setLoadedAgentsIdentity] = useState('')
   const [agentsLoading, setAgentsLoading] = useState(false)
   const [agentsError, setAgentsError] = useState('')
   const [runtimeControl, setRuntimeControl] = useState<RuntimeControlState | null>(null)
@@ -297,6 +298,7 @@ export function App() {
   const panelRefineReviewGeneration = useRef(0)
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
+  const agentsGeneration = useRef(0)
   const runtimeControlGeneration = useRef(0)
   const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
@@ -305,6 +307,17 @@ export function App() {
   useEffect(() => {
     currentRepositoryIdentity.current = selectedRepositoryIdentity
     panelRefineReviewGeneration.current++
+  }, [selectedRepositoryIdentity])
+
+  useEffect(() => {
+    // Repository-scoped agent discovery must be invalidated before a new
+    // response can commit. This also removes the old cards immediately while
+    // the selected repository is being restored by the backend.
+    agentsGeneration.current++
+    setAgents(null)
+    setLoadedAgentsIdentity('')
+    setAgentsError('')
+    setAgentsLoading(false)
   }, [selectedRepositoryIdentity])
 
   const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
@@ -349,18 +362,23 @@ export function App() {
       return null
     }
   }, [])
-  const loadAgents = useCallback(async () => {
+  const loadAgents = useCallback(async (expectedIdentity: string = currentRepositoryIdentity.current) => {
+    const generation = ++agentsGeneration.current
     setAgentsLoading(true)
     try {
       const next = normalizeAgentsResponse(await request<unknown>('/api/agents'))
       if (!next) throw new APIError('The configured-agent response was malformed.')
+      if (generation !== agentsGeneration.current || !expectedIdentity || expectedIdentity !== currentRepositoryIdentity.current || next.repositoryIdentity !== expectedIdentity) return null
       setAgents(next)
+      setLoadedAgentsIdentity(expectedIdentity)
       setAgentsError('')
       return next
     } catch (error) {
-      setAgentsError((error as Error).message)
+      if (generation === agentsGeneration.current && expectedIdentity === currentRepositoryIdentity.current) setAgentsError((error as Error).message)
       return null
-    } finally { setAgentsLoading(false) }
+    } finally {
+      if (generation === agentsGeneration.current) setAgentsLoading(false)
+    }
   }, [])
   const loadRuntimeControl = useCallback(async () => {
     const generation = ++runtimeControlGeneration.current
@@ -471,10 +489,12 @@ export function App() {
   }, [initialized, loadSetup, setupReloadEpoch])
   useEffect(() => {
     if (!initialized || activeNav !== 'Agents & Setup') return
+    const identity = selectedRepositoryIdentity
+    if (!identity) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
-      const [runtime] = await Promise.all([loadRuntimeControl(), loadAgents()])
+      const [runtime] = await Promise.all([loadRuntimeControl(), loadAgents(identity)])
       if (cancelled) return
       // Runtime-control operations are asynchronous. Poll only for the
       // bounded transition; idle setup pages do not generate background GETs.
@@ -482,7 +502,7 @@ export function App() {
     }
     void poll()
     return () => { cancelled = true; runtimeControlGeneration.current++; if (timer) clearTimeout(timer) }
-  }, [activeNav, initialized, loadAgents, loadRuntimeControl])
+  }, [activeNav, initialized, loadAgents, loadRuntimeControl, selectedRepositoryIdentity])
   const setupPhase = setupState?.phase
   const previousSetupPhase = useRef<SetupState['phase'] | undefined>(undefined)
   useEffect(() => {
@@ -618,16 +638,16 @@ export function App() {
   }, [mutate])
   const refreshRuntimeSurfaces = useCallback(async () => {
     const data = await loadBootstrap().catch(() => null)
+    const target = data ?? bootstrap
+    const targetRepo = target?.repositories.find(item => item.identity === target.selectedRepositoryIdentity)
     await Promise.allSettled([
       loadSetup(),
-      loadAgents(),
+      targetRepo ? loadAgents(targetRepo.identity) : Promise.resolve(null),
       loadRuntimeControl(),
       request<Installation>('/api/runtime').then(runtime => {
         if (runtime && typeof runtime === 'object' && typeof runtime.installed === 'boolean') setBootstrap(current => current ? { ...current, roborev: runtime } : current)
       }),
     ])
-    const target = data ?? bootstrap
-    const targetRepo = target?.repositories.find(item => item.identity === target.selectedRepositoryIdentity)
     if (targetRepo) await Promise.allSettled([loadPanels(targetRepo.path, targetRepo.identity), loadReviews(targetRepo.path, targetRepo.identity)])
   }, [bootstrap, loadAgents, loadBootstrap, loadPanels, loadReviews, loadRuntimeControl, loadSetup])
   const pollRuntimeOperation = useCallback(async () => {
@@ -670,16 +690,21 @@ export function App() {
     } finally { setBusy(false) }
   }, [bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity, loadReviews, loadRuntimeControl, pollRuntimeOperation, toast])
   const runAgentCheck = useCallback(async (agent: string) => {
+    const expectedIdentity = loadedAgentsIdentity
+    const startGeneration = agentsGeneration.current
+    if (!expectedIdentity || expectedIdentity !== selectedRepositoryIdentity) return
     setBusy(true)
     try {
-      await request('/api/agents/check', { method: 'POST', body: JSON.stringify({ agent }) })
-      await loadAgents()
-      toast('success', `Agent check completed for ${agent}.`)
+      await request('/api/agents/check', { method: 'POST', body: JSON.stringify({ agent, repositoryIdentity: expectedIdentity }) })
+      if (expectedIdentity !== currentRepositoryIdentity.current || startGeneration !== agentsGeneration.current) return
+      const refreshed = await loadAgents(expectedIdentity)
+      if (refreshed && expectedIdentity === currentRepositoryIdentity.current) toast('success', `Agent check completed for ${agent}.`)
     } catch (error) {
+      if (expectedIdentity !== currentRepositoryIdentity.current || startGeneration !== agentsGeneration.current) return
       toast('error', (error as Error).message)
       throw error
     } finally { setBusy(false) }
-  }, [loadAgents, toast])
+  }, [loadAgents, loadedAgentsIdentity, selectedRepositoryIdentity, toast])
 
   const runningCount = jobs.filter(isRunning).length
   const daemonRunning = Boolean(bootstrap?.roborev?.status?.running)
@@ -777,6 +802,13 @@ export function App() {
     reviewGeneration.current++
     panelGeneration.current++
     panelRefineGeneration.current++
+    // Invalidate the old repository's agent cards immediately, before the
+    // asynchronous repository selection/bootstrap round trip completes.
+    agentsGeneration.current++
+    setAgents(null)
+    setLoadedAgentsIdentity('')
+    setAgentsError('')
+    setAgentsLoading(false)
     setReviewPollError('')
     setLoadedReviewIdentity('')
     setPanelConfiguration(null)
@@ -831,7 +863,7 @@ export function App() {
       {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => runDaemonAction('start')}>Start daemon</button>}</section>}
       {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Panel configuration unavailable</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>Retry panel discovery</button>}</section>}
       {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup state={setupState} busy={busy || setupOperationActive} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={agents} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { await loadAgents() }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} state={setupState} busy={busy || setupOperationActive || repoSwitching} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={loadedAgentsIdentity === selectedRepositoryIdentity ? agents : null} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { if (selectedRepositoryIdentity) await loadAgents(selectedRepositoryIdentity) }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBoreV-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
     {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || setupOperationActive || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !setupOperationActive && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
     {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}

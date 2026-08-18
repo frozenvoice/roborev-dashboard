@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
@@ -27,6 +28,15 @@ func (appAgentResolver) SameFile(left, right string) bool { return left == right
 type appIdentityProbe struct{}
 
 func (appIdentityProbe) Run(context.Context, string, []string) agentstatus.ProbeResult {
+	return agentstatus.ProbeResult{Output: "Cursor 1.0"}
+}
+
+type switchingIdentityProbe struct{ switchRepository func() }
+
+func (p switchingIdentityProbe) Run(context.Context, string, []string) agentstatus.ProbeResult {
+	if p.switchRepository != nil {
+		p.switchRepository()
+	}
 	return agentstatus.ProbeResult{Output: "Cursor 1.0"}
 }
 
@@ -64,6 +74,15 @@ func agentTestServer(t *testing.T) (*Server, *appHealthChecker) {
 	return server, checker
 }
 
+func agentCheckRequestBody(t *testing.T, agent, identity string) string {
+	t.Helper()
+	raw, err := json.Marshal(agentCheckBody{Agent: agent, RepositoryIdentity: identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
 func TestAgentsEndpointIsZeroQuotaAndReturnsOnlySafeConfiguredSubset(t *testing.T) {
 	server, checker := agentTestServer(t)
 	request := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
@@ -82,7 +101,7 @@ func TestAgentsEndpointIsZeroQuotaAndReturnsOnlySafeConfiguredSubset(t *testing.
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.RoboRevVersion != "v0.64.0" || len(response.Configured) != 1 {
+	if response.RoboRevVersion != "v0.64.0" || response.RepositoryIdentity != gitx.RepositoryKey(`E:\repo`) || len(response.Configured) != 1 {
 		t.Fatalf("agents response = %#v", response)
 	}
 	agent := response.Configured[0]
@@ -101,7 +120,7 @@ func TestAgentHealthRequiresMutationAuthorizationAndStrictCanonicalBody(t *testi
 		t.Fatalf("missing CSRF = %d, calls=%d", recorder.Code, checker.calls)
 	}
 
-	for _, body := range []string{`{"agent":"unknown"}`, `{"agent":"claude-code","command":"evil"}`, `{"agent":"claude-code","prompt":"evil"}`} {
+	for _, body := range []string{`{"agent":"claude"}`, `{"agent":"unknown","repositoryIdentity":"repo"}`, `{"agent":"claude-code","repositoryIdentity":"repo","command":"evil"}`, `{"agent":"claude-code","repositoryIdentity":"repo","prompt":"evil"}`} {
 		request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(body))
 		request.Header.Set("X-CSRF-Token", server.csrfToken)
 		recorder = httptest.NewRecorder()
@@ -111,12 +130,128 @@ func TestAgentHealthRequiresMutationAuthorizationAndStrictCanonicalBody(t *testi
 		}
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(`{"agent":"claude"}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo`))))
 	request.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || checker.calls != 1 || checker.agent != "claude-code" || checker.repo != `E:\repo` {
 		t.Fatalf("authorized health = %d, calls=%d agent=%q repo=%q body=%s", recorder.Code, checker.calls, checker.agent, checker.repo, recorder.Body.String())
+	}
+}
+
+func TestAgentHealthRechecksCurrentScopeEligibilityBeforeRunner(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*Server)
+		reason string
+	}{
+		{
+			name: "allowlisted but unconfigured",
+			setup: func(server *Server) {
+				server.Agents.Panels = &roborev.PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}
+			},
+			reason: "unconfigured",
+		},
+		{
+			name: "configured but executable missing",
+			setup: func(server *Server) {
+				server.Agents.Resolver = appAgentResolver{}
+			},
+			reason: "missing executable",
+		},
+		{
+			name: "discovery failure",
+			setup: func(server *Server) {
+				invalid := filepath.Join(t.TempDir(), "invalid.toml")
+				if err := os.WriteFile(invalid, []byte("[invalid"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				server.Agents.Panels = &roborev.PanelResolver{GlobalConfigPath: invalid}
+			},
+			reason: "discovery failure",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, checker := agentTestServer(t)
+			test.setup(server)
+			request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo`))))
+			request.Header.Set("X-CSRF-Token", server.csrfToken)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusConflict || checker.calls != 0 {
+				t.Fatalf("%s = status %d calls=%d body=%s", test.reason, recorder.Code, checker.calls, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestAgentHealthRejectsRepositorySwitchBeforeQuotaRunner(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeService{}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(global, []byte("[review.subagents.cursor]\nagent='cursor'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &appHealthChecker{}
+	server.Agents = agentstatus.NewServiceWithSeams(
+		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		appAgentResolver{paths: map[string]string{"agent": `C:\fake\cursor.exe`, "grok": `C:\fake\grok.exe`}},
+		switchingIdentityProbe{switchRepository: func() { _ = registry.Select(`E:\repo-b`) }},
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "cursor", gitx.RepositoryKey(`E:\repo-a`))))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict || checker.calls != 0 {
+		t.Fatalf("repository switch accepted check: status=%d calls=%d body=%s", recorder.Code, checker.calls, recorder.Body.String())
+	}
+}
+
+func TestAgentHealthRejectsStaleRequestRepositoryIdentity(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeService{}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(global, []byte("[review.subagents.claude]\nagent='claude'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &appHealthChecker{}
+	server.Agents = agentstatus.NewServiceWithSeams(
+		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		appAgentResolver{paths: map[string]string{"claude": `C:\fake\claude.exe`}}, appIdentityProbe{},
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo-a`))))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict || checker.calls != 0 {
+		t.Fatalf("stale repository identity accepted: status=%d calls=%d body=%s", recorder.Code, checker.calls, recorder.Body.String())
 	}
 }
 

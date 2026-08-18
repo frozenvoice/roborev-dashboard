@@ -87,7 +87,7 @@ type Adapter interface {
 	StopDaemon(context.Context) error
 	RestartDaemon(context.Context) error
 	QueueStatus(context.Context) (roborev.QueueState, error)
-	SetQueuePaused(context.Context, bool) error
+	SetQueuePaused(context.Context, bool) (roborev.QueueState, error)
 }
 
 type Dependencies struct {
@@ -239,6 +239,7 @@ func (m *Manager) Refresh(ctx context.Context) State {
 		// offline proof. Clear liveness and disable controls until a valid
 		// probe succeeds.
 		m.observeDaemon(false, false)
+		m.invalidateQueue()
 		m.setDisabled(healthErr)
 		return m.Snapshot()
 	}
@@ -247,9 +248,13 @@ func (m *Manager) Refresh(ctx context.Context) State {
 	m.state.DisabledReason = m.configuredDisabledReason
 	m.mu.Unlock()
 	if online {
-		if queue, err := m.queueStatus(ctx); err == nil {
+		if queue, err := m.queueStatus(ctx); err == nil && queue.Known {
 			m.observeQueue(queue.Paused, queue.Known)
+		} else {
+			m.invalidateQueue()
 		}
+	} else {
+		m.invalidateQueue()
 	}
 	return m.Snapshot()
 }
@@ -277,6 +282,14 @@ func (m *Manager) observeQueue(paused, known bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state.QueuePaused, m.state.QueueKnown = paused, known
+	m.state.UpdatedAt = time.Now().UTC()
+}
+
+func (m *Manager) invalidateQueue() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.QueuePaused = false
+	m.state.QueueKnown = false
 	m.state.UpdatedAt = time.Now().UTC()
 }
 
@@ -502,28 +515,35 @@ func (m *Manager) SetQueuePaused(parent context.Context, paused bool) (State, er
 		m.observeDaemon(online, known)
 	}
 	if healthErr != nil {
-		return m.finishSyncQueue(parent, healthErr)
+		m.observeDaemon(false, false)
+		m.invalidateQueue()
+		return m.finishSyncQueue(healthErr)
 	}
 	if !known || !online {
-		return m.finishSyncQueue(parent, ErrDaemonOffline)
+		m.invalidateQueue()
+		return m.finishSyncQueue(ErrDaemonOffline)
 	}
-	if err := m.setQueue(parent, paused); err != nil {
-		return m.finishSyncQueue(parent, err)
-	}
-	queue, queueErr := m.queueStatus(parent)
-	if queueErr == nil {
-		m.observeQueue(queue.Paused, queue.Known)
-		if !queue.Known || queue.Paused != paused {
-			return m.finishSyncQueue(parent, fmt.Errorf("%w: requested %t, daemon returned %t", roborev.ErrQueueStateMismatch, paused, queue.Paused))
+	queue, err := m.setQueue(parent, paused)
+	if err != nil {
+		if queue.Known {
+			// A verified POST response remains authoritative even when it
+			// reports a mismatch. Preserve it for the UI; do not issue a
+			// second GET that can race with the mutation.
+			m.observeQueue(queue.Paused, true)
+		} else {
+			m.invalidateQueue()
 		}
-	} else if !errors.Is(queueErr, ErrUnsupported) {
-		return m.finishSyncQueue(parent, queueErr)
-	} else {
-		// A narrow fake may expose only SetQueuePaused; the concrete RoboRev
-		// adapter always verifies its exact response before returning.
-		m.observeQueue(paused, true)
+		return m.finishSyncQueue(err)
 	}
-	return m.finishSyncQueue(parent, nil)
+	if !queue.Known {
+		m.invalidateQueue()
+		return m.finishSyncQueue(fmt.Errorf("%w: queue state was not verified", roborev.ErrQueueStateMismatch))
+	}
+	m.observeQueue(queue.Paused, true)
+	if queue.Paused != paused {
+		return m.finishSyncQueue(fmt.Errorf("%w: requested %t, daemon returned %t", roborev.ErrQueueStateMismatch, paused, queue.Paused))
+	}
+	return m.finishSyncQueue(nil)
 }
 
 func (m *Manager) PauseQueue(ctx context.Context) (State, error) {
@@ -550,7 +570,7 @@ func (m *Manager) QueueUnpause(ctx context.Context) (State, error) {
 	return m.ResumeQueue(ctx)
 }
 
-func (m *Manager) finishSyncQueue(ctx context.Context, runErr error) (State, error) {
+func (m *Manager) finishSyncQueue(runErr error) (State, error) {
 	m.mu.Lock()
 	now := time.Now().UTC()
 	m.state.Active = false
@@ -568,9 +588,6 @@ func (m *Manager) finishSyncQueue(ctx context.Context, runErr error) (State, err
 	}
 	state := cloneState(m.state)
 	m.mu.Unlock()
-	if ctx != nil && ctx.Err() != nil && runErr == nil {
-		return state, ctx.Err()
-	}
 	return state, runErr
 }
 
@@ -739,25 +756,24 @@ func (m *Manager) queueStatus(ctx context.Context) (roborev.QueueState, error) {
 	return roborev.QueueState{}, ErrUnsupported
 }
 
-func (m *Manager) setQueue(ctx context.Context, paused bool) error {
+func (m *Manager) setQueue(ctx context.Context, paused bool) (roborev.QueueState, error) {
 	if adapter, ok := m.adapter.(interface {
-		SetQueuePaused(context.Context, bool) error
+		SetQueuePaused(context.Context, bool) (roborev.QueueState, error)
 	}); ok {
 		return adapter.SetQueuePaused(ctx, paused)
 	}
 	if paused {
-		if adapter, ok := m.adapter.(interface{ PauseQueue(context.Context) error }); ok {
+		if adapter, ok := m.adapter.(interface {
+			PauseQueue(context.Context) (roborev.QueueState, error)
+		}); ok {
 			return adapter.PauseQueue(ctx)
 		}
-	} else if adapter, ok := m.adapter.(interface{ ResumeQueue(context.Context) error }); ok {
+	} else if adapter, ok := m.adapter.(interface {
+		ResumeQueue(context.Context) (roborev.QueueState, error)
+	}); ok {
 		return adapter.ResumeQueue(ctx)
 	}
-	if adapter, ok := m.adapter.(interface {
-		SetQueue(context.Context, bool) error
-	}); ok {
-		return adapter.SetQueue(ctx, paused)
-	}
-	return fmt.Errorf("%w: queue control", ErrUnsupported)
+	return roborev.QueueState{}, fmt.Errorf("%w: queue control", ErrUnsupported)
 }
 
 func (m *Manager) wait(ctx context.Context, duration time.Duration) error {

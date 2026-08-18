@@ -2,6 +2,7 @@ package agentstatus
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,6 +50,16 @@ func (f *fakeHealthChecker) CheckAgent(_ context.Context, agent string) (roborev
 	return roborev.AgentHealthResult{Agent: agent, Status: roborev.AgentHealthPassed}, nil
 }
 
+type statusHealthChecker struct {
+	calls  int
+	status roborev.AgentHealthStatus
+}
+
+func (f *statusHealthChecker) CheckAgent(_ context.Context, agent string) (roborev.AgentHealthResult, error) {
+	f.calls++
+	return roborev.AgentHealthResult{Agent: agent, Status: f.status}, nil
+}
+
 type captureProcessRunner struct{ command proc.Command }
 
 func (r *captureProcessRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
@@ -74,7 +85,8 @@ func TestDiscoverUsesDescriptorsCustomGlobalOverridesAndNoAutoHealth(t *testing.
 	probe := &fakeProbeRunner{results: map[string]ProbeResult{"--version": {Output: "Cursor 1.0"}}}
 	checker := &fakeHealthChecker{}
 	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: global}, checker, resolver, probe)
-	statuses, err := service.Discover(context.Background(), root)
+	scope := RepositoryScope{Root: root, Identity: "repo-a"}
+	statuses, err := service.Discover(context.Background(), scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +141,8 @@ func TestCursorDetectionFailsClosedForGrokAmbiguousTimeoutAndOversize(t *testing
 			}
 			probe := &fakeProbeRunner{results: test.results}
 			service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: filepath.Join(t.TempDir(), "missing.toml")}, nil, resolver, probe)
-			statuses, err := service.Discover(context.Background(), t.TempDir())
+			root := t.TempDir()
+			statuses, err := service.Discover(context.Background(), RepositoryScope{Root: root, Identity: test.name})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -148,16 +161,84 @@ func TestCursorDetectionFailsClosedForGrokAmbiguousTimeoutAndOversize(t *testing
 
 func TestServiceCheckStoresAliasMappedHealth(t *testing.T) {
 	checker := &fakeHealthChecker{}
-	service := NewServiceWithSeams(roborev.NewPanelResolver(), checker, fakeExecutableResolver{}, &fakeProbeRunner{})
-	result, err := service.Check(context.Background(), "grok-build")
+	global := filepath.Join(t.TempDir(), "config.toml")
+	writeAgentConfig(t, global, "[review.subagents.grok]\nagent='grok'\n")
+	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: global}, checker, fakeExecutableResolver{paths: map[string]string{"grok": "grok.exe"}}, &fakeProbeRunner{})
+	scope := RepositoryScope{Root: t.TempDir(), Identity: "repo-a"}
+	result, err := service.Check(context.Background(), scope, "grok-build")
 	if err != nil || result.Agent != "grok" || checker.calls != 1 {
 		t.Fatalf("check result=%#v err=%v calls=%d", result, err, checker.calls)
 	}
-	if got, ok := service.Health("grok"); !ok || got.Status != roborev.AgentHealthPassed {
+	if got, ok := service.Health(scope, "grok"); !ok || got.Status != roborev.AgentHealthPassed {
 		t.Fatalf("stored health=%#v ok=%v", got, ok)
 	}
-	if _, err := service.Check(context.Background(), "test"); err == nil {
+	if _, err := service.Check(context.Background(), scope, "test"); err == nil {
 		t.Fatal("unsafe health agent accepted")
+	}
+}
+
+func TestHealthIsScopedByRepositoryIdentity(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "config.toml")
+	writeAgentConfig(t, global, "[review.subagents.codex]\nagent='codex'\n")
+	checker := &statusHealthChecker{status: roborev.AgentHealthPassed}
+	service := NewServiceWithSeams(
+		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		fakeExecutableResolver{paths: map[string]string{"codex": "codex.exe"}}, &fakeProbeRunner{},
+	)
+	scopeA := RepositoryScope{Root: t.TempDir(), Identity: "repo-a"}
+	scopeB := RepositoryScope{Root: t.TempDir(), Identity: "repo-b"}
+	if _, err := service.Check(context.Background(), scopeA, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := service.Health(scopeA, "codex"); !ok || got.Status != roborev.AgentHealthPassed {
+		t.Fatalf("repo A health = %#v, ok=%v", got, ok)
+	}
+	if got, ok := service.Health(scopeB, "codex"); ok || got.Status != "" {
+		t.Fatalf("repo B inherited repo A health = %#v, ok=%v", got, ok)
+	}
+	checker.status = roborev.AgentHealthFailed
+	if _, err := service.Check(context.Background(), scopeB, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := service.Health(scopeA, "codex"); got.Status != roborev.AgentHealthPassed {
+		t.Fatalf("repo A health changed after repo B check: %#v", got)
+	}
+	if got, _ := service.Health(scopeB, "codex"); got.Status != roborev.AgentHealthFailed {
+		t.Fatalf("repo B health = %#v", got)
+	}
+}
+
+func TestCheckRequiresConfiguredAndDetectedAgentBeforeRunner(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(t.TempDir(), "config.toml")
+	writeAgentConfig(t, global, "[review.subagents.codex]\nagent='codex'\n")
+	checker := &fakeHealthChecker{}
+	resolver := fakeExecutableResolver{paths: map[string]string{}}
+	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: global}, checker, resolver, &fakeProbeRunner{})
+	_, err := service.Check(context.Background(), RepositoryScope{Root: root, Identity: "repo-a"}, "codex")
+	if err == nil || checker.calls != 0 {
+		t.Fatalf("missing executable check err=%v calls=%d", err, checker.calls)
+	}
+	globalMissing := filepath.Join(t.TempDir(), "missing.toml")
+	service = NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: globalMissing}, checker, fakeExecutableResolver{paths: map[string]string{"codex": "codex.exe"}}, &fakeProbeRunner{})
+	_, err = service.Check(context.Background(), RepositoryScope{Root: root, Identity: "repo-a"}, "codex")
+	if err == nil || checker.calls != 0 {
+		t.Fatalf("unconfigured check err=%v calls=%d", err, checker.calls)
+	}
+}
+
+func TestCheckGuardStopsSelectionRaceBeforeRunner(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "config.toml")
+	writeAgentConfig(t, global, "[review.subagents.codex]\nagent='codex'\n")
+	checker := &fakeHealthChecker{}
+	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: global}, checker, fakeExecutableResolver{paths: map[string]string{"codex": "codex.exe"}}, &fakeProbeRunner{})
+	guardCalls := 0
+	_, err := service.CheckInRepo(context.Background(), RepositoryScope{Root: t.TempDir(), Identity: "repo-a"}, "codex", func() error {
+		guardCalls++
+		return errors.New("selected repository changed")
+	})
+	if err == nil || guardCalls != 1 || checker.calls != 0 {
+		t.Fatalf("guard result err=%v guardCalls=%d runnerCalls=%d", err, guardCalls, checker.calls)
 	}
 }
 

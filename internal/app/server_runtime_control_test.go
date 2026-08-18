@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,7 @@ type appRuntimeAdapter struct {
 	mu             sync.Mutex
 	online         bool
 	paused         bool
+	queueErr       error
 	restartStarted chan struct{}
 	restartRelease chan struct{}
 	restartCancel  chan struct{}
@@ -65,16 +67,19 @@ func (a *appRuntimeAdapter) QueueStatus(context.Context) (roborev.QueueState, er
 	if !a.online {
 		return roborev.QueueState{}, roborev.ErrDaemonOffline
 	}
+	if a.queueErr != nil {
+		return roborev.QueueState{}, a.queueErr
+	}
 	return roborev.QueueState{Known: true, Paused: a.paused}, nil
 }
-func (a *appRuntimeAdapter) SetQueuePaused(_ context.Context, paused bool) error {
+func (a *appRuntimeAdapter) SetQueuePaused(_ context.Context, paused bool) (roborev.QueueState, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.online {
-		return roborev.ErrDaemonOffline
+		return roborev.QueueState{}, roborev.ErrDaemonOffline
 	}
 	a.paused = paused
-	return nil
+	return roborev.QueueState{Known: true, Paused: a.paused}, nil
 }
 
 func replaceRuntimeManager(t *testing.T, server *Server, adapter *appRuntimeAdapter) {
@@ -130,6 +135,41 @@ func TestQueueControlUsesAuthorizationGateAndTypedState(t *testing.T) {
 	}
 	if response.QueueState != "paused" || !response.CanResume || response.CanPause {
 		t.Fatalf("pause state = %#v", response)
+	}
+}
+
+func TestRuntimeStatusDisablesQueueActionsWhenQueueStateIsUnknown(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	adapter := &appRuntimeAdapter{online: true}
+	replaceRuntimeManager(t, server, adapter)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime-control", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("initial runtime status = %d", recorder.Code)
+	}
+	var state runtimeControlDTO
+	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.QueueState != "processing" || !state.CanPause || state.CanResume {
+		t.Fatalf("initial queue controls = %#v", state)
+	}
+
+	adapter.mu.Lock()
+	adapter.queueErr = errors.New("queue status read failed")
+	adapter.mu.Unlock()
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("failed runtime status = %d", recorder.Code)
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.QueueState != "unknown" || state.CanPause || state.CanResume {
+		t.Fatalf("queue controls remained enabled with unknown state = %#v", state)
 	}
 }
 

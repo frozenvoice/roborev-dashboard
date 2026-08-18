@@ -11,7 +11,8 @@ const bootstrap = {
 const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
 const setupReady = { status: 'ready', phase: 'ready', operationActive: false, installed: true, binaryPath: 'C:\\Tools\\roborev.exe', version: 'v0.64.0', recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: true, blocked: false, retryable: false, installAvailable: false, canInstall: false, canRetry: false, canStartDaemon: false, architecture: 'windows-amd64', sourceURL: 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0', sourceLabel: 'Official GitHub release', assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev.exe', downloadedBytes: 1200, totalBytes: 1200 }
-const setupAgents = { roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+const setupAgents = { repositoryIdentity: 'repo-1', roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+const setupAgentsB = { repositoryIdentity: 'repo-2', roborevVersion: 'v0.64.0', configured: [{ name: 'Gemini CLI', agent: 'gemini', model: 'pro', reasoning: 'high', command: 'gemini', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\gemini.exe', health: 'not_checked' }] }
 const setupRuntime = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
 const refineOptions = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
 function refineRun(overrides: Record<string, unknown> = {}) {
@@ -1175,7 +1176,95 @@ describe('App review workflow', () => {
     expect(dialog).toHaveTextContent('small real request through RoboRev')
     await userEvent.click(within(dialog).getByRole('button', { name: 'Run check' }))
     await waitFor(() => expect(calls.filter(call => call.path === '/api/agents/check')).toHaveLength(1))
-    expect(JSON.parse(String(calls.find(call => call.path === '/api/agents/check')?.init?.body))).toEqual({ agent: 'claude-code' })
+    expect(JSON.parse(String(calls.find(call => call.path === '/api/agents/check')?.init?.body))).toEqual({ agent: 'claude-code', repositoryIdentity: 'repo-1' })
+  })
+
+  it('invalidates repository A agent cards immediately and ignores a late A response', async () => {
+    const staleA = deferred<Response>()
+    const bAgents = deferred<Response>()
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    let selectionRequested = false
+    let agentCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(selectionRequested ? switched : initial)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/repos/select' && init?.method === 'POST') { selectionRequested = true; return response({ success: true }) }
+      if (path === '/api/agents') {
+        agentCalls += 1
+        if (agentCalls === 1) return response(setupAgents)
+        if (agentCalls === 2) return staleA.promise
+        return bAgents.promise
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    expect(await screen.findByText('Claude Code')).toBeInTheDocument()
+    const agentRefresh = within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByRole('button', { name: 'Refresh' })
+    expect(agentRefresh).not.toBeDisabled()
+    fireEvent.click(agentRefresh)
+    await waitFor(() => expect(agentCalls).toBe(2))
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    await waitFor(() => expect(screen.queryByText('Claude Code')).not.toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Run check' })).not.toBeInTheDocument()
+    staleA.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Claude Code')).not.toBeInTheDocument()
+
+    await waitFor(() => expect(agentCalls).toBeGreaterThanOrEqual(3))
+    bAgents.resolve(new Response(JSON.stringify(setupAgentsB), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Gemini CLI')).toBeInTheDocument()
+    expect(screen.queryByText('Claude Code')).not.toBeInTheDocument()
+  })
+
+  it('does not let a repository A check completion reload or toast repository B', async () => {
+    const checkA = deferred<Response>()
+    const bBootstrap = deferred<Response>()
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    let selectionRequested = false
+    let agentCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return selectionRequested ? bBootstrap.promise : response(initial)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/repos/select' && init?.method === 'POST') { selectionRequested = true; return response({ success: true }) }
+      if (path === '/api/agents') { agentCalls += 1; return response(agentCalls === 1 ? setupAgents : setupAgentsB) }
+      if (path === '/api/agents/check' && init?.method === 'POST') return checkA.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByText('Run check'))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByText('Gemini CLI')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Run check' })).not.toBeInTheDocument()
+    expect(agentCalls).toBe(1)
+    bBootstrap.resolve(new Response(JSON.stringify(switched), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Gemini CLI')).toBeInTheDocument()
+    checkA.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(await screen.findByText('Gemini CLI')).toBeInTheDocument()
+    expect(screen.queryByText('Claude Code')).not.toBeInTheDocument()
+    expect(screen.queryByText('Agent check completed for claude-code.')).not.toBeInTheDocument()
+    expect(agentCalls).toBe(2)
   })
 
   it('does not report daemon success when the terminal runtime state contains an error', async () => {

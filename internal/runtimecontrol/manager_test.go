@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,9 @@ type fakeRuntimeAdapter struct {
 	mu                                  sync.Mutex
 	online                              bool
 	paused                              bool
+	queueErr                            error
+	queueStatusCalls                    int
+	cancelAfterSet                      context.CancelFunc
 	startCalls, stopCalls, restartCalls int
 	startEntered                        chan struct{}
 	startRelease                        chan struct{}
@@ -65,19 +69,26 @@ func (f *fakeRuntimeAdapter) RestartDaemon(context.Context) error {
 func (f *fakeRuntimeAdapter) QueueStatus(context.Context) (roborev.QueueState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.queueStatusCalls++
+	if f.queueErr != nil {
+		return roborev.QueueState{}, f.queueErr
+	}
 	if !f.online {
 		return roborev.QueueState{}, roborev.ErrDaemonOffline
 	}
 	return roborev.QueueState{Known: true, Paused: f.paused}, nil
 }
-func (f *fakeRuntimeAdapter) SetQueuePaused(_ context.Context, paused bool) error {
+func (f *fakeRuntimeAdapter) SetQueuePaused(_ context.Context, paused bool) (roborev.QueueState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.online {
-		return roborev.ErrDaemonOffline
+		return roborev.QueueState{}, roborev.ErrDaemonOffline
 	}
 	f.paused = paused
-	return nil
+	if f.cancelAfterSet != nil {
+		f.cancelAfterSet()
+	}
+	return roborev.QueueState{Known: true, Paused: f.paused}, nil
 }
 
 func fastManager(t *testing.T, adapter any, fake *fakeRuntimeAdapter, gate *operation.Gate) *Manager {
@@ -145,7 +156,7 @@ func TestStopFailsWhenHealthRemainsOnline(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	state = m.Status()
-	if state.Result != "failure" || state.Error == "" {
+	if state.Result != "failure" || state.Error == "" || !strings.Contains(state.Error, ErrHealthTimeout.Error()) {
 		t.Fatalf("stop state = %#v", state)
 	}
 }
@@ -169,6 +180,34 @@ func TestStopDoesNotTreatReachableHealthFailureAsOffline(t *testing.T) {
 	}
 	if state := m.Status(); state.Result != "failure" {
 		t.Fatalf("reachable health failure stop state = %#v", state)
+	}
+}
+
+type slowReachableHealthAdapter struct{ *fakeRuntimeAdapter }
+
+func (a *slowReachableHealthAdapter) DaemonHealth(ctx context.Context) (bool, error) {
+	select {
+	case <-time.After(10 * time.Millisecond):
+		return true, fmt.Errorf("reachable health probe timed out")
+	case <-ctx.Done():
+		return true, fmt.Errorf("reachable health probe interrupted: %w", ctx.Err())
+	}
+}
+
+func TestStopWithSlowReachableHealthEndsInFailure(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true}
+	adapter := &slowReachableHealthAdapter{fakeRuntimeAdapter: fake}
+	m := fastManager(t, adapter, fake, operation.NewGate())
+	if _, err := m.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for m.Status().Active && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	state := m.Status()
+	if state.Result == "success" || state.Result != "failure" || !strings.Contains(state.Error, ErrHealthTimeout.Error()) {
+		t.Fatalf("slow reachable stop state = %#v, want terminal failure", state)
 	}
 }
 
@@ -239,5 +278,68 @@ func TestQueueControlIsOfflineDisabledAndUsesRuntimeGate(t *testing.T) {
 	}
 	if _, err := gate.AcquireMutation(); err != nil {
 		t.Fatalf("queue failure leaked gate: %v", err)
+	}
+}
+
+func TestQueueControlUsesAuthoritativePostStateWithoutSecondStatusRead(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true}
+	m := fastManager(t, fake, fake, operation.NewGate())
+	state, err := m.PauseQueue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Result != "success" || !state.QueueKnown || !state.QueuePaused {
+		t.Fatalf("pause state = %#v", state)
+	}
+	fake.mu.Lock()
+	statusCalls := fake.queueStatusCalls
+	fake.mu.Unlock()
+	if statusCalls != 0 {
+		t.Fatalf("manager performed %d second queue status reads after authoritative POST", statusCalls)
+	}
+}
+
+func TestQueueControlSuccessIsNotTurnedIntoFailureAfterAuthoritativePost(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true}
+	request, cancel := context.WithCancel(context.Background())
+	fake.cancelAfterSet = cancel
+	m := fastManager(t, fake, fake, operation.NewGate())
+	state, err := m.PauseQueue(request)
+	if err != nil {
+		t.Fatalf("authoritative POST was reported as failure: %v", err)
+	}
+	if state.Result != "success" || !state.QueueKnown || !state.QueuePaused {
+		t.Fatalf("pause state after request cancellation = %#v", state)
+	}
+}
+
+func TestRefreshInvalidatesStaleQueueStateAfterStatusFailure(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true, paused: true}
+	m := fastManager(t, fake, fake, operation.NewGate())
+	state := m.Refresh(context.Background())
+	if !state.QueueKnown || !state.QueuePaused {
+		t.Fatalf("initial queue state = %#v", state)
+	}
+	fake.mu.Lock()
+	fake.queueErr = errors.New("queue status read failed")
+	fake.mu.Unlock()
+	state = m.Refresh(context.Background())
+	if state.DaemonKnown != true || !state.DaemonRunning || state.QueueKnown || state.QueuePaused {
+		t.Fatalf("stale queue state was retained after read failure = %#v", state)
+	}
+}
+
+func TestRefreshInvalidatesQueueStateWhenDaemonGoesOffline(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true, paused: true}
+	m := fastManager(t, fake, fake, operation.NewGate())
+	if state := m.Refresh(context.Background()); !state.QueueKnown {
+		t.Fatalf("initial queue state = %#v", state)
+	}
+	fake.mu.Lock()
+	fake.online = false
+	fake.mu.Unlock()
+	state := m.Refresh(context.Background())
+	if state.QueueKnown || state.QueuePaused {
+		t.Fatalf("offline refresh retained stale queue state = %#v", state)
 	}
 }
