@@ -88,6 +88,8 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	client.versionMu.Lock()
 	client.version = "v0.63.0"
 	client.versionAt = time.Now()
+	_, _, generation := client.snapshot()
+	client.versionGeneration = generation
 	client.versionMu.Unlock()
 	if version, _ := client.detectVersion(ctx); version != "v0.63.0" {
 		t.Fatalf("fresh cached version was not reused: %q", version)

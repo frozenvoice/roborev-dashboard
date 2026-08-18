@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -15,8 +16,10 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/operation"
 	"github.com/froze/roborev-dashboard/internal/refine"
 	"github.com/froze/roborev-dashboard/internal/roborev"
+	"github.com/froze/roborev-dashboard/internal/setup"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
 
@@ -25,6 +28,8 @@ type Server struct {
 	Registry    *Registry
 	Panels      roborev.PanelCatalogResolver
 	Refines     *refine.Manager
+	Setup       *setup.Manager
+	Gate        *operation.Gate
 	AllowedHost string
 	csrfToken   string
 	mux         *http.ServeMux
@@ -44,19 +49,31 @@ type RepositoryPanels struct {
 }
 
 func NewServer(service roborev.Service, registry *Registry, allowedHost string) (*Server, error) {
+	return NewServerWithSetup(service, registry, allowedHost, operation.NewGate(), nil)
+}
+
+func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost string, gate *operation.Gate, setupManager *setup.Manager) (*Server, error) {
 	if service == nil || registry == nil {
 		return nil, errors.New("service and repository registry are required")
+	}
+	if gate == nil {
+		gate = operation.NewGate()
 	}
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return nil, err
 	}
 	panels := roborev.NewPanelResolver(registry)
-	refines, err := refine.NewManager(refine.Dependencies{Registry: registry, Panels: panels, RoboRev: service, Binary: serviceBinary(service)})
+	// Ensure the long-lived Panel Refine manager and HTTP mutations share the
+	// same lifecycle gate.
+	refines, err := refine.NewManager(refine.Dependencies{Registry: registry, Panels: panels, RoboRev: service, Binary: serviceBinary(service), Gate: gate})
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	if setupManager != nil {
+		setupManager.SetGate(gate)
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -77,15 +94,21 @@ func (s *Server) Handler() http.Handler {
 // Shutdown cancels process-scoped Panel Refine runs and waits for their
 // child review/fix orchestration to stop.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.Refines == nil {
-		return nil
+	if s.Refines != nil {
+		if err := s.Refines.Shutdown(ctx); err != nil {
+			return err
+		}
 	}
-	return s.Refines.Shutdown(ctx)
+	if s.Setup != nil {
+		return s.Setup.Shutdown(ctx)
+	}
+	return nil
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
 	s.mux.HandleFunc("GET /api/runtime", s.runtime)
+	s.mux.HandleFunc("GET /api/setup/roborev", s.setupStatus)
 	s.mux.HandleFunc("GET /api/reviews", s.listReviews)
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
 	s.mux.HandleFunc("GET /api/reviews/{id}/prompt", s.showPrompt)
@@ -108,6 +131,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos/select", s.mutation(s.selectRepository))
 	s.mux.HandleFunc("POST /api/repos/panel-selection", s.mutation(s.selectRepositoryPanel))
 	s.mux.HandleFunc("POST /api/daemon/start", s.mutation(s.startDaemon))
+	s.mux.HandleFunc("POST /api/setup/roborev/install", s.setupMutation(s.installRoboRev))
+	s.mux.HandleFunc("POST /api/setup/roborev/retry", s.setupMutation(s.retryRoboRev))
 	s.mux.Handle("/", spaHandler())
 }
 
@@ -115,7 +140,7 @@ func (s *Server) routes() {
 // The concrete client intentionally keeps its transport details private.
 func serviceBinary(service roborev.Service) string {
 	if client, ok := service.(*roborev.Client); ok {
-		return client.Binary
+		return client.BinaryPath()
 	}
 	return "roborev"
 }
@@ -124,21 +149,100 @@ func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.RoboRev.Installation(r.Context()))
 }
 
-func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-CSRF-Token") != s.csrfToken {
-			writeError(w, http.StatusForbidden, "invalid CSRF token", "csrf")
+func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
+	if s.Setup == nil {
+		writeError(w, http.StatusServiceUnavailable, "RoboRev setup manager is unavailable", "setup")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Setup.Status(r.Context()))
+}
+
+func requireEmptyBody(w http.ResponseWriter, r *http.Request) bool {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1))
+	if err != nil || len(data) != 0 {
+		writeError(w, http.StatusBadRequest, "request body must be empty", "request")
+		return false
+	}
+	return true
+}
+
+func (s *Server) installRoboRev(w http.ResponseWriter, r *http.Request) {
+	if !requireEmptyBody(w, r) {
+		return
+	}
+	if s.Setup == nil {
+		writeError(w, http.StatusServiceUnavailable, "RoboRev setup manager is unavailable", "setup")
+		return
+	}
+	state, err := s.Setup.StartInstall(r.Context())
+	if err != nil {
+		if errors.Is(err, setup.ErrBusy) || errors.Is(err, setup.ErrIneligible) {
+			writeJSON(w, http.StatusConflict, state)
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" {
-			parsed, err := url.Parse(origin)
-			if err != nil || !strings.EqualFold(parsed.Host, r.Host) {
-				writeError(w, http.StatusForbidden, "cross-origin mutation rejected", "origin")
-				return
-			}
+		writeError(w, http.StatusInternalServerError, err.Error(), "setup")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, state)
+}
+
+func (s *Server) retryRoboRev(w http.ResponseWriter, r *http.Request) {
+	if !requireEmptyBody(w, r) {
+		return
+	}
+	if s.Setup == nil {
+		writeError(w, http.StatusServiceUnavailable, "RoboRev setup manager is unavailable", "setup")
+		return
+	}
+	state, err := s.Setup.Retry(r.Context())
+	if err != nil {
+		if errors.Is(err, setup.ErrBusy) || errors.Is(err, setup.ErrIneligible) || errors.Is(err, operation.ErrBusy) {
+			writeJSON(w, http.StatusConflict, state)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error(), "setup")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, state)
+}
+
+func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizeMutation(w, r) {
+			return
+		}
+		release, err := s.Gate.AcquireMutation()
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error(), "operation")
+			return
+		}
+		defer release()
+		next(w, r)
+	}
+}
+
+func (s *Server) setupMutation(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizeMutation(w, r) {
+			return
 		}
 		next(w, r)
 	}
+}
+
+func (s *Server) authorizeMutation(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-CSRF-Token") != s.csrfToken {
+		writeError(w, http.StatusForbidden, "invalid CSRF token", "csrf")
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		parsed, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(parsed.Host, r.Host) {
+			writeError(w, http.StatusForbidden, "cross-origin mutation rejected", "origin")
+			return false
+		}
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -774,14 +878,51 @@ func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 func (s *Server) startDaemon(w http.ResponseWriter, r *http.Request) {
+	if !requireEmptyBody(w, r) {
+		return
+	}
 	ctx, cancel := mutationContext()
 	defer cancel()
+	if installation := s.RoboRev.Installation(ctx); daemonRunning(installation.Status) {
+		writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+		return
+	}
 	if err := s.RoboRev.StartDaemon(ctx); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "daemon")
 		return
 	}
-	time.Sleep(200 * time.Millisecond)
-	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+	var lastErr error
+	for _, delay := range []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, time.Second} {
+		installation := s.RoboRev.Installation(ctx)
+		if daemonRunning(installation.Status) {
+			writeJSON(w, http.StatusOK, map[string]bool{"success": true})
+			return
+		}
+		if installation.Error != "" {
+			lastErr = errors.New(installation.Error)
+		}
+		select {
+		case <-ctx.Done():
+			writeError(w, http.StatusGatewayTimeout, "daemon health check timed out: "+healthDetail(lastErr, ctx.Err()), "daemon")
+			return
+		case <-time.After(delay):
+		}
+	}
+	writeError(w, http.StatusBadGateway, "daemon started but health did not become ready: "+healthDetail(lastErr, errors.New("health endpoint did not report running")), "daemon")
+}
+
+func daemonRunning(raw json.RawMessage) bool {
+	var status struct {
+		Running *bool `json:"running"`
+	}
+	return json.Unmarshal(raw, &status) == nil && status.Running != nil && *status.Running
+}
+
+func healthDetail(last, fallback error) string {
+	if last != nil {
+		return last.Error()
+	}
+	return fallback.Error()
 }
 
 func spaHandler() http.Handler {

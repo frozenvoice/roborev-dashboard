@@ -20,7 +20,21 @@ RoboRev daemon -> RoboRev-owned storage
 
 ### 단일 실행 파일
 
-Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 포함한다. 최종 사용자는 Node나 Go 없이 `roborev-dashboard.exe` 하나만 실행한다. 개발 스크립트는 frontend build 후 Go build 순서를 보장한다. 소스 bootstrap은 이 runtime 경계와 분리되어 개발 도구만 준비하며 RoboRev를 설치하거나 실행하지 않는다. RoboRev runtime onboarding은 별도 향후 capability다.
+Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 포함한다. 최종 사용자는 Node나 Go 없이 `roborev-dashboard.exe` 하나만 실행한다. 개발 스크립트는 frontend build 후 Go build 순서를 보장한다. `scripts/install.ps1` 소스 bootstrap은 이 runtime 경계와 분리되어 개발 도구만 준비하며 RoboRev를 설치하거나 실행하지 않는다. Dashboard의 RoboRev runtime onboarding은 Go backend가 소유하는 별도 capability다.
+
+### RoboRev runtime 설치 신뢰 경계
+
+`internal/roborevcompat`의 immutable manifest가 Dashboard가 완전히 지원하는 RoboRev release의 version, Windows/architecture, 공식 GitHub asset URL, exact compressed size, SHA-256, archive entry와 managed user target을 한 곳에서 정의한다. installer와 capability layer는 같은 정책을 사용한다. 이번 checkpoint의 권장 버전은 v0.64.0이며 newer/latest를 원격 metadata만 보고 자동 선택하지 않는다. 이미 발견된 supported binary는 존중하고 newer, unknown, broken 또는 policy-blocked binary를 자동 downgrade하거나 덮어쓰지 않는다. explicit `--roborev` override가 있으면 자동 설치를 제공하지 않는다.
+
+Browser는 URL, version, digest, executable 또는 target을 설치 API에 전달하지 않는다. strict-empty same-origin/CSRF mutation이 설치를 시작하면 backend는 pinned HTTPS URL만 요청하고 redirect의 scheme, host, port와 횟수를 allowlist로 제한한다. response는 exact size보다 한 byte 큰 상한으로 streaming 검증하며 pinned SHA-256이 맞아야 다음 단계로 이동한다. 오류 응답 본문이나 signed redirect query는 상태와 log에 포함하지 않는다.
+
+ZIP은 전체를 install directory에 풀지 않는다. root의 exact `roborev.exe` 하나만 허용하고 absolute/traversal/nested path, directory, symlink와 non-regular entry를 거부하며 compressed/extracted 크기를 제한한다. target directory component의 reparse point를 거부하고 같은 directory의 unique staging file을 flush한 뒤 no-replace publish한다. 기존 target은 성공·실패·경쟁 조건 모두에서 삭제하거나 교체하지 않으며 partial target과 알려진 temporary artifact만 정리한다.
+
+설치된 후보는 bounded `version --json`의 exact product name과 canonical compatible version을 통과해야 한다. 그 뒤에만 `roborev.Client`의 mutex-protected generation binding을 atomic하게 교체하고 version/error cache를 새 generation으로 전환한다. 진행 중 command는 시작 시 얻은 immutable binary snapshot을 사용하며 이전 generation의 늦은 probe가 새 cache를 오염시키지 못한다. Dashboard 동작에는 absolute executable을 사용하므로 PATH를 변경하지 않는다.
+
+setup은 process-scoped background state machine으로 checking, downloading, verifying, extracting, installing, binding, daemon start/health와 terminal ready/failed/blocked/unsupported 상태를 typed API로 제공한다. 전역 operation gate는 setup을 exclusive로, 일반 RoboRev mutation과 Panel Refine 전체 run을 shared lease로 취급해 binary rebind와 mutation이 겹치지 않게 하며 충돌은 기다리지 않고 409로 반환한다. 설치 뒤 health precheck와 bounded backoff로 daemon을 확인한다. daemon 시작 실패는 검증된 설치를 보존하고 재다운로드 없는 retry만 제공한다.
+
+Windows가 exact policy error code로 실행을 거부하면 설치를 ready로 표시하지 않고 `blocked`로 분류한다. Dashboard는 target, requested version과 pinned digest를 계속 표시하지만 Smart App Control/WDAC, registry, Defender 설정을 변경하거나 `Unblock-File` 같은 우회를 실행하지 않는다. generic permission failure는 policy block으로 가장하지 않는다. runtime onboarding은 `roborev init`, Git hook, AI agent 설치·검사, credential 저장과 update를 수행하지 않는다.
 
 ### transport
 

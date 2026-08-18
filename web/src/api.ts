@@ -37,6 +37,155 @@ export type Bootstrap = {
   roborev: Installation
 }
 
+export type SetupPhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'binding' | 'starting_daemon' | 'waiting_for_daemon' | 'ready' | 'failed' | 'blocked' | 'unsupported' | 'canceled'
+
+export type SetupState = {
+  status: SetupPhase
+  phase: SetupPhase
+  operationActive: boolean
+  installed: boolean
+  binaryPath?: string
+  version?: string
+  recommendedVersion: string
+  compatible?: boolean
+  panelRefineCompatible?: boolean
+  daemonRunning: boolean
+  blocked: boolean
+  error?: string
+  failureCode?: string
+  retryable: boolean
+  installAvailable: boolean
+  canInstall: boolean
+  canRetry: boolean
+  canStartDaemon: boolean
+  architecture?: string
+  sourceURL?: string
+  sourceLabel?: string
+  assetName?: string
+  sha256?: string
+  targetPath?: string
+  downloadedBytes?: number
+  totalBytes?: number
+  startedAt?: string
+  updatedAt?: string
+  completedAt?: string
+  capabilities?: Record<string, unknown>
+}
+
+const setupPhases: SetupPhase[] = ['idle', 'checking', 'downloading', 'verifying', 'extracting', 'installing', 'binding', 'starting_daemon', 'waiting_for_daemon', 'ready', 'failed', 'blocked', 'unsupported', 'canceled']
+const setupActivePhases: SetupPhase[] = ['checking', 'downloading', 'verifying', 'extracting', 'installing', 'binding', 'starting_daemon', 'waiting_for_daemon']
+function setupField(object: Record<string, unknown>, ...names: string[]) {
+  for (const name of names) if (object[name] !== undefined) return object[name]
+  return undefined
+}
+const setupSnakeNames: Record<string, string> = { operationActive: 'operation_active', panelRefineCompatible: 'panel_refine_compatible', recommendedVersion: 'recommended_version', binaryPath: 'binary_path', daemonRunning: 'daemon_running', installAvailable: 'install_available', canInstall: 'can_install', canRetry: 'can_retry', canStartDaemon: 'can_start_daemon', sourceURL: 'source_url', sourceLabel: 'source_label', assetName: 'asset_name', downloadedBytes: 'downloaded_bytes', totalBytes: 'total_bytes', startedAt: 'started_at', updatedAt: 'updated_at', completedAt: 'completed_at', failureCode: 'failure_code', targetPath: 'target_path' }
+function setupSnakeName(field: string) { return setupSnakeNames[field] ?? field.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`) }
+function finiteNumber(value: unknown) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined }
+
+/** Parse the typed setup state and fail closed when the server sends an unusable envelope. */
+export function normalizeSetupState(value: unknown): SetupState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  const phaseValue = object.phase
+  const statusValue = object.status
+  if (typeof phaseValue !== 'string' || typeof statusValue !== 'string' || phaseValue !== statusValue || !setupPhases.includes(phaseValue as SetupPhase)) return null
+  const phase = phaseValue as SetupPhase
+  const operationValue = setupField(object, 'operationActive', 'operation_active')
+  if (typeof operationValue !== 'boolean') return null
+  const installedValue = setupField(object, 'installed')
+  if (typeof installedValue !== 'boolean') return null
+  const recommended = setupField(object, 'recommendedVersion', 'recommended_version')
+  if (typeof recommended !== 'string' || recommended !== 'v0.64.0') return null
+  const booleanFields = ['compatible', 'panelRefineCompatible', 'daemonRunning', 'blocked', 'retryable', 'installAvailable', 'canInstall', 'canRetry', 'canStartDaemon', 'operationActive'] as const
+  for (const field of booleanFields) {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    if (valueForField !== undefined && typeof valueForField !== 'boolean') return null
+  }
+  const numberFields = ['downloadedBytes', 'totalBytes'] as const
+  for (const field of numberFields) {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    if (valueForField !== undefined && finiteNumber(valueForField) === undefined) return null
+  }
+  const stringFields = ['binaryPath', 'version', 'error', 'failureCode', 'architecture', 'sourceURL', 'sourceLabel', 'assetName', 'sha256', 'targetPath', 'startedAt', 'updatedAt', 'completedAt'] as const
+  for (const field of stringFields) {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    if (valueForField !== undefined && typeof valueForField !== 'string') return null
+  }
+  const capabilities = setupField(object, 'capabilities')
+  if (capabilities !== undefined && (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities))) return null
+  const readBoolean = (field: typeof booleanFields[number], fallback: boolean) => {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    return typeof valueForField === 'boolean' ? valueForField : fallback
+  }
+  const readOptionalBoolean = (field: typeof booleanFields[number]) => {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    return typeof valueForField === 'boolean' ? valueForField : undefined
+  }
+  const readString = (field: typeof stringFields[number]) => {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    return typeof valueForField === 'string' ? valueForField : undefined
+  }
+  const readNumber = (field: typeof numberFields[number]) => {
+    const valueForField = setupField(object, field, setupSnakeName(field))
+    return finiteNumber(valueForField)
+  }
+  const active = readBoolean('operationActive', false)
+  if (active !== setupActivePhases.includes(phase)) return null
+  if (phase === 'ready' && (!installedValue || readOptionalBoolean('compatible') !== true || readOptionalBoolean('panelRefineCompatible') === undefined)) return null
+  if (phase === 'unsupported' && (!installedValue || readOptionalBoolean('compatible') !== false)) return null
+  if (phase === 'blocked' && !readBoolean('blocked', false)) return null
+  if ((phase === 'idle' || phase === 'canceled') && installedValue) return null
+  if (['failed', 'blocked', 'unsupported', 'canceled', 'ready'].includes(phase) && readBoolean('canInstall', false)) return null
+  if (installedValue && readBoolean('canInstall', false)) return null
+  const installFields = ['architecture', 'sourceURL', 'sourceLabel', 'assetName', 'sha256', 'targetPath'] as const
+  for (const field of installFields) {
+    const fieldValue = readString(field)
+    if (!fieldValue?.trim()) return null
+  }
+  const digest = readString('sha256')
+  if (!digest || !/^[a-f0-9]{64}$/i.test(digest)) return null
+  const totalBytes = readNumber('totalBytes')
+  const downloadedBytes = readNumber('downloadedBytes')
+  if (totalBytes === undefined || totalBytes <= 0 || (downloadedBytes !== undefined && downloadedBytes > totalBytes)) return null
+  const source = readString('sourceURL')
+  try {
+    const sourceURL = new URL(source || '')
+    if (sourceURL.protocol !== 'https:' || sourceURL.hostname.toLowerCase() !== 'github.com' || !sourceURL.pathname.toLowerCase().startsWith('/kenn-io/roborev/')) return null
+  } catch { return null }
+  return {
+    status: phase,
+    phase,
+    operationActive: active,
+    installed: typeof installedValue === 'boolean' ? installedValue : false,
+    binaryPath: readString('binaryPath'),
+    version: readString('version'),
+    recommendedVersion: recommended,
+    compatible: readOptionalBoolean('compatible'),
+    panelRefineCompatible: readOptionalBoolean('panelRefineCompatible'),
+    daemonRunning: readBoolean('daemonRunning', false),
+    blocked: readBoolean('blocked', phase === 'blocked'),
+    error: readString('error'),
+    failureCode: readString('failureCode'),
+    retryable: readBoolean('retryable', false),
+    installAvailable: readBoolean('installAvailable', false),
+    canInstall: readBoolean('canInstall', false),
+    canRetry: readBoolean('canRetry', false),
+    canStartDaemon: readBoolean('canStartDaemon', false),
+    architecture: readString('architecture'),
+    sourceURL: readString('sourceURL'),
+    sourceLabel: readString('sourceLabel'),
+    assetName: readString('assetName'),
+    sha256: readString('sha256'),
+    targetPath: readString('targetPath'),
+    downloadedBytes,
+    totalBytes,
+    startedAt: readString('startedAt'),
+    updatedAt: readString('updatedAt'),
+    completedAt: readString('completedAt'),
+    capabilities: capabilities as Record<string, unknown> | undefined,
+  }
+}
+
 export type ReviewEnqueueResponse = { receipt: unknown; target: Repository }
 
 export type PanelRefinePhase = 'idle' | 'starting' | 'reviewing' | 'evaluating' | 'fixing' | 'final_reviewing' | 'passed' | 'needs_attention' | 'failed' | 'cancelled'

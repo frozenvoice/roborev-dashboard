@@ -1,0 +1,541 @@
+package setup
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/froze/roborev-dashboard/internal/operation"
+	"github.com/froze/roborev-dashboard/internal/roborev"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
+)
+
+type fakeProber struct {
+	mu          sync.Mutex
+	binary      string
+	override    bool
+	version     string
+	err         string
+	failureCode string
+	rebindErr   error
+	rebinds     []string
+}
+
+func (f *fakeProber) BinaryPath() string        { f.mu.Lock(); defer f.mu.Unlock(); return f.binary }
+func (f *fakeProber) HasExplicitOverride() bool { return f.override }
+func (f *fakeProber) Rebind(_ context.Context, path string) error {
+	f.mu.Lock()
+	if f.rebindErr != nil {
+		err := f.rebindErr
+		f.mu.Unlock()
+		return err
+	}
+	f.binary = path
+	f.rebinds = append(f.rebinds, path)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeProber) Installation(context.Context) roborev.Installation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.version == "" {
+		return roborev.Installation{Binary: f.binary, Error: f.err, FailureCode: f.failureCode}
+	}
+	return roborev.Installation{Installed: true, Binary: f.binary, Version: f.version, Error: f.err}
+}
+
+type fakeInstaller struct {
+	mu      sync.Mutex
+	target  string
+	calls   int
+	install func(context.Context) (string, error)
+}
+
+type daemonProber struct {
+	mu            sync.Mutex
+	binary        string
+	version       string
+	healthyAfter  int
+	installations int
+	starts        int
+	startErrors   int
+}
+
+func (p *daemonProber) BinaryPath() string        { p.mu.Lock(); defer p.mu.Unlock(); return p.binary }
+func (p *daemonProber) HasExplicitOverride() bool { return false }
+func (p *daemonProber) Rebind(_ context.Context, path string) error {
+	p.mu.Lock()
+	p.binary, p.version = path, "v0.64.0"
+	p.mu.Unlock()
+	return nil
+}
+func (p *daemonProber) Installation(context.Context) roborev.Installation {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.installations++
+	if p.version == "" {
+		return roborev.Installation{Binary: p.binary}
+	}
+	running := p.installations >= p.healthyAfter
+	status, _ := json.Marshal(map[string]bool{"running": running, "known": true})
+	return roborev.Installation{Installed: true, Binary: p.binary, Version: p.version, Status: status}
+}
+func (p *daemonProber) StartDaemon(context.Context) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.starts++
+	if p.startErrors > 0 {
+		p.startErrors--
+		return errors.New("daemon start failed")
+	}
+	return nil
+}
+
+func (f *fakeInstaller) Target() string { return f.target }
+func (f *fakeInstaller) Install(ctx context.Context) (string, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return f.install(ctx)
+}
+
+func waitSetup(t *testing.T, manager *Manager) State {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		state := manager.stateCopy()
+		if !state.InProgress {
+			return state
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("setup did not settle")
+	return State{}
+}
+
+func TestMissingInstallRebindsAndStrictlyVerifies(t *testing.T) {
+	client := &fakeProber{}
+	verified := make(chan struct{})
+	installer := &fakeInstaller{target: `C:\Users\test\.roborev\bin\roborev.exe`, install: func(context.Context) (string, error) {
+		<-verified
+		return `C:\Users\test\.roborev\bin\roborev.exe`, nil
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := manager.StartInstall(context.Background())
+	if err != nil || !state.InProgress {
+		t.Fatalf("start = %#v, %v", state, err)
+	}
+	client.mu.Lock()
+	client.version = "v0.64.0"
+	client.mu.Unlock()
+	close(verified)
+	final := waitSetup(t, manager)
+	if final.Phase != PhaseReady || final.Progress != 100 || !final.Supported {
+		t.Fatalf("final = %#v", final)
+	}
+	if len(client.rebinds) != 1 {
+		t.Fatalf("rebinds = %#v", client.rebinds)
+	}
+}
+
+func TestSupportedVersionDoesNotDownloadAgain(t *testing.T) {
+	client := &fakeProber{binary: `C:\roborev.exe`, version: "v0.64.0"}
+	installer := &fakeInstaller{install: func(context.Context) (string, error) { return "", errors.New("must not download") }}
+	manager, _ := NewManager(client, installer)
+	state, err := manager.StartInstall(context.Background())
+	if err != nil || state.Phase != PhaseReady {
+		t.Fatalf("supported install = %#v, %v", state, err)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("installer calls = %d", calls)
+	}
+}
+
+func TestNewerUnknownAndExplicitInstallAreIneligible(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		client *fakeProber
+	}{
+		{"newer", &fakeProber{binary: `C:\roborev.exe`, version: "v0.65.0"}},
+		{"explicit", &fakeProber{override: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, _ := NewManager(test.client, &fakeInstaller{install: func(context.Context) (string, error) { return "", nil }})
+			_, err := manager.StartInstall(context.Background())
+			if !errors.Is(err, ErrIneligible) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestExistingBinaryProbeFailuresAreVisibleAndNeverAutoReplaced(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		failureCode string
+		wantPhase   Phase
+	}{
+		{name: "application control", failureCode: "application_control", wantPhase: PhaseBlocked},
+		{name: "malformed version", failureCode: "invalid_binary", wantPhase: PhaseFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "roborev.exe")
+			if err := os.WriteFile(binary, []byte("candidate"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeProber{binary: binary, err: "version probe failed", failureCode: test.failureCode}
+			installer := &fakeInstaller{target: `C:\managed\roborev.exe`, install: func(context.Context) (string, error) { return "", errors.New("must not install") }}
+			manager, _ := NewManager(client, installer)
+			state := manager.Status(context.Background())
+			if state.Phase != test.wantPhase || state.CanInstall || state.InstallAvailable {
+				t.Fatalf("state = %#v", state)
+			}
+			if _, err := manager.StartInstall(context.Background()); !errors.Is(err, ErrIneligible) {
+				t.Fatalf("direct install err = %v", err)
+			}
+			installer.mu.Lock()
+			calls := installer.calls
+			installer.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("installer calls = %d", calls)
+			}
+		})
+	}
+}
+
+func TestExistingBlockedBinaryVerificationRetryDoesNotInstall(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(binary, []byte("candidate"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeProber{binary: binary, err: "blocked", failureCode: "application_control"}
+	installer := &fakeInstaller{target: filepath.Join(t.TempDir(), "managed.exe"), install: func(context.Context) (string, error) { return "", errors.New("must not install") }}
+	manager, _ := NewManager(client, installer)
+	state := manager.Status(context.Background())
+	if state.Phase != PhaseBlocked || !state.Installed || !state.CanRetry {
+		t.Fatalf("startup blocked state = %#v", state)
+	}
+	client.mu.Lock()
+	client.err, client.failureCode, client.version = "", "", "v0.64.0"
+	client.mu.Unlock()
+	state, err := manager.Retry(context.Background())
+	if err != nil || state.Phase != PhaseReady {
+		t.Fatalf("startup verification retry = %#v, %v", state, err)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("installer calls = %d", calls)
+	}
+}
+
+func TestApplicationControlDetailIsPreserved(t *testing.T) {
+	client := &fakeProber{}
+	installer := &fakeInstaller{install: func(context.Context) (string, error) { return "", errors.New("permission denied") }}
+	manager, _ := NewManager(client, installer)
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetup(t, manager)
+	if state.Phase != PhaseFailed || state.Error == "" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestExactApplicationControlIsBlockedButPermissionIsRetryable(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		err      error
+		phase    Phase
+		code     string
+		canRetry bool
+		blocked  bool
+	}{
+		{name: "application control without published target", err: syscall.Errno(1260), phase: PhaseFailed, code: "application_control"},
+		{name: "permission", err: syscall.EACCES, phase: PhaseFailed, code: "permission_denied", canRetry: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installer := &fakeInstaller{install: func(context.Context) (string, error) { return "", test.err }}
+			manager, _ := NewManager(&fakeProber{}, installer)
+			if _, err := manager.StartInstall(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			state := waitSetup(t, manager)
+			if state.Phase != test.phase || state.FailureCode != test.code || state.CanRetry != test.canRetry || state.Blocked != test.blocked {
+				t.Fatalf("state = %#v", state)
+			}
+			if test.name == "permission" {
+				if _, err := manager.Retry(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				_ = waitSetup(t, manager)
+				installer.mu.Lock()
+				calls := installer.calls
+				installer.mu.Unlock()
+				if calls != 2 {
+					t.Fatalf("permission retry installer calls = %d", calls)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockedPublishedTargetRetriesVerificationWithoutInstaller(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(target, []byte("published"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeProber{rebindErr: syscall.Errno(1260)}
+	installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) { return target, nil }}
+	manager, _ := NewManager(client, installer)
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetup(t, manager)
+	if state.Phase != PhaseBlocked || !state.Installed || !state.Blocked || !state.CanRetry || state.CanInstall {
+		t.Fatalf("blocked state = %#v", state)
+	}
+	if _, err := manager.StartInstall(context.Background()); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("direct install on blocked state = %v", err)
+	}
+	client.mu.Lock()
+	client.rebindErr = nil
+	client.version = "v0.64.0"
+	client.mu.Unlock()
+	state, err := manager.Retry(context.Background())
+	if err != nil || state.Phase != PhaseReady {
+		t.Fatalf("verification retry = %#v, %v", state, err)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("installer calls after successful retry = %d", calls)
+	}
+}
+
+func TestBlockedPublishedTargetStaysBlockedWhenVerificationFails(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(target, []byte("published"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeProber{rebindErr: syscall.Errno(1260)}
+	installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) { return target, nil }}
+	manager, _ := NewManager(client, installer)
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetup(t, manager)
+	if state.Phase != PhaseBlocked || !state.CanRetry {
+		t.Fatalf("blocked state = %#v", state)
+	}
+	if _, err := manager.Retry(context.Background()); err == nil {
+		t.Fatal("blocked verification unexpectedly succeeded")
+	}
+	state = manager.Status(context.Background())
+	if state.Phase != PhaseBlocked || !state.Installed || !state.CanRetry || state.CanInstall {
+		t.Fatalf("retry state = %#v", state)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("installer calls after failed retry = %d", calls)
+	}
+}
+
+func TestBlockedRetryDoesNotDownloadWhenTargetDisappears(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	if err := os.WriteFile(target, []byte("published"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeProber{rebindErr: syscall.Errno(1260)}
+	installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) { return target, nil }}
+	manager, _ := NewManager(client, installer)
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetup(t, manager)
+	if state.Phase != PhaseBlocked {
+		t.Fatalf("blocked state = %#v", state)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Retry(context.Background()); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("missing target retry = %v", err)
+	}
+	state = manager.Status(context.Background())
+	if state.Phase != PhaseFailed || state.CanInstall || state.CanRetry {
+		t.Fatalf("missing target state = %#v", state)
+	}
+	installer.mu.Lock()
+	calls := installer.calls
+	installer.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("installer calls after missing target = %d", calls)
+	}
+}
+
+func TestNonRetryableFailureFailsClosedForDirectInstallAndRetry(t *testing.T) {
+	manager, _ := NewManager(&fakeProber{}, &fakeInstaller{install: func(context.Context) (string, error) {
+		return "", fmt.Errorf("%w: test", roborevcompat.ErrDownloadHash)
+	}})
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetup(t, manager)
+	if state.CanRetry || state.CanInstall || state.Retryable || state.FailureCode != "checksum_mismatch" {
+		t.Fatalf("state = %#v", state)
+	}
+	if _, err := manager.StartInstall(context.Background()); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("direct install err = %v", err)
+	}
+	if _, err := manager.Retry(context.Background()); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("retry err = %v", err)
+	}
+}
+
+func TestDaemonInstallHealthMatrixAndRetryDoesNotDownload(t *testing.T) {
+	tests := []struct {
+		name          string
+		healthyAfter  int
+		startErrors   int
+		wantPhase     Phase
+		wantRetry     bool
+		wantDownloads int
+	}{
+		{name: "immediate health", healthyAfter: 3, wantPhase: PhaseReady, wantDownloads: 1},
+		{name: "delayed health", healthyAfter: 5, wantPhase: PhaseReady, wantDownloads: 1},
+		{name: "start error but health ready", healthyAfter: 3, startErrors: 1, wantPhase: PhaseReady, wantDownloads: 1},
+		{name: "start error then retry", healthyAfter: 4, startErrors: 1, wantPhase: PhaseFailed, wantRetry: true, wantDownloads: 1},
+		{name: "health timeout", healthyAfter: 100, wantPhase: PhaseFailed, wantRetry: true, wantDownloads: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &daemonProber{healthyAfter: test.healthyAfter, startErrors: test.startErrors}
+			target := filepath.Join(t.TempDir(), "roborev.exe")
+			installer := &fakeInstaller{target: target, install: func(context.Context) (string, error) { return target, nil }}
+			manager, err := NewManager(client, installer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.wait = func(ctx context.Context, _ time.Duration) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					return nil
+				}
+			}
+			if _, err := manager.StartInstall(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			state := waitSetupLong(t, manager)
+			if test.name == "start error then retry" {
+				if state.Phase != PhaseFailed || !state.CanRetry {
+					t.Fatalf("initial state = %#v", state)
+				}
+				if _, err := manager.Retry(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				state = waitSetupLong(t, manager)
+				if state.Phase != PhaseReady {
+					t.Fatalf("retry state = %#v", state)
+				}
+			}
+			if state.Phase != test.wantPhase && !(test.name == "start error then retry" && state.Phase == PhaseReady) {
+				t.Fatalf("state = %#v", state)
+			}
+			installer.mu.Lock()
+			calls := installer.calls
+			installer.mu.Unlock()
+			if calls != test.wantDownloads {
+				t.Fatalf("installer calls = %d, want %d", calls, test.wantDownloads)
+			}
+		})
+	}
+}
+
+func TestSetupGateIsHeldForEntireInstallLifetime(t *testing.T) {
+	client := &fakeProber{}
+	started := make(chan struct{})
+	releaseInstall := make(chan struct{})
+	installer := &fakeInstaller{target: `C:\managed\roborev.exe`, install: func(context.Context) (string, error) {
+		close(started)
+		<-releaseInstall
+		return `C:\managed\roborev.exe`, nil
+	}}
+	gate := operation.NewGate()
+	manager, err := NewManagerWithGate(client, installer, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if _, err := gate.AcquireMutation(); !errors.Is(err, operation.ErrBusy) {
+		t.Fatalf("mutation during setup = %v", err)
+	}
+	client.mu.Lock()
+	client.version = "v0.64.0"
+	client.mu.Unlock()
+	close(releaseInstall)
+	state := waitSetupLong(t, manager)
+	if state.Phase != PhaseReady {
+		t.Fatalf("state = %#v", state)
+	}
+	releaseMutation, err := gate.AcquireMutation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseMutation()
+}
+
+func waitSetupLong(t *testing.T, manager *Manager) State {
+	t.Helper()
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		state := manager.stateCopy()
+		if !state.InProgress {
+			return state
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("setup did not settle")
+	return State{}
+}
+
+func TestShutdownCancelsBackgroundInstall(t *testing.T) {
+	client := &fakeProber{}
+	started := make(chan struct{})
+	installer := &fakeInstaller{install: func(ctx context.Context) (string, error) { close(started); <-ctx.Done(); return "", ctx.Err() }}
+	manager, _ := NewManager(client, installer)
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state := manager.stateCopy(); state.Phase != PhaseCanceled || state.FailureCode != "canceled" || state.Error == "" {
+		t.Fatalf("state = %#v", state)
+	}
+}

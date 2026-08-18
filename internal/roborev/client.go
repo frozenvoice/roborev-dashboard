@@ -17,10 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
 type Service interface {
@@ -47,6 +49,7 @@ type Service interface {
 var ErrMalformedPanelEnqueueResponse = errors.New("malformed panel enqueue response")
 
 var (
+	ErrBindingChanged             = errors.New("RoboRev binding changed during verification")
 	ErrUnsupportedJobOutputStatus = errors.New("RoboRev job output status contract is unsupported")
 	ErrMalformedJobOutputStatus   = errors.New("malformed RoboRev job output status response")
 	ErrUnsupportedJobMetadata     = errors.New("RoboRev job metadata contract is unsupported")
@@ -79,16 +82,24 @@ func DecodePanelEnqueueResponse(raw json.RawMessage, request ReviewRequest) (Pan
 }
 
 type Client struct {
-	Binary           string
-	Runner           proc.Runner
-	DaemonURL        string
-	HTTP             *http.Client
-	versionMu        sync.RWMutex
-	version          string
-	versionAt        time.Time
-	versionRefreshMu sync.Mutex
-	versionErr       error
-	versionErrAt     time.Time
+	Runner            proc.Runner
+	HTTP              *http.Client
+	bindingMu         sync.RWMutex
+	binding           clientBinding
+	explicitOverride  bool
+	versionMu         sync.RWMutex
+	version           string
+	versionAt         time.Time
+	versionGeneration uint64
+	versionRefreshMu  sync.Mutex
+	versionErr        error
+	versionErrAt      time.Time
+}
+
+type clientBinding struct {
+	binary     string
+	daemonURL  string
+	generation uint64
 }
 
 func ResolveBinary(override string) (string, error) {
@@ -104,13 +115,24 @@ func ResolveBinary(override string) (string, error) {
 		return abs, nil
 	}
 	path, err := exec.LookPath("roborev")
-	if err != nil {
-		return "", errors.New("roborev executable not found on PATH")
+	if err == nil {
+		return filepath.Abs(path)
 	}
-	return filepath.Abs(path)
+	home, homeErr := os.UserHomeDir()
+	if homeErr == nil {
+		managed := roborevcompat.ManagedTarget(home)
+		if info, statErr := os.Stat(managed); statErr == nil && !info.IsDir() {
+			return filepath.Abs(managed)
+		}
+	}
+	return "", errors.New("roborev executable not found on PATH or managed user install")
 }
 
 func NewClient(binary string, runner proc.Runner, daemonAddress string) (*Client, error) {
+	return NewClientWithOptions(binary, runner, daemonAddress, false)
+}
+
+func NewClientWithOptions(binary string, runner proc.Runner, daemonAddress string, explicitOverride bool) (*Client, error) {
 	if runner == nil {
 		return nil, errors.New("process runner is required")
 	}
@@ -129,20 +151,81 @@ func NewClient(binary string, runner proc.Runner, daemonAddress string) (*Client
 	if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		return nil, errors.New("RoboRev daemon address must be loopback")
 	}
-	return &Client{Binary: binary, Runner: runner, DaemonURL: strings.TrimRight(daemonAddress, "/"), HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+	return &Client{Runner: runner, binding: clientBinding{binary: binary, daemonURL: strings.TrimRight(daemonAddress, "/"), generation: 1}, explicitOverride: explicitOverride, HTTP: &http.Client{Timeout: 15 * time.Second}}, nil
+}
+
+func (c *Client) snapshot() (string, string, uint64) {
+	c.bindingMu.RLock()
+	defer c.bindingMu.RUnlock()
+	return c.binding.binary, c.binding.daemonURL, c.binding.generation
+}
+
+func (c *Client) BinaryPath() string                               { binary, _, _ := c.snapshot(); return binary }
+func (c *Client) HasExplicitOverride() bool                        { return c.explicitOverride }
+func (c *Client) ProbeVersion(ctx context.Context) (string, error) { return c.detectVersion(ctx) }
+
+func (c *Client) Rebind(ctx context.Context, binary string) error {
+	if strings.TrimSpace(binary) == "" {
+		return errors.New("roborev binary path is required")
+	}
+	abs, err := filepath.Abs(binary)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("inspect RoboRev binary: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("RoboRev binary is not a regular file")
+	}
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: abs, Args: []string{"version", "--json"}, Timeout: 5 * time.Second, OutputLimit: 64 << 10})
+	if err != nil {
+		return fmt.Errorf("verify RoboRev binary: %w", err)
+	}
+	if result.StdoutTruncated {
+		return errors.New("verify RoboRev binary: version response exceeded bounded output")
+	}
+	var version struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &version); err != nil {
+		return fmt.Errorf("verify RoboRev binary: malformed version response: %w", err)
+	}
+	if err := roborevcompat.ValidateVersionIdentity(version.Name, version.Version); err != nil {
+		return fmt.Errorf("verify RoboRev binary: %w", err)
+	}
+	if !roborevcompat.IsSupportedVersion(version.Version) {
+		return fmt.Errorf("verify RoboRev binary: %w", roborevcompat.ErrUnsupportedVersion)
+	}
+	c.bindingMu.Lock()
+	c.binding.binary = abs
+	c.binding.generation++
+	generation := c.binding.generation
+	c.bindingMu.Unlock()
+	c.versionMu.Lock()
+	c.version = version.Version
+	c.versionAt = time.Now()
+	c.versionErr = nil
+	c.versionErrAt = time.Time{}
+	c.versionGeneration = generation
+	c.versionMu.Unlock()
+	return nil
 }
 
 func (c *Client) run(ctx context.Context, args []string, timeout time.Duration, limit int) (proc.Result, error) {
-	if c.Binary == "" {
+	binary, _, _ := c.snapshot()
+	if binary == "" {
 		return proc.Result{}, errors.New("roborev is not installed")
 	}
-	result, err := c.Runner.Run(ctx, proc.Command{Executable: c.Binary, Args: args, Timeout: timeout, OutputLimit: limit})
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: args, Timeout: timeout, OutputLimit: limit})
 	if err != nil {
 		message := strings.TrimSpace(result.Stderr)
 		if message == "" {
 			message = err.Error()
 		}
-		return result, errors.New(message)
+		return result, fmt.Errorf("%s: %w", message, err)
 	}
 	return result, nil
 }
@@ -156,25 +239,20 @@ func decodeRaw(output string) (json.RawMessage, error) {
 }
 
 func capabilities(version string) Capabilities {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
-	minor := 0
-	if len(parts) > 1 {
-		minor, _ = strconv.Atoi(parts[1])
-	}
-	v64 := len(parts) > 0 && parts[0] == "0" && minor >= 64
-	fixV64 := len(parts) > 1 && parts[0] == "0" && minor == 64
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: fixV64, PanelReview: v64, FixCommand: fixV64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
+	v64 := roborevcompat.IsSupportedVersion(version)
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
-	if c.Binary == "" {
+	binary, _, _ := c.snapshot()
+	if binary == "" {
 		return Installation{Installed: false, Error: "roborev executable not found", Capabilities: Capabilities{}}
 	}
 	versionValue, err := c.detectVersion(ctx)
 	if err != nil {
-		return Installation{Installed: false, Binary: c.Binary, Error: err.Error()}
+		return Installation{Installed: false, Binary: binary, Error: err.Error(), FailureCode: probeFailureCode(err)}
 	}
-	installation := Installation{Installed: true, Binary: c.Binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`)}
+	installation := Installation{Installed: true, Binary: binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`)}
 	if installation.Capabilities.ReviewEnqueueAPI {
 		if health, healthErr := c.health(ctx); healthErr == nil {
 			status, _ := json.Marshal(map[string]any{"running": true, "known": true, "health": health})
@@ -187,17 +265,41 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	return installation
 }
 
+func probeFailureCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.Errno(1260), syscall.Errno(786):
+			return "application_control"
+		case syscall.EACCES, syscall.EPERM:
+			return "permission_denied"
+		}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "canceled"
+	}
+	return "invalid_binary"
+}
+
 func (c *Client) detectVersion(ctx context.Context) (string, error) {
+	binary, _, generation := c.snapshot()
+	if binary == "" {
+		return "", errors.New("roborev executable not found")
+	}
 	c.versionMu.RLock()
 	value := c.version
 	detectedAt := c.versionAt
 	detectionErr := c.versionErr
 	errorAt := c.versionErrAt
+	cachedGeneration := c.versionGeneration
 	c.versionMu.RUnlock()
-	if value != "" && time.Since(detectedAt) < 30*time.Second {
+	if cachedGeneration == generation && value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
 	}
-	if detectionErr != nil && time.Since(errorAt) < 5*time.Second {
+	if cachedGeneration == generation && detectionErr != nil && time.Since(errorAt) < 5*time.Second {
 		return "", detectionErr
 	}
 	c.versionRefreshMu.Lock()
@@ -207,47 +309,71 @@ func (c *Client) detectVersion(ctx context.Context) (string, error) {
 	detectedAt = c.versionAt
 	detectionErr = c.versionErr
 	errorAt = c.versionErrAt
+	cachedGeneration = c.versionGeneration
 	c.versionMu.RUnlock()
-	if value != "" && time.Since(detectedAt) < 30*time.Second {
+	if cachedGeneration == generation && value != "" && time.Since(detectedAt) < 30*time.Second {
 		return value, nil
 	}
-	if detectionErr != nil && time.Since(errorAt) < 5*time.Second {
+	if cachedGeneration == generation && detectionErr != nil && time.Since(errorAt) < 5*time.Second {
 		return "", detectionErr
 	}
 	result, err := c.run(ctx, []string{"version", "--json"}, 5*time.Second, 64<<10)
 	if err != nil {
-		c.cacheVersionError(ctx, err)
+		c.cacheVersionError(ctx, err, generation)
+		return "", err
+	}
+	if result.StdoutTruncated {
+		err = errors.New("invalid roborev version response: bounded output was truncated")
+		c.cacheVersionError(ctx, err, generation)
 		return "", err
 	}
 	var version struct {
+		Name    string `json:"name"`
 		Version string `json:"version"`
 	}
-	if json.Unmarshal([]byte(result.Stdout), &version) != nil || version.Version == "" {
-		err = errors.New("invalid roborev version response")
-		c.cacheVersionError(ctx, err)
+	if json.Unmarshal([]byte(result.Stdout), &version) != nil || roborevcompat.ValidateVersionIdentity(version.Name, version.Version) != nil {
+		err = errors.New("invalid roborev version response: expected name roborev and a version")
+		c.cacheVersionError(ctx, err, generation)
 		return "", err
 	}
 	c.versionMu.Lock()
+	if !c.generationCurrent(generation) {
+		c.versionMu.Unlock()
+		return "", ErrBindingChanged
+	}
 	c.version = version.Version
 	c.versionAt = time.Now()
+	c.versionGeneration = generation
 	c.versionErr = nil
 	c.versionErrAt = time.Time{}
 	c.versionMu.Unlock()
 	return version.Version, nil
 }
 
-func (c *Client) cacheVersionError(ctx context.Context, err error) {
+func (c *Client) cacheVersionError(ctx context.Context, err error, generation uint64) {
 	if ctx.Err() != nil {
 		return
 	}
 	c.versionMu.Lock()
+	if !c.generationCurrent(generation) {
+		c.versionMu.Unlock()
+		return
+	}
 	c.versionErr = err
 	c.versionErrAt = time.Now()
+	c.versionGeneration = generation
 	c.versionMu.Unlock()
 }
 
+func (c *Client) generationCurrent(generation uint64) bool {
+	c.bindingMu.RLock()
+	defer c.bindingMu.RUnlock()
+	return c.binding.generation == generation
+}
+
 func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+"/api/health", nil)
+	_, daemonURL, _ := c.snapshot()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+"/api/health", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +496,8 @@ func (c *Client) JobOutputStatus(ctx context.Context, id int64) (JobOutputStatus
 	}
 	query := url.Values{}
 	query.Set("job_id", strconv.FormatInt(id, 10))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+"/api/job/output?"+query.Encode(), nil)
+	_, daemonURL, _ := c.snapshot()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+"/api/job/output?"+query.Encode(), nil)
 	if err != nil {
 		return JobOutputStatus{}, err
 	}
@@ -635,7 +762,8 @@ func stripHeavyJobFields(raw json.RawMessage) (json.RawMessage, error) {
 }
 
 func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+path, nil)
+	_, daemonURL, _ := c.snapshot()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +783,8 @@ func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (j
 }
 
 func (c *Client) getDaemonJSONBounded(ctx context.Context, path string, limit int64) (json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.DaemonURL+path, nil)
+	_, daemonURL, _ := c.snapshot()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -713,7 +842,8 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) (json.RawM
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.DaemonURL+path, bytes.NewReader(payload))
+	_, daemonURL, _ := c.snapshot()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -775,8 +905,9 @@ func (c *Client) Fix(ctx context.Context, request FixRequest) error {
 	if !installation.Capabilities.FixCommand {
 		return fmt.Errorf("RoboRev %s does not support the version-gated fix command", installation.Version)
 	}
+	binary, _, _ := c.snapshot()
 	result, runErr := c.Runner.Run(ctx, proc.Command{
-		Executable:  c.Binary,
+		Executable:  binary,
 		Args:        args,
 		Dir:         request.RepoPath,
 		Timeout:     45 * time.Minute,
@@ -784,7 +915,7 @@ func (c *Client) Fix(ctx context.Context, request FixRequest) error {
 	})
 	if runErr != nil {
 		_ = result
-		return errors.New("RoboRev fix command failed")
+		return fmt.Errorf("RoboRev fix command failed: %w", runErr)
 	}
 	return nil
 }
@@ -829,16 +960,17 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 }
 
 func (c *Client) StartDaemon(ctx context.Context) error {
-	if c.Binary == "" {
+	binary, _, _ := c.snapshot()
+	if binary == "" {
 		return errors.New("roborev is not installed")
 	}
-	result, err := c.Runner.Run(ctx, proc.Command{Executable: c.Binary, Args: []string{"daemon", "start"}, Timeout: 30 * time.Second, OutputLimit: 1 << 20, AllowDetachedChildren: true})
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: []string{"daemon", "start"}, Timeout: 30 * time.Second, OutputLimit: 1 << 20, AllowDetachedChildren: true})
 	if err != nil {
 		message := strings.TrimSpace(result.Stderr)
 		if message == "" {
-			message = err.Error()
+			return err
 		}
-		return errors.New(message)
+		return fmt.Errorf("%s: %w", message, err)
 	}
 	return err
 }

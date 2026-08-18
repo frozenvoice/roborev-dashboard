@@ -20,7 +20,7 @@ func (r versionRunner) Run(_ context.Context, command proc.Command) (proc.Result
 	if command.Executable != "roborev" || len(command.Args) != 2 || command.Args[0] != "version" || command.Args[1] != "--json" {
 		return proc.Result{}, errors.New("unexpected native command")
 	}
-	data, _ := json.Marshal(map[string]string{"version": r.version})
+	data, _ := json.Marshal(map[string]string{"name": "roborev", "version": r.version})
 	return proc.Result{Stdout: string(data)}, nil
 }
 

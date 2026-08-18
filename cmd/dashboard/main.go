@@ -14,13 +14,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/app"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/operation"
 	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/roborev"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
+	"github.com/froze/roborev-dashboard/internal/setup"
 )
 
 func listenLocal(host string, port int) (net.Listener, error) {
@@ -111,13 +115,18 @@ func main() {
 	if binaryErr != nil {
 		log.Printf("RoboRev setup required: %v", binaryErr)
 	}
-	client, err := roborev.NewClient(binary, runner, *daemonAddress)
+	client, err := roborev.NewClientWithOptions(binary, runner, *daemonAddress, strings.TrimSpace(*binaryOverride) != "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	installer := &roborevcompat.Installer{Downloader: roborevcompat.Downloader{}, Manifest: roborevcompat.Manifest064()}
+	setupManager, err := setup.NewManager(client, installer)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	host := listener.Addr().String()
-	serverHandler, err := app.NewServer(client, registry, host)
+	serverHandler, err := app.NewServerWithSetup(client, registry, host, operation.NewGate(), setupManager)
 	if err != nil {
 		log.Fatal(err)
 	}

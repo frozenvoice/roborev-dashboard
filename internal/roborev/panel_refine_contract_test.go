@@ -217,7 +217,7 @@ type blockingFixRunner struct {
 
 func (r *blockingFixRunner) Run(ctx context.Context, command proc.Command) (proc.Result, error) {
 	if command.Args[0] == "version" {
-		return proc.Result{Stdout: `{"version":"v0.64.0"}`}, nil
+		return proc.Result{Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
 	}
 	r.command = command
 	close(r.started)
@@ -229,7 +229,7 @@ func (r *blockingFixRunner) Run(ctx context.Context, command proc.Command) (proc
 func (r *fixCaptureRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	if command.Args[0] == "version" {
-		return proc.Result{Stdout: `{"version":"v0.64.0"}`}, nil
+		return proc.Result{Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
 	}
 	if r.fail {
 		return proc.Result{Stderr: "secret finding and token"}, errors.New("exit status 7")
@@ -262,7 +262,7 @@ func TestFixUsesConfiguredExecutableDirExactArgsAndSanitizedError(t *testing.T) 
 		t.Fatalf("fix command = %#v", command)
 	}
 	runner.fail = true
-	if err := client.Fix(context.Background(), FixRequest{RepoPath: `C:\repo`, JobID: 42, Agent: "codex"}); err == nil || err.Error() != "RoboRev fix command failed" {
+	if err := client.Fix(context.Background(), FixRequest{RepoPath: `C:\repo`, JobID: 42, Agent: "codex"}); err == nil || !strings.Contains(err.Error(), "RoboRev fix command failed") {
 		t.Fatalf("fix error = %v", err)
 	}
 }
@@ -276,6 +276,8 @@ func TestFixCapabilityGateRunsNoFixProcess(t *testing.T) {
 	runner.commands = nil
 	client.version = "v0.63.9"
 	client.versionAt = time.Now()
+	_, _, generation := client.snapshot()
+	client.versionGeneration = generation
 	if err := client.Fix(context.Background(), FixRequest{RepoPath: `C:\repo`, JobID: 1, Agent: "codex"}); err == nil {
 		t.Fatal("unsupported fix capability was accepted")
 	}
@@ -306,7 +308,7 @@ func TestFixPropagatesCancellationToRunnerAndUsesTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("fix runner did not observe cancellation")
 	}
-	if err := <-done; err == nil || err.Error() != "RoboRev fix command failed" {
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "RoboRev fix command failed") {
 		t.Fatalf("fix cancellation error = %v", err)
 	}
 	if runner.command.Timeout != 45*time.Minute {

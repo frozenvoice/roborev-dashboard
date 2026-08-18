@@ -8,6 +8,7 @@ type Installation struct {
 	Version      string          `json:"version,omitempty"`
 	Status       json.RawMessage `json:"status,omitempty"`
 	Error        string          `json:"error,omitempty"`
+	FailureCode  string          `json:"failureCode,omitempty"`
 	Capabilities Capabilities    `json:"capabilities"`
 }
 

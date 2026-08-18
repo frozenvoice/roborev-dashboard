@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/operation"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
@@ -176,6 +177,7 @@ type Dependencies struct {
 	PollInterval time.Duration
 	Wait         func(context.Context, time.Duration) error
 	HistoryLimit int
+	Gate         *operation.Gate
 }
 
 var (
@@ -200,6 +202,7 @@ type Manager struct {
 	pollInterval time.Duration
 	wait         func(context.Context, time.Duration) error
 	historyLimit int
+	gate         *operation.Gate
 
 	mu            sync.RWMutex
 	runs          map[string]*PanelRefineRun
@@ -207,8 +210,11 @@ type Manager struct {
 	leases        map[string]string
 	cancel        map[string]context.CancelFunc
 	terminalOrder []string
+	gateRelease   map[string]func()
 	wg            sync.WaitGroup
 }
+
+type binaryPathProvider interface{ BinaryPath() string }
 
 func NewManager(deps Dependencies) (*Manager, error) {
 	if deps.Registry == nil || deps.Panels == nil || deps.RoboRev == nil {
@@ -226,7 +232,19 @@ func NewManager(deps Dependencies) (*Manager, error) {
 	if deps.HistoryLimit <= 0 {
 		deps.HistoryLimit = 100
 	}
-	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc)}, nil
+	if deps.Gate == nil {
+		deps.Gate = operation.NewGate()
+	}
+	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, gate: deps.Gate, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc), gateRelease: make(map[string]func())}, nil
+}
+
+func (m *Manager) currentBinary() string {
+	if provider, ok := m.service.(binaryPathProvider); ok {
+		if path := strings.TrimSpace(provider.BinaryPath()); path != "" {
+			return path
+		}
+	}
+	return m.binary
 }
 
 func waitContext(ctx context.Context, duration time.Duration) error {
@@ -320,6 +338,16 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 			request.FinalPanel = ""
 		}
 	}
+	gateRelease, gateErr := m.gate.AcquireRefine()
+	if gateErr != nil {
+		return nil, startError(StartConflict, gateErr)
+	}
+	keepGate := false
+	defer func() {
+		if !keepGate {
+			gateRelease()
+		}
+	}()
 
 	m.mu.Lock()
 	if existing := m.locks[identity]; existing != "" {
@@ -332,11 +360,13 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	}
 	id := newID()
 	now := time.Now().UTC()
-	run := &PanelRefineRun{ID: id, RepositoryIdentity: identity, RepositoryPath: repo.Path, Branch: repo.Branch, IterationPanel: request.Panel, FinalPanel: request.FinalPanel, FixAgent: request.FixAgent, MaxFixAttempts: request.MaxFixAttempts, Phase: PhaseReviewing, StartingHead: repo.Head, CurrentHead: repo.Head, StartedAt: now, UpdatedAt: now, Iterations: []PanelRefineIteration{}, Command: CommandTemplate{Executable: m.binary, Args: []string{"fix", "--agent", request.FixAgent, "--quiet", "<synthesisJobID>"}}}
+	run := &PanelRefineRun{ID: id, RepositoryIdentity: identity, RepositoryPath: repo.Path, Branch: repo.Branch, IterationPanel: request.Panel, FinalPanel: request.FinalPanel, FixAgent: request.FixAgent, MaxFixAttempts: request.MaxFixAttempts, Phase: PhaseReviewing, StartingHead: repo.Head, CurrentHead: repo.Head, StartedAt: now, UpdatedAt: now, Iterations: []PanelRefineIteration{}, Command: CommandTemplate{Executable: m.currentBinary(), Args: []string{"fix", "--agent", request.FixAgent, "--quiet", "<synthesisJobID>"}}}
 	m.runs[id] = run
 	m.locks[identity] = id
 	ctx, cancel := context.WithTimeout(context.Background(), runCeiling)
 	m.cancel[id] = cancel
+	m.gateRelease[id] = gateRelease
+	keepGate = true
 	m.wg.Add(1)
 	snapshot := cloneRun(run)
 	m.mu.Unlock()
@@ -790,7 +820,7 @@ func (m *Manager) ListResponse(repoPath string) ListResponse {
 		}
 	}
 	return ListResponse{Runs: runs, Run: latest, Options: Options{
-		Executable:       m.binary,
+		Executable:       m.currentBinary(),
 		Args:             append([]string(nil), []string{"fix", "--agent", "codex", "--quiet", "<synthesisJobID>"}...),
 		AllowedFixAgents: []string{"codex"}, DefaultFixAgent: "codex", DefaultMaxFixAttempts: defaultFixAttempts, MinFixAttempts: 1, MaxFixAttempts: 10,
 	}}
@@ -893,6 +923,10 @@ func (m *Manager) cancelled(id string) {
 func (m *Manager) finishContext(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if release := m.gateRelease[id]; release != nil {
+		delete(m.gateRelease, id)
+		release()
+	}
 	if run := m.runs[id]; run != nil && isTerminal(run.Phase) {
 		delete(m.locks, run.RepositoryIdentity)
 		delete(m.cancel, id)

@@ -1,0 +1,165 @@
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { normalizeSetupState, type SetupState } from './api'
+import { Setup, SetupBanner } from './Setup'
+import { App } from './App'
+
+const baseState: SetupState = {
+  status: 'idle', phase: 'idle', operationActive: false, installed: false, recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: false, blocked: false, retryable: false, installAvailable: true, canInstall: true, canRetry: false, canStartDaemon: false,
+  architecture: 'windows-amd64', sourceURL: 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0', sourceLabel: 'Official GitHub release', assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev\\roborev.exe', downloadedBytes: 0, totalBytes: 1200,
+}
+const appBootstrap = {
+  csrfToken: 'csrf', selectedRepository: 'E:\\repo', selectedRepositoryIdentity: 'repo-1', repositories: [{ identity: 'repo-1', name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
+  roborev: { installed: false, version: '', status: { running: false }, capabilities: { reviewEnqueueApi: false, frozenRerunApi: false, jobListApi: false, jobOutputStatusApi: false, panelReview: false, fixCommand: false, panelMembersApi: false, promptLazyLoad: false, rawLog: false } },
+}
+const readyBootstrap = {
+  ...appBootstrap,
+  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, jobOutputStatusApi: true, panelReview: true, fixCommand: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
+}
+function jsonResponse(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
+
+afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+describe('RoboRev setup', () => {
+  it('shows a missing banner but does not install on render, then confirms exact values', async () => {
+    const install = vi.fn().mockResolvedValue(undefined)
+    render(<Setup state={baseState} onInstall={install} />)
+    expect(screen.getByText('RoboRev is not installed')).toBeInTheDocument()
+    expect(install).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Install RoboRev' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('v0.64.0')
+    expect(screen.getByRole('dialog')).toHaveTextContent(baseState.sha256!)
+    expect(screen.getByRole('dialog')).toHaveTextContent('Official GitHub release')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Will not do')
+    await userEvent.click(screen.getByRole('button', { name: 'Install & Start' }))
+    await waitFor(() => expect(install).toHaveBeenCalledTimes(1))
+  })
+
+  it('renders active phase and bounded byte progress', () => {
+    const state = { ...baseState, status: 'downloading' as const, phase: 'downloading' as const, operationActive: true, downloadedBytes: 512, totalBytes: 1024 }
+    render(<Setup state={state} />)
+    expect(screen.getByText('Downloading')).toBeInTheDocument()
+    expect(screen.getAllByText(/50%/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/serialized/).length).toBeGreaterThan(0)
+  })
+
+  it('exposes only verification retry for blocked state', async () => {
+    const retry = vi.fn().mockResolvedValue(undefined)
+    const state = { ...baseState, installed: true, installAvailable: false, canInstall: false, phase: 'blocked' as const, status: 'blocked' as const, blocked: true, canRetry: true }
+    render(<SetupBanner state={state} onRetry={retry} onInstall={vi.fn()} onStartDaemon={vi.fn()} />)
+    expect(screen.getByText(/Application Control/)).toBeInTheDocument()
+    expect(screen.getByText(/Windows Security/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry verification' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Install RoboRev' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry verification' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed on checksum failure even when the install is missing', () => {
+    const state = { ...baseState, phase: 'failed' as const, status: 'failed' as const, failureCode: 'checksum_mismatch', canRetry: false }
+    render(<SetupBanner state={state} onInstall={vi.fn()} onRetry={vi.fn()} />)
+    expect(screen.getByText('RoboRev installation was rejected')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Install RoboRev' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer retry for unsafe archive or redirect failures', () => {
+    const state = { ...baseState, phase: 'failed' as const, status: 'failed' as const, failureCode: 'unsafe_redirect', canRetry: true }
+    render(<SetupBanner state={state} onRetry={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Retry installation' })).not.toBeInTheDocument()
+  })
+
+  it('warns for an existing newer or unsupported version without downgrade controls', () => {
+    const state = { ...baseState, phase: 'unsupported' as const, status: 'unsupported' as const, installed: true, version: 'v0.65.0', compatible: false, panelRefineCompatible: false, canInstall: false, installAvailable: false }
+    render(<SetupBanner state={state} onInstall={vi.fn()} />)
+    expect(screen.getByText(/will not downgrade/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Install/ })).not.toBeInTheDocument()
+  })
+
+  it('fails safe on malformed setup state', () => {
+    expect(normalizeSetupState({ status: 'not-a-phase' })).toBeNull()
+    expect(normalizeSetupState({ phase: 'ready', operationActive: 'yes' })).toBeNull()
+    expect(normalizeSetupState({ ...baseState, phase: 'idle', status: 'ready' })).toBeNull()
+    expect(normalizeSetupState({ ...baseState, phase: 'idle', status: 'idle' })).toMatchObject({ recommendedVersion: 'v0.64.0', totalBytes: 1200 })
+    expect(normalizeSetupState({ ...baseState, phase: 'canceled', status: 'canceled', canInstall: false })).toMatchObject({ phase: 'canceled', operationActive: false })
+    expect(normalizeSetupState({ ...baseState, phase: 'blocked', status: 'blocked', installed: true, blocked: true, compatible: false, panelRefineCompatible: false, canInstall: false, installAvailable: false, canRetry: true, binaryPath: baseState.targetPath })).toMatchObject({ phase: 'blocked', installed: true, canRetry: true })
+    expect(normalizeSetupState({ ...baseState, sourceURL: 'https://example.invalid/roborev.zip' })).toBeNull()
+  })
+
+  it('keeps the missing banner confirmation explicit and sends an exactly empty install POST', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/bootstrap') return jsonResponse(appBootstrap)
+      if (path === '/api/setup/roborev') return jsonResponse(baseState)
+      if (path.startsWith('/api/repos/panels?')) return jsonResponse({ repositoryIdentity: 'repo-1', panels: [{ name: 'reviewers', kind: 'panel', members: ['codex'], origin: 'global', valid: true }], selectedPanel: 'reviewers', selectionRequired: false })
+      if (path.startsWith('/api/panel-refines?')) return jsonResponse({ runs: [], options: null })
+      if (path.startsWith('/api/reviews?')) return jsonResponse([])
+      if (path === '/api/setup/roborev/install') return jsonResponse({ ...baseState, phase: 'checking', status: 'checking', operationActive: true }, 202)
+      return jsonResponse({ success: true })
+    }))
+    render(<App />)
+    const install = await screen.findByRole('button', { name: 'Install RoboRev' })
+    expect(calls.filter(call => call.path === '/api/setup/roborev/install')).toHaveLength(0)
+    await userEvent.click(install)
+    expect(screen.getByRole('dialog')).toHaveTextContent('Asset bytes')
+    expect(calls.filter(call => call.path === '/api/setup/roborev/install')).toHaveLength(0)
+    await userEvent.click(screen.getByRole('button', { name: 'Install & Start' }))
+    await waitFor(() => expect(calls.filter(call => call.path === '/api/setup/roborev/install')).toHaveLength(1))
+    const installCall = calls.find(call => call.path === '/api/setup/roborev/install')!
+    expect(installCall.init?.method).toBe('POST')
+    expect(installCall.init?.body).toBeUndefined()
+  })
+
+  it('observes terminal ready after the install action and refreshes runtime, reviews, and panel state', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const activeState = { ...baseState, phase: 'checking' as const, status: 'checking' as const, operationActive: true }
+    const readyState = { ...baseState, phase: 'ready' as const, status: 'ready' as const, operationActive: false, installed: true, daemonRunning: true, compatible: true, panelRefineCompatible: true, canInstall: false, installAvailable: false, canStartDaemon: false }
+    let setupGets = 0
+    let bootstrapGets = 0
+    let panelGets = 0
+    let reviewGets = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') { bootstrapGets++; return jsonResponse(bootstrapGets === 1 ? appBootstrap : readyBootstrap) }
+      if (path === '/api/setup/roborev') { setupGets++; return jsonResponse(setupGets === 1 ? baseState : setupGets === 2 ? activeState : readyState) }
+      if (path.startsWith('/api/repos/panels?')) { panelGets++; return jsonResponse({ repositoryIdentity: 'repo-1', panels: [{ name: 'reviewers', kind: 'panel', members: ['codex'], origin: 'global', valid: true }], selectedPanel: 'reviewers', selectionRequired: false }) }
+      if (path.startsWith('/api/panel-refines?')) return jsonResponse({ runs: [], options: null })
+      if (path.startsWith('/api/reviews?')) { reviewGets++; return jsonResponse([]) }
+      if (path === '/api/runtime') return jsonResponse(readyBootstrap.roborev)
+      if (path === '/api/setup/roborev/install') return jsonResponse(activeState, 202)
+      return jsonResponse({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Install RoboRev' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Install & Start' }))
+    await waitFor(() => expect(setupGets).toBeGreaterThanOrEqual(3))
+    expect(bootstrapGets).toBeGreaterThanOrEqual(3)
+    expect(panelGets).toBeGreaterThanOrEqual(2)
+    expect(reviewGets).toBeGreaterThanOrEqual(2)
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue('repo-1')
+    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('reviewers')
+    vi.useRealTimers()
+  })
+
+  it('offers daemon retry for an installed failure without exposing install', async () => {
+    const failedState = { ...baseState, phase: 'failed' as const, status: 'failed' as const, installed: true, daemonRunning: false, compatible: true, panelRefineCompatible: true, canInstall: false, installAvailable: false, canRetry: false, canStartDaemon: true, failureCode: 'daemon_start_failed' }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push(`${init?.method ?? 'GET'} ${path}`)
+      if (path === '/api/bootstrap') return jsonResponse(readyBootstrap)
+      if (path === '/api/setup/roborev') return jsonResponse(failedState)
+      if (path.startsWith('/api/repos/panels?')) return jsonResponse({ repositoryIdentity: 'repo-1', panels: [{ name: 'reviewers', kind: 'panel', members: ['codex'], origin: 'global', valid: true }], selectedPanel: 'reviewers', selectionRequired: false })
+      if (path.startsWith('/api/panel-refines?')) return jsonResponse({ runs: [], options: null })
+      if (path.startsWith('/api/reviews?')) return jsonResponse([])
+      return jsonResponse({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry Start' }))
+		await waitFor(() => expect(calls).toContain('POST /api/setup/roborev/retry'))
+		expect(calls.some(call => call.includes('POST /api/daemon/start'))).toBe(false)
+    expect(calls.some(call => call.includes('/api/setup/roborev/install'))).toBe(false)
+  })
+})

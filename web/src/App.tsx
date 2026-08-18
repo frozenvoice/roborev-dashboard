@@ -1,8 +1,9 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, normalizePanelRefineResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizePanelRefineResponse, normalizeSetupState, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { PanelRefine } from './PanelRefine'
+import { InstallConfirmation, Setup, SetupBanner, setupIsActive } from './Setup'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
@@ -46,7 +47,6 @@ function panelLabel(panel: PanelInfo) { return panel.name === 'none' ? 'Single a
 function validPanelConfiguration(value: PanelConfiguration, identity: string) {
   return value?.repositoryIdentity === identity && Array.isArray(value.panels) && typeof value.selectedPanel === 'string' && typeof value.selectionRequired === 'boolean' && value.panels.every(panel => panel && typeof panel.name === 'string' && ['panel', 'single'].includes(panel.kind) && Array.isArray(panel.members) && ['global', 'local', 'builtin'].includes(panel.origin) && typeof panel.valid === 'boolean')
 }
-
 export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
   state: { error?: Error } = {}
   static getDerivedStateFromError(error: Error) { return { error } }
@@ -278,6 +278,10 @@ export function App() {
   const [panelRefineError, setPanelRefineError] = useState('')
   const [panelRefineOptions, setPanelRefineOptions] = useState<PanelRefineOptions | null>(null)
   const [panelRefineReloadEpoch, setPanelRefineReloadEpoch] = useState(0)
+  const [setupState, setSetupState] = useState<SetupState | null>(null)
+  const [setupError, setSetupError] = useState('')
+  const [setupReloadEpoch, setSetupReloadEpoch] = useState(0)
+  const [setupConfirming, setSetupConfirming] = useState(false)
   const panelRefineGeneration = useRef(0)
   const reviewGeneration = useRef(0)
   const reviewActionGeneration = useRef(0)
@@ -285,6 +289,8 @@ export function App() {
   const panelGeneration = useRef(0)
   const repoSwitchGeneration = useRef(0)
   const panelRefineReviewGeneration = useRef(0)
+  const setupGeneration = useRef(0)
+  const setupReadyGeneration = useRef(0)
   const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
   const repo = bootstrap?.repositories.find(item => item.identity === selectedRepositoryIdentity)
@@ -319,6 +325,23 @@ export function App() {
     const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data)
     return data
   }, [])
+  const loadSetup = useCallback(async (signal?: AbortSignal) => {
+    const generation = ++setupGeneration.current
+    try {
+      const raw = await request<unknown>('/api/setup/roborev', signal ? { signal } : {})
+      const next = normalizeSetupState(raw)
+      if (!next) throw new APIError('The RoboRev setup response was malformed.')
+      if (generation !== setupGeneration.current) return null
+      setSetupState(next)
+      setSetupError('')
+      return next
+    } catch (error) {
+      if ((error as Error).name === 'AbortError' || generation !== setupGeneration.current) return null
+      setSetupState(null)
+      setSetupError((error as Error).message)
+      return null
+    }
+  }, [])
   const loadPanels = useCallback(async (repoPath: string, identity: string) => {
     const generation = ++panelGeneration.current
     setPanelLoading(true)
@@ -337,6 +360,23 @@ export function App() {
       if (generation === panelGeneration.current) setPanelLoading(false)
     }
   }, [])
+  const refreshDashboardAfterSetup = useCallback(async () => {
+    const generation = ++setupReadyGeneration.current
+    const targetIdentity = currentRepositoryIdentity.current
+    try {
+      const data = await loadBootstrap()
+      if (generation !== setupReadyGeneration.current || (targetIdentity && data.selectedRepositoryIdentity !== targetIdentity)) return
+      const selected = data.repositories.find(item => item.identity === data.selectedRepositoryIdentity)
+      if (selected) {
+        setPanelLoadEpoch(epoch => epoch + 1)
+        await Promise.all([loadPanels(selected.path, selected.identity), loadReviews(selected.path, selected.identity)])
+      }
+      try {
+        const runtime = await request<Installation>('/api/runtime')
+        if (generation === setupReadyGeneration.current && (!targetIdentity || currentRepositoryIdentity.current === targetIdentity) && runtime && typeof runtime === 'object' && typeof runtime.installed === 'boolean') setBootstrap(current => current ? { ...current, roborev: runtime } : current)
+      } catch { /* setup state remains authoritative when runtime is temporarily unavailable */ }
+    } catch { /* the regular bootstrap/runtime poll will surface a typed error */ }
+  }, [loadBootstrap, loadPanels, loadReviews])
 
   const loadPanelRefine = useCallback(async (repoPath: string, identity: string) => {
     const generation = ++panelRefineGeneration.current
@@ -371,6 +411,36 @@ export function App() {
       .catch(error => toast('error', (error as Error).message))
       .finally(() => { setInitialized(true); setLoading(false) })
   }, [loadBootstrap, toast])
+  useEffect(() => {
+    if (!initialized) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let controller: AbortController | undefined
+    const poll = async () => {
+      controller?.abort()
+      controller = new AbortController()
+      const next = await loadSetup(controller.signal)
+      if (cancelled) return
+      if (setupIsActive(next)) timer = setTimeout(poll, 1000)
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      setupGeneration.current++
+      controller?.abort()
+      if (timer) clearTimeout(timer)
+    }
+  }, [initialized, loadSetup, setupReloadEpoch])
+  const setupPhase = setupState?.phase
+  const previousSetupPhase = useRef<SetupState['phase'] | undefined>(undefined)
+  useEffect(() => {
+    if (setupPhase === 'ready' && previousSetupPhase.current !== 'ready') void refreshDashboardAfterSetup()
+    previousSetupPhase.current = setupPhase
+  }, [refreshDashboardAfterSetup, setupPhase])
+  useEffect(() => () => {
+    setupGeneration.current++
+    setupReadyGeneration.current++
+  }, [])
   useEffect(() => () => { reviewActionGeneration.current++; repoSwitchGeneration.current++; panelRefineReviewGeneration.current++ }, [])
   useEffect(() => {
     panelGeneration.current++
@@ -490,6 +560,10 @@ export function App() {
       throw error
     } finally { setBusy(false) }
   }, [loadBootstrap, loadReviews, toast])
+  const setupMutation = useCallback(async (path: string) => {
+    await mutate(path)
+    setSetupReloadEpoch(epoch => epoch + 1)
+  }, [mutate])
 
   const runningCount = jobs.filter(isRunning).length
   const daemonRunning = Boolean(bootstrap?.roborev?.status?.running)
@@ -580,6 +654,7 @@ export function App() {
     const target = bootstrap?.repositories.find(item => item.identity === identity)
     if (!target) return
     const generation = ++repoSwitchGeneration.current
+    setupReadyGeneration.current++
     setRepoSwitching(true)
     reviewActionGeneration.current++
     panelRefineReviewGeneration.current++
@@ -627,6 +702,7 @@ export function App() {
 
   const reviewSupported = Boolean(bootstrap?.roborev?.capabilities?.reviewEnqueueApi)
   const panelRefineActive = isPanelRefineActive(panelRefineRun)
+  const setupOperationActive = setupIsActive(setupState)
   const panelOutputStatusAvailable = bootstrap?.roborev?.capabilities?.jobOutputStatusApi === true
   const panelRefineAvailable = Boolean(bootstrap?.roborev?.installed && daemonRunning && bootstrap.roborev.capabilities.panelReview && bootstrap.roborev.capabilities.fixCommand && panelOutputStatusAvailable)
   const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? 'RoboRev is not installed.' : !daemonRunning ? 'The RoboRev daemon is not running.' : !bootstrap.roborev.capabilities.panelReview ? 'This RoboRev version does not support panel review.' : !bootstrap.roborev.capabilities.fixCommand ? 'This RoboRev version does not support the typed fix command.' : !panelOutputStatusAvailable ? 'This RoboRev version does not support the bounded panel status contract.' : ''
@@ -634,13 +710,15 @@ export function App() {
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev?.version || 'Setup required'}</span></div></div></aside>
-    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
-      {!loading && bootstrap && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</section>}
+    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching || setupOperationActive} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || setupOperationActive || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || setupOperationActive || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
+      {!loading && bootstrap && setupState && activeNav !== 'Agents & Setup' && <SetupBanner state={setupState} busy={busy || setupOperationActive} onInstall={() => { setSetupConfirming(true); return Promise.resolve() }} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => setupMutation('/api/daemon/start')} />}
+      {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => setupMutation('/api/daemon/start')}>Start daemon</button>}</section>}
       {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Panel configuration unavailable</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>Retry panel discovery</button>}</section>}
       {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy} /> : activeNav === 'Agents & Setup' ? <Setup installation={bootstrap?.roborev} mutate={mutate} busy={busy} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup state={setupState} busy={busy || setupOperationActive} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => setupMutation('/api/daemon/start')} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
-    {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
+    {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || setupOperationActive || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !setupOperationActive && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
+    {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}
     <div className="toasts" aria-live="polite">{toasts.map(item => <div key={item.id} className={`toast ${item.kind}`}>{item.kind === 'success' ? <Check /> : <XCircle />}{item.message}</div>)}</div>
   </div>
 }
@@ -648,8 +726,4 @@ export function App() {
 function Repositories({ bootstrap, mutate, busy }: { bootstrap: Bootstrap | null; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
   const [path, setPath] = useState('')
   return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">Registered targets</span><h1>Repositories</h1><p>Only canonical Git roots registered here can be mutation targets.</p></div></header><div className="repo-cards">{bootstrap?.repositories.map(repo => <article key={repo.identity}><div className="repo-icon"><GitBranch /></div><div><h3>{repo.name}</h3><code>{repo.path}</code><p>{repo.branch} · {repo.headShort} {repo.dirty ? '· dirty' : '· clean'}</p></div></article>)}</div><form className="add-repo" onSubmit={event => { event.preventDefault(); mutate('/api/repos', { repoPath: path }).then(() => setPath('')) }}><label htmlFor="repo-path">Add local Git repository</label><div><input id="repo-path" value={path} onChange={event => setPath(event.target.value)} placeholder="E:\Dev\GitHub\project" /><button className="button primary" disabled={busy || !path.trim()}><Plus size={16} />Register</button></div></form></section>
-}
-
-function Setup({ installation, mutate, busy }: { installation?: Bootstrap['roborev']; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
-  return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">Runtime health</span><h1>Agents & Setup</h1><p>Dashboard uses existing agent CLI authentication and never stores tokens.</p></div></header><article className="setup-card"><Server /><div><h3>RoboRev {installation?.version || 'not detected'}</h3><code>{installation?.binary || 'PATH lookup failed'}</code><p>{installation?.status?.running ? 'Daemon is running.' : installation?.error || 'Daemon is stopped.'}</p></div>{installation?.installed && !installation.status?.running && <button className="button primary" disabled={busy} onClick={() => mutate('/api/daemon/start')}>Start daemon</button>}</article></section>
 }

@@ -19,6 +19,11 @@
 - Panel Refine checkpoint는 `POST/GET /api/panel-refines`와 `POST /api/panel-refines/{id}/cancel`을 사용하는 backend process-scoped authoritative state machine으로 fresh pinned panel review → synthesis 평가 → Codex fix → 새 clean HEAD 재검토를 반복한다. 시작 dialog는 실제 request body와 typed fix argv template preview를 표시한다. `dashboard_cross`를 fast iteration panel로 사용하고, 사용자가 명시한 경우에만 distinct `dashboard_deep` final gate를 실행한다. browser reload/reopen은 active run에 재접속할 수 있지만 Dashboard process restart resume은 지원하지 않으며 shutdown/cancel은 child process와 context를 정리한다. cancel 후 fresh inspection 결과는 `cancelState`로 보존한다.
 - Panel Refine은 repository identity lock으로 같은 repository의 동시 refine과 Review HEAD/Rerun 경쟁 mutation을 거부한다. 시작·iteration·fix 후 fresh inspection으로 clean tree, branch, canonical identity, HEAD 전진을 확인하고 stale/dirty/unknown 상태는 자동 fix하지 않는다. v0.64.0 `fix --agent codex --quiet <synthesis-id>`가 새 commit에 panel 없는 default review를 자동 enqueue할 수 있어 Dashboard의 선택 panel review와 unrelated extra review가 생길 수 있으며, 이를 이름이나 응답 추측으로 억제하지 않는다.
 - enqueue receipt와 v0.64 `/api/job/output?job_id=...` status-prefix polling은 synthesis job ID를 일치시키고 active response의 `lines`를 읽지 않는다. `queued`/`running` 동안 metadata를 요청하지 않으며 첫 terminal `done`에만 `omit_prompt=true` metadata를 최대 256 KiB로 한 번 bounded fetch해 repo path, full git ref, branch, panel, panel run UUID, synthesis role/type, skipped, status와 P/F verdict를 모두 검증한다. 8 KiB prefix, content type/status, ordered keys와 contract/version gate를 검사하고 malformed/unknown/canceled/failed/skipped/identity mismatch는 fail closed한다. transport/5xx만 제한된 retry 대상이다.
+- clean-machine developer bootstrap은 Windows PowerShell 5.1에서 실제 prerequisite 검사, dependency install plan, test와 production build를 통과했다. `scripts/install.ps1`은 계속 Git/Node.js/Go와 npm dependency만 다루며 RoboRev runtime installer가 아니다.
+- RoboRev가 없는 Windows에서 Dashboard first launch와 Setup-required 상태까지 실행되는 것을 확인했다. 새 Setup & Install checkpoint는 Dashboard가 지원하는 RoboRev v0.64.0 Windows amd64 release의 exact asset size와 SHA-256을 immutable manifest에 pin하고, 명시적 UI 확인 뒤에만 bounded HTTPS download, safe ZIP extraction, user-level no-replace publish, strict version probe, current-process rebind와 bounded daemon health를 수행한다.
+- runtime installer는 existing supported binary를 존중하며 explicit override와 newer/unknown/broken/blocked binary를 자동 downgrade 또는 overwrite하지 않는다. PATH, `roborev init`, Git hook, agent/credential과 Windows security policy를 변경하지 않는다. exact Windows policy error는 typed `blocked` 상태로 표시하되 우회하지 않는다.
+- 설치 상태는 process-scoped manager가 소유하고 global operation gate가 setup과 Review/Rerun/comment/close/cancel/Panel Refine mutation의 동시 실행을 fail-fast 409로 막는다. 설치 뒤 daemon 시작이 실패해도 verified binary를 보존하고 재다운로드 없는 Start daemon retry를 제공한다.
+- 자동 backend/frontend test와 production build에서는 fake HTTP/filesystem/process만 사용했으며 실제 RoboRev, GitHub release download, daemon 또는 LLM을 실행하지 않았다. 완성된 **Install & Start**의 실제 clean-machine E2E는 이 노트북의 missing-RoboRev 상태를 보존한 채 사용자 수동 검증을 기다린다.
 
 ## 결정
 
@@ -31,11 +36,11 @@
 - Fix Prompt는 terminal F single/synthesis/individual member의 bounded `show --json` subset으로 로컬에서 결정적으로 생성하며 LLM이나 mutation을 호출하지 않는다.
 - review list는 각 요청 완료 4초 뒤, 작은 `/api/runtime` health 상태는 각 요청 완료 10초 뒤 다음 poll을 예약한다. `/api/runtime`은 repository inspect/list를 수행하지 않는다. `status --json`과 `list --json`은 full prompt/diff를 포함할 수 있어 polling에 사용하지 않는다.
 - `roborev init`은 post-commit hook과 daemon start를 함께 수행하므로 자동 호출하지 않는다. `.roborev.toml`을 직접 관리하고 manual panel review를 사용한다.
-- 릴리스 exe는 embed된 frontend assets만 사용하므로 Go/Node.js/npm 없이 실행할 수 있다. RoboRev가 없는 runtime도 Dashboard와 Setup 상태까지는 열리지만, 현재 onboarding이 RoboRev를 자동 설치하지 않는다.
+- 릴리스 exe는 embed된 frontend assets만 사용하므로 Go/Node.js/npm 없이 실행할 수 있다. RoboRev가 없는 Windows amd64 runtime은 Agents & Setup의 explicit confirmation으로 pinned v0.64.0을 설치하고 현재 process에 즉시 rebind할 수 있다. browser는 URL/version/hash/path를 선택하지 못하며 자동 update는 지원하지 않는다.
 
 ## 다음 작업
 
-1. Panel Refine checkpoint의 backend/frontend 회귀 테스트와 전체 test/build를 완료하고 새 HEAD에 `dashboard_cross` review 실행
-2. Panel Refine 통과 뒤 필요하면 사용자가 별도로 `dashboard_deep` final review 실행
-3. Checkpoint C: installer/update/daemon lifecycle/check-agents/hooks/config
-4. Checkpoint D 이후: analyze/run 등 agentic workflow와 stream relay; RoboRev upstream이 panel-aware fix suppression capability를 제공할 때만 v0.64 extra default review 재검토
+1. clean-machine Windows에서 최신 Dashboard exe를 실행하고 Setup confirmation의 repository/version/target/size/full SHA와 no-init/no-agent/no-security-change 범위를 검토한 뒤 사용자가 직접 **Install & Start** 실행
+2. 설치, runtime rebind, daemon online, repository panel 복원, Review HEAD와 Panel Refine 활성화를 같은 session에서 확인
+3. 별도 checkpoint로 v0.65+ compatibility adapter를 검증한 뒤에만 update policy 검토; 자동 downgrade 금지 유지
+4. 이후 check-agents/hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행
