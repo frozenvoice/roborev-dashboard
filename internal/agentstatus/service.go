@@ -5,6 +5,7 @@ package agentstatus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,14 @@ const (
 	identityProbeTimeout   = 2 * time.Second
 	identityProbeMaxBytes  = 4096
 	identityProbeWaitDelay = 250 * time.Millisecond
+)
+
+// ErrDiscovery and ErrIneligible classify pre-dispatch failures.  The HTTP
+// adapter maps both to a conflict and, importantly, never treats them as a
+// checker/agent failure after quota has been consumed.
+var (
+	ErrDiscovery  = errors.New("agent discovery failed")
+	ErrIneligible = errors.New("agent is not eligible")
 )
 
 // ExecutableResolver is the only filesystem/PATH seam used by discovery.
@@ -291,7 +300,7 @@ func (s *Service) checkInScope(ctx context.Context, scope RepositoryScope, agent
 	// changes after a previous GET response.
 	statuses, err := s.Discover(ctx, scope)
 	if err != nil {
-		return roborev.AgentHealthResult{}, err
+		return roborev.AgentHealthResult{}, fmt.Errorf("%w: %w", ErrDiscovery, err)
 	}
 	eligible := false
 	for _, status := range statuses {
@@ -301,7 +310,7 @@ func (s *Service) checkInScope(ctx context.Context, scope RepositoryScope, agent
 		}
 	}
 	if !eligible {
-		return roborev.AgentHealthResult{}, errors.New("agent is not configured and detected for this repository")
+		return roborev.AgentHealthResult{}, fmt.Errorf("%w: agent is not configured and detected for this repository", ErrIneligible)
 	}
 	if len(guards) > 0 && guards[0] != nil {
 		if err := guards[0](); err != nil {

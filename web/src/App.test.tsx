@@ -1267,6 +1267,150 @@ describe('App review workflow', () => {
     expect(agentCalls).toBe(2)
   })
 
+  it('keeps a same-repository health check completion after an overlapping refresh', async () => {
+    const refreshAgents = deferred<Response>()
+    const finalAgents = deferred<Response>()
+    const check = deferred<Response>()
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    let agentCalls = 0
+    const checkedAgents = { ...setupAgents, configured: [{ ...setupAgents.configured[0], health: 'passed' }] }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/agents') {
+        agentCalls += 1
+        if (agentCalls === 1) return response(setupAgents)
+        if (agentCalls === 2) return refreshAgents.promise
+        return finalAgents.promise
+      }
+      if (path === '/api/agents/check' && init?.method === 'POST') return check.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await screen.findByText('Claude Code')
+    const refresh = within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByRole('button', { name: 'Refresh' })
+    await userEvent.click(refresh)
+    await waitFor(() => expect(agentCalls).toBe(2))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Run check' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    await waitFor(() => expect(calls.some(call => call.path === '/api/agents/check')).toBe(true))
+    expect(refresh).toBeDisabled()
+
+    check.resolve(new Response(JSON.stringify(checkedAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(agentCalls).toBe(3))
+    refreshAgents.resolve(new Response(JSON.stringify(setupAgentsB), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Agent check completed for claude-code.')).not.toBeInTheDocument()
+    finalAgents.resolve(new Response(JSON.stringify(checkedAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Agent check completed for claude-code.')).toBeInTheDocument()
+    expect(agentCalls).toBe(3)
+    expect(within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByText('Passed')).toBeInTheDocument()
+  })
+
+  it('does not let a background same-repository reload suppress health completion', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const backgroundAgents = deferred<Response>()
+    const check = deferred<Response>()
+    let runtimeCalls = 0
+    let agentCalls = 0
+    const checkedAgents = { ...setupAgents, configured: [{ ...setupAgents.configured[0], health: 'passed' }] }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') {
+        runtimeCalls += 1
+        return response(runtimeCalls === 1 ? { ...setupRuntime, operationActive: true, daemonOperation: 'starting' } : setupRuntime)
+      }
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/agents') {
+        agentCalls += 1
+        if (agentCalls === 1) return response(setupAgents)
+        if (agentCalls === 2) return backgroundAgents.promise
+        return response(checkedAgents)
+      }
+      if (path === '/api/agents/check' && init?.method === 'POST') return check.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await screen.findByText('Claude Code')
+    await userEvent.click(screen.getByRole('button', { name: 'Run check' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    await waitFor(() => expect(agentCalls).toBe(2))
+    const refresh = within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByRole('button', { name: 'Refresh' })
+    expect(refresh).toBeDisabled()
+    backgroundAgents.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    check.resolve(new Response(JSON.stringify(checkedAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Agent check completed for claude-code.')).toBeInTheDocument()
+    expect(agentCalls).toBe(3)
+  })
+
+  it('does not report success or replace repository A cards when the fresh reload belongs to B', async () => {
+    const check = deferred<Response>()
+    let agentCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/agents') {
+        agentCalls += 1
+        return response(agentCalls === 1 ? setupAgents : setupAgentsB)
+      }
+      if (path === '/api/agents/check' && init?.method === 'POST') return check.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run check' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    check.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(agentCalls).toBe(2))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByText('Claude Code')).toBeInTheDocument()
+    expect(screen.queryByText('Gemini CLI')).not.toBeInTheDocument()
+    expect(screen.queryByText('Agent check completed for claude-code.')).not.toBeInTheDocument()
+  })
+
+  it('restores repository A agent cards after a failed selection bootstrap', async () => {
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    let agentCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(initial)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ error: 'selection rejected' }, 409)
+      if (path === '/api/agents') { agentCalls += 1; return response(setupAgents) }
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await screen.findByText('Claude Code')
+    fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: other.identity } })
+    await waitFor(() => expect(screen.getByText('selection rejected')).toBeInTheDocument())
+    expect(await screen.findByText('Claude Code')).toBeInTheDocument()
+    expect(agentCalls).toBeGreaterThanOrEqual(2)
+  })
+
   it('does not report daemon success when the terminal runtime state contains an error', async () => {
     let runtimeControlCalls = 0
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {

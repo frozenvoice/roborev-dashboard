@@ -7,6 +7,7 @@ import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonActi
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
+type AgentsLoadOutcome = 'applied' | 'superseded' | 'rejected' | 'failed'
 
 const navigation = [
   ['Overview', LayoutDashboard], ['Reviews', ListChecks], ['Fix & Refine', ShieldCheck],
@@ -286,6 +287,7 @@ export function App() {
   const [loadedAgentsIdentity, setLoadedAgentsIdentity] = useState('')
   const [agentsLoading, setAgentsLoading] = useState(false)
   const [agentsError, setAgentsError] = useState('')
+  const [agentsReloadEpoch, setAgentsReloadEpoch] = useState(0)
   const [runtimeControl, setRuntimeControl] = useState<RuntimeControlState | null>(null)
   const [runtimeControlLoading, setRuntimeControlLoading] = useState(false)
   const [runtimeControlError, setRuntimeControlError] = useState('')
@@ -298,7 +300,12 @@ export function App() {
   const panelRefineReviewGeneration = useRef(0)
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
-  const agentsGeneration = useRef(0)
+  // Request generation only orders overlapping GET /api/agents calls. It is
+  // intentionally independent from the repository epoch so a same-repo
+  // refresh cannot make an in-flight health check look stale.
+  const agentsRequestGeneration = useRef(0)
+  const agentsRepositoryEpoch = useRef(0)
+  const previousAgentsRepositoryIdentity = useRef<string | null>(null)
   const runtimeControlGeneration = useRef(0)
   const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
@@ -307,13 +314,18 @@ export function App() {
   useEffect(() => {
     currentRepositoryIdentity.current = selectedRepositoryIdentity
     panelRefineReviewGeneration.current++
+    if (previousAgentsRepositoryIdentity.current !== selectedRepositoryIdentity) {
+      const hadPreviousSelection = previousAgentsRepositoryIdentity.current !== null
+      previousAgentsRepositoryIdentity.current = selectedRepositoryIdentity
+      if (hadPreviousSelection) agentsRepositoryEpoch.current++
+    }
   }, [selectedRepositoryIdentity])
 
   useEffect(() => {
     // Repository-scoped agent discovery must be invalidated before a new
     // response can commit. This also removes the old cards immediately while
     // the selected repository is being restored by the backend.
-    agentsGeneration.current++
+    agentsRequestGeneration.current++
     setAgents(null)
     setLoadedAgentsIdentity('')
     setAgentsError('')
@@ -362,22 +374,26 @@ export function App() {
       return null
     }
   }, [])
-  const loadAgents = useCallback(async (expectedIdentity: string = currentRepositoryIdentity.current) => {
-    const generation = ++agentsGeneration.current
+  const loadAgents = useCallback(async (expectedIdentity: string = currentRepositoryIdentity.current): Promise<AgentsLoadOutcome> => {
+    const generation = ++agentsRequestGeneration.current
     setAgentsLoading(true)
     try {
       const next = normalizeAgentsResponse(await request<unknown>('/api/agents'))
       if (!next) throw new APIError('The configured-agent response was malformed.')
-      if (generation !== agentsGeneration.current || !expectedIdentity || expectedIdentity !== currentRepositoryIdentity.current || next.repositoryIdentity !== expectedIdentity) return null
+      // Scope is authoritative even when this response lost the request
+      // ordering race. A superseded response from another repository must
+      // never be treated as a harmless same-repository refresh.
+      if (!expectedIdentity || expectedIdentity !== currentRepositoryIdentity.current || next.repositoryIdentity !== expectedIdentity) return 'rejected'
+      if (generation !== agentsRequestGeneration.current) return 'superseded'
       setAgents(next)
       setLoadedAgentsIdentity(expectedIdentity)
       setAgentsError('')
-      return next
+      return 'applied'
     } catch (error) {
-      if (generation === agentsGeneration.current && expectedIdentity === currentRepositoryIdentity.current) setAgentsError((error as Error).message)
-      return null
+      if (generation === agentsRequestGeneration.current && expectedIdentity === currentRepositoryIdentity.current) setAgentsError((error as Error).message)
+      return generation === agentsRequestGeneration.current ? 'failed' : 'superseded'
     } finally {
-      if (generation === agentsGeneration.current) setAgentsLoading(false)
+      if (generation === agentsRequestGeneration.current) setAgentsLoading(false)
     }
   }, [])
   const loadRuntimeControl = useCallback(async () => {
@@ -502,7 +518,7 @@ export function App() {
     }
     void poll()
     return () => { cancelled = true; runtimeControlGeneration.current++; if (timer) clearTimeout(timer) }
-  }, [activeNav, initialized, loadAgents, loadRuntimeControl, selectedRepositoryIdentity])
+  }, [activeNav, agentsReloadEpoch, initialized, loadAgents, loadRuntimeControl, selectedRepositoryIdentity])
   const setupPhase = setupState?.phase
   const previousSetupPhase = useRef<SetupState['phase'] | undefined>(undefined)
   useEffect(() => {
@@ -691,16 +707,20 @@ export function App() {
   }, [bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity, loadReviews, loadRuntimeControl, pollRuntimeOperation, toast])
   const runAgentCheck = useCallback(async (agent: string) => {
     const expectedIdentity = loadedAgentsIdentity
-    const startGeneration = agentsGeneration.current
+    const startRepositoryEpoch = agentsRepositoryEpoch.current
     if (!expectedIdentity || expectedIdentity !== selectedRepositoryIdentity) return
     setBusy(true)
     try {
       await request('/api/agents/check', { method: 'POST', body: JSON.stringify({ agent, repositoryIdentity: expectedIdentity }) })
-      if (expectedIdentity !== currentRepositoryIdentity.current || startGeneration !== agentsGeneration.current) return
-      const refreshed = await loadAgents(expectedIdentity)
-      if (refreshed && expectedIdentity === currentRepositoryIdentity.current) toast('success', `Agent check completed for ${agent}.`)
+      if (expectedIdentity !== currentRepositoryIdentity.current || startRepositoryEpoch !== agentsRepositoryEpoch.current) return
+      // A same-repository GET may supersede this request, but that is only
+      // request ordering. The health operation remains authoritative while
+      // the repository identity/epoch is unchanged; the newest same-scope
+      // GET owns the cards and completion still gets surfaced.
+      const reloadOutcome = await loadAgents(expectedIdentity)
+      if (expectedIdentity === currentRepositoryIdentity.current && startRepositoryEpoch === agentsRepositoryEpoch.current && (reloadOutcome === 'applied' || reloadOutcome === 'superseded')) toast('success', `Agent check completed for ${agent}.`)
     } catch (error) {
-      if (expectedIdentity !== currentRepositoryIdentity.current || startGeneration !== agentsGeneration.current) return
+      if (expectedIdentity !== currentRepositoryIdentity.current || startRepositoryEpoch !== agentsRepositoryEpoch.current) return
       toast('error', (error as Error).message)
       throw error
     } finally { setBusy(false) }
@@ -803,8 +823,10 @@ export function App() {
     panelGeneration.current++
     panelRefineGeneration.current++
     // Invalidate the old repository's agent cards immediately, before the
-    // asynchronous repository selection/bootstrap round trip completes.
-    agentsGeneration.current++
+    // asynchronous repository selection/bootstrap round trip completes. This
+    // is request ordering only; the repository epoch changes only once the
+    // authoritative bootstrap reports a different selected identity.
+    agentsRequestGeneration.current++
     setAgents(null)
     setLoadedAgentsIdentity('')
     setAgentsError('')
@@ -835,6 +857,7 @@ export function App() {
       const restored = data.repositories.find(item => item.identity === data.selectedRepositoryIdentity)
       if (!restored) throw new APIError('The selected repository metadata was missing from bootstrap.')
       setPanelLoadEpoch(epoch => epoch + 1)
+      setAgentsReloadEpoch(epoch => epoch + 1)
       if (selectError) toast('error', selectError.message)
       else toast('success', 'RoboRev state updated.')
       await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)

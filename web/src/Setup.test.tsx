@@ -38,6 +38,11 @@ describe('RoboRev setup', () => {
     await waitFor(() => expect(onCheck).toHaveBeenCalledWith('claude-code'))
   })
 
+  it('disables configured-agent refresh while a health check is busy', () => {
+    render(<Setup state={readySetup} agents={configuredAgents} busy onRefreshAgents={vi.fn().mockResolvedValue(undefined)} onCheckAgent={vi.fn().mockResolvedValue(undefined)} />)
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+  })
+
   it('keeps paused queue semantics and disables queue controls when offline or unknown', async () => {
     const onQueue = vi.fn().mockResolvedValue(undefined)
     const paused: RuntimeControlState = { ...runningRuntime, queueState: 'paused', canPause: false, canResume: true }

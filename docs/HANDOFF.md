@@ -1,6 +1,6 @@
 # Handoff
 
-마지막 갱신: 2026-08-18
+마지막 갱신: 2026-08-19
 
 ## 현재 상태
 
@@ -25,6 +25,7 @@
 - 설치 상태는 process-scoped manager가 소유하고 global operation gate가 setup과 Review/Rerun/comment/close/cancel/Panel Refine mutation의 동시 실행을 fail-fast 409로 막는다. 설치 뒤 daemon 시작이 실패해도 verified binary를 보존하고 재다운로드 없는 Start daemon retry를 제공한다.
 - Setup acceptance lifecycle hardening은 request 종료 뒤 install/retry가 process context에서 계속되고 Dashboard shutdown/ceiling에서 취소·wait·gate release되는 regression suite를 통과했다. Jobs 91/92/93과 후속 GPT review는 모두 PASS했다.
 - Agent Status + Runtime Control checkpoint는 exact v0.64.0 command descriptor와 safe global/local config merge로 zero-quota detection을 제공하고, 격리된 bounded Cursor identity probe로 Grok collision을 fail closed하며, 명시적으로 확인한 canonical agent 하나에만 quota-consuming `check-agents` smoke check를 허용한다. Queue는 official daemon status/pause/unpause API를 사용한다. Stop/Restart는 backend exact argv preview, transport-aware health verification, process-scoped lifecycle과 global runtime-control gate로 Setup/Panel Refine/mutation과 충돌을 막는다. 다른 RoboRev 버전은 agent/runtime contract를 실행하지 않는다.
+- Agent health check는 selected-repository 전용 read lease로 repository selection commit과 quota dispatch를 선형화하고, service의 single discovery에서 configured/detected eligibility를 재검증한다. Frontend의 repository epoch는 실제 identity 변경만 추적하고 GET generation은 same-repository latest-wins만 담당하므로 concurrent refresh와 failed repository switch 뒤에도 올바른 scope의 Agent cards와 completion 상태를 복원한다.
 - 자동 backend/frontend test와 production build에서는 fake HTTP/filesystem/process만 사용했으며 실제 RoboRev, GitHub release download, daemon 또는 LLM을 실행하지 않았다. 완성된 **Install & Start**의 실제 clean-machine E2E는 이 노트북의 missing-RoboRev 상태를 보존한 채 사용자 수동 검증을 기다린다.
 
 ## 결정

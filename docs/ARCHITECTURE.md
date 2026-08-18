@@ -42,6 +42,8 @@ Agent 목록은 exact v0.64.0 compatibility descriptor와 bounded config reader�
 
 `Detected`는 executable/config presence이고 `Checked`는 실제 smoke request 성공이다. `GET /api/agents`와 background refresh는 `check-agents` 또는 Agent.Review를 호출하지 않는다. 사용자가 canonical allowlist의 agent 하나를 confirmation한 `POST /api/agents/check`만 fixed `check-agents --agent <canonical> --timeout 60` argv를 request context에서 실행한다. CLI 내부 timeout보다 긴 bounded outer timeout을 두고 v0.64.0의 bounded single-agent output만 최소 parser로 분류하며 결과는 process memory에만 둔다. browser disconnect cancellation은 failure가 아니라 canceled/not-completed다. 설치되지 않았거나 exact v0.64.0이 아닌 runtime에서는 discovery/check를 fail closed해 다른 agent contract를 추측하지 않는다.
 
+Agent health check는 요청이 확인한 selected repository에 전용 read lease를 잡고 single authoritative discovery와 quota-bearing dispatch가 끝날 때까지 유지한다. repository selection commit만 같은 lease의 writer로 직렬화하며 Add, panel preference와 일반 registry read는 막지 않는다. Frontend는 repository identity 변경 epoch와 same-repository `GET /api/agents` request generation을 분리해 단순 refresh가 승인된 check completion을 무효화하지 않게 하고, 실제 repository 변경 또는 다른 scope 응답은 stale health reload와 toast를 거부한다.
+
 ### Runtime control lifecycle
 
 Queue state는 prompt/log를 포함하지 않는 official v0.64.0 daemon `GET /api/status`의 typed bounded `queue_paused` 필드에서 읽는다. Pause/Resume은 이미 healthy한 daemon에 `POST /api/queue/pause` 또는 `/api/queue/unpause`를 보내고 exact boolean response를 검증한다. CLI `pause`가 daemon을 암묵적으로 시작하는 경로와 RoboRev DB 직접 읽기는 사용하지 않는다. Pause 중에도 running job은 계속되고 새 queued job만 시작하지 않는다.

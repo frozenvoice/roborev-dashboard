@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -28,15 +30,6 @@ func (appAgentResolver) SameFile(left, right string) bool { return left == right
 type appIdentityProbe struct{}
 
 func (appIdentityProbe) Run(context.Context, string, []string) agentstatus.ProbeResult {
-	return agentstatus.ProbeResult{Output: "Cursor 1.0"}
-}
-
-type switchingIdentityProbe struct{ switchRepository func() }
-
-func (p switchingIdentityProbe) Run(context.Context, string, []string) agentstatus.ProbeResult {
-	if p.switchRepository != nil {
-		p.switchRepository()
-	}
 	return agentstatus.ProbeResult{Output: "Cursor 1.0"}
 }
 
@@ -186,7 +179,43 @@ func TestAgentHealthRechecksCurrentScopeEligibilityBeforeRunner(t *testing.T) {
 	}
 }
 
-func TestAgentHealthRejectsRepositorySwitchBeforeQuotaRunner(t *testing.T) {
+type blockingAgentChecker struct {
+	started chan struct{}
+	release chan struct{}
+	calls   int
+	repo    string
+}
+
+type failingAgentChecker struct{ calls int }
+
+func (c *failingAgentChecker) CheckAgent(_ context.Context, agent string) (roborev.AgentHealthResult, error) {
+	c.calls++
+	return roborev.AgentHealthResult{}, errors.New("fake checker failure")
+}
+
+func (c *failingAgentChecker) CheckAgentInRepo(_ context.Context, _, agent string) (roborev.AgentHealthResult, error) {
+	c.calls++
+	return roborev.AgentHealthResult{}, errors.New("fake checker failure")
+}
+
+func (c *blockingAgentChecker) CheckAgent(_ context.Context, agent string) (roborev.AgentHealthResult, error) {
+	c.calls++
+	return roborev.AgentHealthResult{Agent: agent, Status: roborev.AgentHealthPassed}, nil
+}
+
+func (c *blockingAgentChecker) CheckAgentInRepo(ctx context.Context, repo, agent string) (roborev.AgentHealthResult, error) {
+	c.calls++
+	c.repo = repo
+	close(c.started)
+	select {
+	case <-c.release:
+		return roborev.AgentHealthResult{Agent: agent, Status: roborev.AgentHealthPassed}, nil
+	case <-ctx.Done():
+		return roborev.AgentHealthResult{}, ctx.Err()
+	}
+}
+
+func TestAgentHealthSelectionLeaseSerializesConcurrentSelect(t *testing.T) {
 	registry := NewRegistry(fakeInspector{}, "")
 	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
 		t.Fatal(err)
@@ -197,27 +226,145 @@ func TestAgentHealthRejectsRepositorySwitchBeforeQuotaRunner(t *testing.T) {
 	if err := registry.Select(`E:\repo-a`); err != nil {
 		t.Fatal(err)
 	}
-	service := &fakeService{}
-	server, err := NewServer(service, registry, "")
+	server, err := NewServer(&fakeService{}, registry, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	global := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(global, []byte("[review.subagents.cursor]\nagent='cursor'\n"), 0o600); err != nil {
+	if err := os.WriteFile(global, []byte("[review.subagents.claude]\nagent='claude'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checker := &appHealthChecker{}
+	checker := &blockingAgentChecker{started: make(chan struct{}), release: make(chan struct{})}
 	server.Agents = agentstatus.NewServiceWithSeams(
 		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
-		appAgentResolver{paths: map[string]string{"agent": `C:\fake\cursor.exe`, "grok": `C:\fake\grok.exe`}},
-		switchingIdentityProbe{switchRepository: func() { _ = registry.Select(`E:\repo-b`) }},
+		appAgentResolver{paths: map[string]string{"claude": `C:\fake\claude.exe`}}, appIdentityProbe{},
 	)
-	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "cursor", gitx.RepositoryKey(`E:\repo-a`))))
+
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo-a`))))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		response <- recorder
+	}()
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("health checker did not start")
+	}
+	selected := make(chan error, 1)
+	go func() { selected <- registry.Select(`E:\repo-b`) }()
+	select {
+	case err := <-selected:
+		t.Fatalf("selection committed while health check was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(checker.release)
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusOK || checker.repo != `E:\repo-a` {
+			t.Fatalf("health response=%d checker repo=%q body=%s", recorder.Code, checker.repo, recorder.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health request did not complete")
+	}
+	select {
+	case err := <-selected:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("selection did not complete after health lease release")
+	}
+}
+
+func TestAgentHealthCancellationReleasesSelectionLease(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(&fakeService{}, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(global, []byte("[review.subagents.claude]\nagent='claude'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &blockingAgentChecker{started: make(chan struct{}), release: make(chan struct{})}
+	server.Agents = agentstatus.NewServiceWithSeams(
+		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		appAgentResolver{paths: map[string]string{"claude": `C:\fake\claude.exe`}}, appIdentityProbe{},
+	)
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo-a`)))).WithContext(requestCtx)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		response <- recorder
+	}()
+	select {
+	case <-checker.started:
+	case <-time.After(time.Second):
+		t.Fatal("health checker did not start")
+	}
+	cancel()
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("canceled health response=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled health request did not complete")
+	}
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatalf("selection lease leaked after cancellation: %v", err)
+	}
+}
+
+func TestAgentHealthCheckerFailureReleasesSelectionLease(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(&fakeService{}, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(global, []byte("[review.subagents.claude]\nagent='claude'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker := &failingAgentChecker{}
+	server.Agents = agentstatus.NewServiceWithSeams(
+		&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		appAgentResolver{paths: map[string]string{"claude": `C:\fake\claude.exe`}}, appIdentityProbe{},
+	)
+	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo-a`))))
 	request.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusConflict || checker.calls != 0 {
-		t.Fatalf("repository switch accepted check: status=%d calls=%d body=%s", recorder.Code, checker.calls, recorder.Body.String())
+	if recorder.Code != http.StatusBadGateway || checker.calls != 1 {
+		t.Fatalf("checker failure response=%d calls=%d body=%s", recorder.Code, checker.calls, recorder.Body.String())
+	}
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatalf("selection lease leaked after checker failure: %v", err)
 	}
 }
 

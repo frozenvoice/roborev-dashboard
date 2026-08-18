@@ -8,12 +8,13 @@ import (
 	"strings"
 
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
-	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
-var errAgentRepositoryChanged = errors.New("selected repository changed; refresh agent status and retry")
+// Kept as the handler-facing name for compatibility with existing tests; the
+// registry owns the selection lease and sentinel.
+var errAgentRepositoryChanged = errSelectedRepositoryChanged
 
 type configuredAgentDTO struct {
 	Name            string `json:"name"`
@@ -34,23 +35,16 @@ type agentsDTO struct {
 	Configured         []configuredAgentDTO `json:"configured"`
 }
 
-func (s *Server) currentAgentScope(ctx context.Context) (agentstatus.RepositoryScope, error) {
+func (s *Server) currentAgentScope(_ context.Context) (agentstatus.RepositoryScope, error) {
 	if s.Registry == nil {
 		return agentstatus.RepositoryScope{}, fmt.Errorf("repository registry is unavailable")
 	}
-	repo, err := s.Registry.Resolve("")
+	lease, err := s.Registry.acquireSelected("")
 	if err != nil {
 		return agentstatus.RepositoryScope{}, err
 	}
-	identity, err := s.Registry.Identity(repo)
-	if err != nil {
-		return agentstatus.RepositoryScope{}, err
-	}
-	return agentstatus.RepositoryScope{Root: repo, Identity: identity}, nil
-}
-
-func sameAgentScope(left, right agentstatus.RepositoryScope) bool {
-	return left.Identity == right.Identity && gitx.SameRepositoryPath(left.Root, right.Root)
+	defer lease.Release()
+	return agentstatus.RepositoryScope{Root: lease.path, Identity: lease.identity}, nil
 }
 
 func (s *Server) agentStatuses(w http.ResponseWriter, r *http.Request) {
@@ -138,51 +132,28 @@ func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent is not allowed", "agent")
 		return
 	}
-	scope, err := s.currentAgentScope(r.Context())
-	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "repository")
-		return
-	}
 	if strings.TrimSpace(body.RepositoryIdentity) == "" {
 		writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
 		return
 	}
-	if body.RepositoryIdentity != scope.Identity {
-		writeError(w, http.StatusConflict, "repository identity is stale; refresh agent status and retry", "repository")
+	if s.Registry == nil {
+		writeError(w, http.StatusConflict, "repository registry is unavailable", "repository")
 		return
 	}
-	statuses, err := s.Agents.Discover(r.Context(), scope)
+	lease, err := s.Registry.acquireSelected(body.RepositoryIdentity)
 	if err != nil {
-		writeError(w, http.StatusConflict, "agent configuration is unavailable: "+err.Error(), "agents")
+		writeError(w, http.StatusConflict, err.Error(), "repository")
 		return
 	}
+	defer lease.Release()
+	scope := agentstatus.RepositoryScope{Root: lease.path, Identity: lease.identity}
 	canonical, _ := roborev.CanonicalAgentName(body.Agent)
-	eligible := false
-	for _, status := range statuses {
-		if status.Name == canonical && status.Configured && status.Available {
-			eligible = true
-			break
-		}
-	}
-	if !eligible {
-		writeError(w, http.StatusConflict, "agent is not configured and detected for this repository", "agent")
-		return
-	}
-	// Re-resolve immediately before the quota-bearing runner. A stale browser
-	// card must not cause a check against a repository selected in the interim.
-	guard := func() error {
-		current, guardErr := s.currentAgentScope(r.Context())
-		if guardErr != nil {
-			return guardErr
-		}
-		if body.RepositoryIdentity != current.Identity || !sameAgentScope(scope, current) {
-			return errAgentRepositoryChanged
-		}
-		return nil
-	}
-	result, err := s.Agents.CheckInRepo(r.Context(), scope, canonical, guard)
+	// CheckInRepo is the single authoritative eligibility path: it performs
+	// exactly one bounded discovery, then dispatches the quota-bearing runner
+	// against this leased repository scope.
+	result, err := s.Agents.CheckInRepo(r.Context(), scope, canonical)
 	if err != nil {
-		if errors.Is(err, errAgentRepositoryChanged) {
+		if errors.Is(err, errAgentRepositoryChanged) || errors.Is(err, agentstatus.ErrDiscovery) || errors.Is(err, agentstatus.ErrIneligible) {
 			writeError(w, http.StatusConflict, err.Error(), "repository")
 			return
 		}

@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 )
@@ -173,6 +175,103 @@ func TestRegistryIdentityUsesSelectedAndPlatformKey(t *testing.T) {
 	}
 	if identity != gitx.RepositoryKey(`E:\Workspace\Repo`) {
 		t.Fatalf("identity = %q", identity)
+	}
+}
+
+func TestRegistrySelectedLeaseSnapshotsIdentityAndReleasesOnce(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.path != `E:\repo-a` || lease.identity != gitx.RepositoryKey(`E:\repo-a`) {
+		t.Fatalf("lease snapshot = path %q identity %q", lease.path, lease.identity)
+	}
+	lease.Release()
+	lease.Release()
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatalf("selection remained locked after once-safe release: %v", err)
+	}
+	if _, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`)); !errors.Is(err, errSelectedRepositoryChanged) {
+		t.Fatalf("stale lease acquisition err=%v", err)
+	}
+}
+
+func TestRegistryOrdinaryReadsAreNotBlockedByPendingSelectionWriter(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := make(chan error, 1)
+	go func() { selected <- registry.Select(`E:\repo-b`) }()
+	// Wait until the writer is observably pending. TryRLock fails for new
+	// readers once a writer is queued, while the existing health lease remains
+	// held. This avoids relying on a fixed scheduler-dependent sleep.
+	writerPending := false
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !registry.selectionMu.TryRLock() {
+			writerPending = true
+			break
+		}
+		registry.selectionMu.RUnlock()
+		runtime.Gosched()
+	}
+	if !writerPending {
+		lease.Release()
+		select {
+		case <-selected:
+		default:
+		}
+		t.Fatal("selection writer did not become pending")
+	}
+	resolved := make(chan error, 1)
+	go func() {
+		_, resolveErr := registry.Resolve("")
+		resolved <- resolveErr
+	}()
+	select {
+	case err := <-resolved:
+		if err != nil {
+			t.Fatalf("ordinary Resolve failed while selection writer waited: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary Resolve was blocked by selection writer")
+	}
+	panel := make(chan error, 1)
+	go func() {
+		_, _, panelErr := registry.PanelSelection("")
+		panel <- panelErr
+	}()
+	select {
+	case err := <-panel:
+		if err != nil {
+			t.Fatalf("ordinary PanelSelection failed while selection writer waited: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ordinary PanelSelection was blocked by selection writer")
+	}
+	lease.Release()
+	select {
+	case err := <-selected:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("selection did not complete after lease release")
 	}
 }
 

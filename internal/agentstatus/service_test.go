@@ -227,6 +227,46 @@ func TestCheckRequiresConfiguredAndDetectedAgentBeforeRunner(t *testing.T) {
 	}
 }
 
+func TestCheckClassifiesDiscoveryAndEligibilityBeforeRunner(t *testing.T) {
+	root := t.TempDir()
+	checker := &fakeHealthChecker{}
+	missingConfig := filepath.Join(t.TempDir(), "missing.toml")
+	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: missingConfig}, checker,
+		fakeExecutableResolver{paths: map[string]string{"codex": "codex.exe"}}, &fakeProbeRunner{})
+	_, err := service.Check(context.Background(), RepositoryScope{Root: root, Identity: "repo-a"}, "codex")
+	if !errors.Is(err, ErrIneligible) || checker.calls != 0 {
+		t.Fatalf("unconfigured check err=%v calls=%d", err, checker.calls)
+	}
+
+	invalidConfig := filepath.Join(t.TempDir(), "invalid.toml")
+	writeAgentConfig(t, invalidConfig, "[invalid")
+	service = NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: invalidConfig}, checker,
+		fakeExecutableResolver{paths: map[string]string{"codex": "codex.exe"}}, &fakeProbeRunner{})
+	_, err = service.Check(context.Background(), RepositoryScope{Root: root, Identity: "repo-a"}, "codex")
+	if !errors.Is(err, ErrDiscovery) || checker.calls != 0 {
+		t.Fatalf("discovery failure err=%v calls=%d", err, checker.calls)
+	}
+}
+
+func TestCheckPerformsOneAuthoritativeDiscoveryAndCursorProbe(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(t.TempDir(), "config.toml")
+	writeAgentConfig(t, global, "[review.subagents.cursor]\nagent='cursor'\n")
+	checker := &fakeHealthChecker{}
+	probe := &fakeProbeRunner{results: map[string]ProbeResult{"--version": {Output: "Cursor 1.0"}}}
+	service := NewServiceWithSeams(&roborev.PanelResolver{GlobalConfigPath: global}, checker,
+		fakeExecutableResolver{paths: map[string]string{"agent": "cursor.exe"}}, probe)
+	if _, err := service.Check(context.Background(), RepositoryScope{Root: root, Identity: "repo-a"}, "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if checker.calls != 1 {
+		t.Fatalf("checker calls=%d, want 1", checker.calls)
+	}
+	if !reflect.DeepEqual(probe.calls, [][]string{{"--version"}}) {
+		t.Fatalf("identity probe calls=%#v, want one version probe", probe.calls)
+	}
+}
+
 func TestCheckGuardStopsSelectionRaceBeforeRunner(t *testing.T) {
 	global := filepath.Join(t.TempDir(), "config.toml")
 	writeAgentConfig(t, global, "[review.subagents.codex]\nagent='codex'\n")

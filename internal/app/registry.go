@@ -30,6 +30,12 @@ type registryConfig struct {
 }
 
 type Registry struct {
+	// selectionMu protects the selected repository independently from the
+	// broader registry state.  Whenever both locks are needed they are always
+	// acquired in selectionMu -> mu order.  This lets a long-running operation
+	// hold a selected-repository read lease without blocking unrelated registry
+	// reads and writes.
+	selectionMu     sync.RWMutex
 	mu              sync.RWMutex
 	paths           map[string]string
 	selected        string
@@ -161,6 +167,8 @@ func (r *Registry) Resolve(path string) (string, error) {
 }
 
 func (r *Registry) Select(path string) error {
+	r.selectionMu.Lock()
+	defer r.selectionMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	resolved, ok := r.paths[registryKey(path)]
@@ -296,4 +304,50 @@ func (r *Registry) Identity(path string) (string, error) {
 	return registryKey(resolved), nil
 }
 
-func (r *Registry) Selected() string { r.mu.RLock(); defer r.mu.RUnlock(); return r.selected }
+func (r *Registry) Selected() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.selected
+}
+
+var errSelectedRepositoryChanged = errors.New("selected repository changed; refresh agent status and retry")
+
+// selectedRepositoryLease keeps the selected repository stable while an
+// operation that was explicitly accepted for that repository is running.
+// Release is once-safe so all cancellation/error paths can defer it without
+// risking an unlock panic.
+type selectedRepositoryLease struct {
+	path     string
+	identity string
+	once     sync.Once
+	release  func()
+}
+
+func (l *selectedRepositoryLease) Release() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() {
+		if l.release != nil {
+			l.release()
+		}
+	})
+}
+
+// acquireSelected obtains a read lease for the currently selected repository
+// and snapshots its path and platform-aware identity atomically.  The expected
+// identity is checked while the lease is held, so callers can safely dispatch
+// a repository-scoped operation without a selection/dispatch race.
+func (r *Registry) acquireSelected(expectedIdentity string) (*selectedRepositoryLease, error) {
+	r.selectionMu.RLock()
+	r.mu.RLock()
+	path := r.selected
+	identity := registryKey(path)
+	if path == "" || (strings.TrimSpace(expectedIdentity) != "" && identity != expectedIdentity) {
+		r.mu.RUnlock()
+		r.selectionMu.RUnlock()
+		return nil, errSelectedRepositoryChanged
+	}
+	r.mu.RUnlock()
+	return &selectedRepositoryLease{path: path, identity: identity, release: r.selectionMu.RUnlock}, nil
+}
