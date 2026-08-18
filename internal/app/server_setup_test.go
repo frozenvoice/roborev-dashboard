@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -50,6 +51,28 @@ type setupInstaller struct{ target string }
 
 func (i setupInstaller) Target() string                          { return i.target }
 func (i setupInstaller) Install(context.Context) (string, error) { return i.target, nil }
+
+type requestLifecycleSetupInstaller struct {
+	target   string
+	started  chan struct{}
+	release  chan struct{}
+	canceled chan struct{}
+}
+
+func (i *requestLifecycleSetupInstaller) Target() string { return i.target }
+func (i *requestLifecycleSetupInstaller) Install(ctx context.Context) (string, error) {
+	close(i.started)
+	select {
+	case <-ctx.Done():
+		close(i.canceled)
+		return "", ctx.Err()
+	case <-i.release:
+		if err := os.WriteFile(i.target, []byte("fake RoboRev binary"), 0o700); err != nil {
+			return "", err
+		}
+		return i.target, nil
+	}
+}
 
 type countingSetupInstaller struct {
 	target string
@@ -121,6 +144,86 @@ func TestSetupInstallReturnsAcceptedStateAndStatusEndpoint(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("setup status = %d", recorder.Code)
 	}
+}
+
+func TestSetupInstallHTTPResponseDoesNotCancelAcceptedOperation(t *testing.T) {
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":true}`))
+	}))
+	defer health.Close()
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	client, err := roborev.NewClient("", setupRunner{}, health.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := &requestLifecycleSetupInstaller{
+		target:   filepath.Join(t.TempDir(), "roborev.exe"),
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	manager, err := setup.NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServerWithSetup(client, registry, "", operation.NewGate(), manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/setup/roborev/install", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		response.Body.Close()
+		t.Fatalf("install status = %d", response.StatusCode)
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-installer.started
+	select {
+	case <-installer.canceled:
+		t.Fatal("accepted install canceled when HTTP request ended")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(installer.release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		getResponse, getErr := http.Get(httpServer.URL + "/api/setup/roborev")
+		if getErr == nil {
+			var state setup.State
+			decodeErr := json.NewDecoder(getResponse.Body).Decode(&state)
+			_ = getResponse.Body.Close()
+			if decodeErr == nil && getResponse.StatusCode == http.StatusOK && state.Phase == setup.PhaseReady && !state.OperationActive {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("accepted install did not reach ready: %#v", manager.Status(context.Background()))
 }
 
 func TestSetupInstallConflictsWithSharedMutationGate(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 type Phase string
 
 const (
+	defaultSetupCeiling = 20 * time.Minute
+
 	PhaseIdle             Phase = "idle"
 	PhaseChecking         Phase = "checking"
 	PhaseDownloading      Phase = "downloading"
@@ -114,15 +116,16 @@ type Installer interface {
 type progressInstaller interface{ SetProgress(func(string, int)) }
 
 type Manager struct {
-	client      Prober
-	installer   Installer
-	mu          sync.RWMutex
-	state       State
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	gate        *operation.Gate
-	wait        func(context.Context, time.Duration) error
-	gateRelease func()
+	client       Prober
+	installer    Installer
+	mu           sync.RWMutex
+	state        State
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	gate         *operation.Gate
+	wait         func(context.Context, time.Duration) error
+	gateRelease  func()
+	setupCeiling time.Duration
 }
 
 func NewManager(client Prober, installer Installer) (*Manager, error) {
@@ -133,7 +136,7 @@ func NewManagerWithGate(client Prober, installer Installer, gate *operation.Gate
 	if client == nil || installer == nil {
 		return nil, errors.New("RoboRev setup dependencies are required")
 	}
-	m := &Manager{client: client, installer: installer, gate: gate, wait: waitSetupContext}
+	m := &Manager{client: client, installer: installer, gate: gate, wait: waitSetupContext, setupCeiling: defaultSetupCeiling}
 	m.state = m.newState(PhaseIdle)
 	if progress, ok := installer.(progressInstaller); ok {
 		progress.SetProgress(m.progress)
@@ -335,7 +338,13 @@ func (m *Manager) StartInstall(parent context.Context) (State, error) {
 		}
 		return state, ErrBusy
 	}
-	ctx, cancel := context.WithTimeout(parent, 20*time.Minute)
+	// Eligibility and validation above intentionally use the request context,
+	// but an accepted installation belongs to the dashboard process. A
+	// net/http request context is canceled as soon as its handler returns, so
+	// using it here would cancel a 202-accepted install when the browser closes
+	// the request. Keep the safety ceiling while detaching the operation from
+	// that request lifetime; Shutdown still calls m.cancel below.
+	ctx, cancel := context.WithTimeout(context.Background(), m.setupCeiling)
 	m.cancel = cancel
 	m.gateRelease = release
 	state := m.newState(PhaseChecking)
@@ -351,7 +360,10 @@ func (m *Manager) StartInstall(parent context.Context) (State, error) {
 	m.state = state
 	m.wg.Add(1)
 	m.mu.Unlock()
-	go m.install(ctx)
+	go func() {
+		defer cancel()
+		m.install(ctx)
+	}()
 	return state, nil
 }
 

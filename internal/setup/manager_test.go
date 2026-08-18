@@ -148,6 +148,116 @@ func TestMissingInstallRebindsAndStrictlyVerifies(t *testing.T) {
 	}
 }
 
+func TestInstallOutlivesRequestContextCancellation(t *testing.T) {
+	client := &fakeProber{}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	releaseInstall := make(chan struct{})
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	installer := &fakeInstaller{target: target, install: func(ctx context.Context) (string, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			close(canceled)
+			return "", ctx.Err()
+		case <-releaseInstall:
+			return target, nil
+		}
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	if _, err := manager.StartInstall(requestContext); err != nil {
+		t.Fatal(err)
+	}
+	// A completed HTTP handler cancels its request context. The accepted
+	// install must keep running on the manager-owned process context.
+	cancelRequest()
+	<-started
+	select {
+	case <-canceled:
+		t.Fatal("install canceled with request context")
+	case <-time.After(100 * time.Millisecond):
+	}
+	client.mu.Lock()
+	client.version = "v0.64.0"
+	client.mu.Unlock()
+	close(releaseInstall)
+	state := waitSetupLong(t, manager)
+	if state.Phase != PhaseReady {
+		t.Fatalf("state after request cancellation = %#v", state)
+	}
+}
+
+func TestRetryInstallOutlivesRequestContextCancellation(t *testing.T) {
+	client := &fakeProber{}
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	releaseInstall := make(chan struct{})
+	var calls int
+	var callsMu sync.Mutex
+	target := filepath.Join(t.TempDir(), "roborev.exe")
+	installer := &fakeInstaller{target: target, install: func(ctx context.Context) (string, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		if call == 1 {
+			return "", syscall.EACCES
+		}
+		close(started)
+		select {
+		case <-ctx.Done():
+			close(canceled)
+			return "", ctx.Err()
+		case <-releaseInstall:
+			return target, nil
+		}
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state := waitSetupLong(t, manager)
+	if state.Phase != PhaseFailed || !state.CanRetry {
+		t.Fatalf("initial retryable state = %#v", state)
+	}
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	if _, err := manager.Retry(requestContext); err != nil {
+		t.Fatal(err)
+	}
+	cancelRequest()
+	<-started
+	select {
+	case <-canceled:
+		t.Fatal("retry install canceled with request context")
+	case <-time.After(100 * time.Millisecond):
+	}
+	client.mu.Lock()
+	client.version = "v0.64.0"
+	client.mu.Unlock()
+	close(releaseInstall)
+	state = waitSetupLong(t, manager)
+	if state.Phase != PhaseReady {
+		t.Fatalf("retry state after request cancellation = %#v", state)
+	}
+}
+
 func TestSupportedVersionDoesNotDownloadAgain(t *testing.T) {
 	client := &fakeProber{binary: `C:\roborev.exe`, version: "v0.64.0"}
 	installer := &fakeInstaller{install: func(context.Context) (string, error) { return "", errors.New("must not download") }}
@@ -524,18 +634,76 @@ func waitSetupLong(t *testing.T, manager *Manager) State {
 func TestShutdownCancelsBackgroundInstall(t *testing.T) {
 	client := &fakeProber{}
 	started := make(chan struct{})
-	installer := &fakeInstaller{install: func(ctx context.Context) (string, error) { close(started); <-ctx.Done(); return "", ctx.Err() }}
-	manager, _ := NewManager(client, installer)
+	canceled := make(chan struct{})
+	gate := operation.NewGate()
+	installer := &fakeInstaller{install: func(ctx context.Context) (string, error) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return "", ctx.Err()
+	}}
+	manager, _ := NewManagerWithGate(client, installer, gate)
 	if _, err := manager.StartInstall(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	<-started
+	if _, err := gate.AcquireMutation(); !errors.Is(err, operation.ErrBusy) {
+		t.Fatalf("mutation during setup = %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := manager.Shutdown(ctx); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("installer did not observe shutdown cancellation")
+	}
 	if state := manager.stateCopy(); state.Phase != PhaseCanceled || state.FailureCode != "canceled" || state.Error == "" {
 		t.Fatalf("state = %#v", state)
+	}
+	release, err := gate.AcquireMutation()
+	if err != nil {
+		t.Fatalf("mutation after shutdown = %v", err)
+	}
+	release()
+}
+
+func TestInstallSafetyCeilingCancelsBackgroundOperation(t *testing.T) {
+	client := &fakeProber{}
+	started := make(chan struct{})
+	deadlineErr := make(chan error, 1)
+	installer := &fakeInstaller{install: func(ctx context.Context) (string, error) {
+		close(started)
+		<-ctx.Done()
+		deadlineErr <- ctx.Err()
+		return "", ctx.Err()
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.setupCeiling = 20 * time.Millisecond
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	if _, err := manager.StartInstall(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	state := waitSetupLong(t, manager)
+	select {
+	case err := <-deadlineErr:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("installer context error = %v, want deadline exceeded", err)
+		}
+	default:
+		t.Fatal("installer did not observe setup safety ceiling")
+	}
+	if state.Phase != PhaseCanceled || state.FailureCode != "canceled" {
+		t.Fatalf("timeout state = %#v", state)
 	}
 }
