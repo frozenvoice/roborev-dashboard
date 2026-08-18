@@ -454,16 +454,29 @@ func (s *Server) startPanelRefine(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := s.Refines.Start(r.Context(), refine.StartRequest{RepoPath: body.RepoPath, Panel: body.Panel, FixAgent: body.FixAgent, MaxFixAttempts: body.MaxFixAttempts, FinalPanel: body.FinalPanel})
 	if err != nil {
-		status := http.StatusConflict
-		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "between") || strings.Contains(err.Error(), "only the codex") {
-			status = http.StatusBadRequest
-		} else if strings.Contains(err.Error(), "installation is unavailable") || strings.Contains(err.Error(), "daemon is unavailable") || strings.Contains(err.Error(), "daemon is not running") {
-			status = http.StatusServiceUnavailable
-		}
-		writeError(w, status, err.Error(), "panel-refine")
+		writeError(w, panelRefineStartStatus(err), err.Error(), "panel-refine")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, run)
+}
+
+func panelRefineStartStatus(err error) int {
+	var typed *refine.StartError
+	if !errors.As(err, &typed) {
+		return http.StatusInternalServerError
+	}
+	switch typed.Kind {
+	case refine.StartInvalid:
+		return http.StatusBadRequest
+	case refine.StartForbidden:
+		return http.StatusForbidden
+	case refine.StartUnavailable:
+		return http.StatusServiceUnavailable
+	case refine.StartConflict:
+		return http.StatusConflict
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 func (s *Server) listPanelRefines(w http.ResponseWriter, r *http.Request) {

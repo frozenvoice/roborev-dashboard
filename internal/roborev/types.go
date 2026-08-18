@@ -12,14 +12,15 @@ type Installation struct {
 }
 
 type Capabilities struct {
-	ReviewEnqueueAPI bool `json:"reviewEnqueueApi"`
-	FrozenRerunAPI   bool `json:"frozenRerunApi"`
-	JobListAPI       bool `json:"jobListApi"`
-	PanelReview      bool `json:"panelReview"`
-	FixCommand       bool `json:"fixCommand"`
-	PanelMembersAPI  bool `json:"panelMembersApi"`
-	PromptLazyLoad   bool `json:"promptLazyLoad"`
-	RawLog           bool `json:"rawLog"`
+	ReviewEnqueueAPI   bool `json:"reviewEnqueueApi"`
+	FrozenRerunAPI     bool `json:"frozenRerunApi"`
+	JobListAPI         bool `json:"jobListApi"`
+	JobOutputStatusAPI bool `json:"jobOutputStatusApi"`
+	PanelReview        bool `json:"panelReview"`
+	FixCommand         bool `json:"fixCommand"`
+	PanelMembersAPI    bool `json:"panelMembersApi"`
+	PromptLazyLoad     bool `json:"promptLazyLoad"`
+	RawLog             bool `json:"rawLog"`
 }
 
 type JobMetadata struct {
@@ -53,6 +54,14 @@ type PanelEnqueueResponse struct {
 
 type SynthesisStatus struct {
 	JobMetadata
+}
+
+// JobOutputStatus is the bounded status prefix returned by RoboRev v0.64's
+// /api/job/output endpoint. The endpoint may contain very large output lines;
+// the adapter deliberately reads only through the status prefix.
+type JobOutputStatus struct {
+	JobID  int64  `json:"job_id"`
+	Status string `json:"status"`
 }
 
 type ReviewRequest struct {

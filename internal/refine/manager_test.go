@@ -95,7 +95,7 @@ type mutablePanels struct {
 type unsupportedReviewService struct{ ReviewService }
 
 func (unsupportedReviewService) Installation(context.Context) roborev.Installation {
-	return roborev.Installation{Installed: true, Version: "v0.63.0", Capabilities: roborev.Capabilities{PanelReview: true}}
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Capabilities: roborev.Capabilities{PanelReview: true, FixCommand: true}}
 }
 
 func (p *mutablePanels) Resolve(context.Context, string) (roborev.PanelCatalog, error) {
@@ -133,12 +133,65 @@ type fakeReviewService struct {
 	registry           RepositoryRegistry
 }
 
+type lightweightReviewService struct {
+	*fakeReviewService
+	mu            sync.Mutex
+	statuses      []string
+	statusCalls   int
+	metadataCalls int
+	metadata      roborev.JobMetadata
+	outputErrors  int
+	outputError   error
+	metadataError error
+}
+
+func (s *lightweightReviewService) JobOutputStatus(context.Context, int64) (roborev.JobOutputStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusCalls++
+	if s.outputErrors > 0 {
+		s.outputErrors--
+		if s.outputError == nil {
+			s.outputError = errors.New("temporary status transport")
+		}
+		return roborev.JobOutputStatus{}, s.outputError
+	}
+	status := "done"
+	if len(s.statuses) > 0 {
+		index := s.statusCalls - 1
+		if index >= len(s.statuses) {
+			index = len(s.statuses) - 1
+		}
+		status = s.statuses[index]
+	}
+	return roborev.JobOutputStatus{JobID: 1, Status: status}, nil
+}
+
+func (s *lightweightReviewService) JobMetadata(context.Context, int64) (roborev.JobMetadata, error) {
+	s.mu.Lock()
+	s.metadataCalls++
+	metadata := s.metadata
+	s.mu.Unlock()
+	return metadata, nil
+}
+func (s *lightweightReviewService) TerminalJobMetadata(context.Context, int64) (roborev.JobMetadata, error) {
+	s.mu.Lock()
+	s.metadataCalls++
+	metadata := s.metadata
+	metadataError := s.metadataError
+	s.mu.Unlock()
+	if metadataError != nil {
+		return roborev.JobMetadata{}, metadataError
+	}
+	return metadata, nil
+}
+
 func (s *fakeReviewService) Installation(context.Context) roborev.Installation {
 	status := s.installationStatus
 	if status == nil {
 		status = json.RawMessage(`{"running":true}`)
 	}
-	return roborev.Installation{Installed: true, Version: "v0.64.0", Error: s.installationError, Status: status, Capabilities: roborev.Capabilities{PanelReview: true, FixCommand: true}}
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Error: s.installationError, Status: status, Capabilities: roborev.Capabilities{PanelReview: true, FixCommand: true, JobOutputStatusAPI: true}}
 }
 func (s *fakeReviewService) ReviewPanel(_ context.Context, request roborev.ReviewRequest) (roborev.PanelEnqueueResponse, error) {
 	s.mu.Lock()
@@ -179,6 +232,39 @@ func (s *fakeReviewService) SynthesisStatus(context.Context, int64) (roborev.Syn
 		return roborev.SynthesisStatus{JobMetadata: roborev.JobMetadata{ID: receipt.ID, RepoPath: receipt.RepoPath, GitRef: receipt.GitRef, Branch: receipt.Branch, PanelName: receipt.PanelName, PanelRunUUID: receipt.PanelRunUUID, PanelRole: receipt.PanelRole, JobType: receipt.JobType, Status: "queued"}}, nil
 	}
 	return roborev.SynthesisStatus{JobMetadata: roborev.JobMetadata{ID: receipt.ID, RepoPath: receipt.RepoPath, GitRef: receipt.GitRef, Branch: receipt.Branch, PanelName: receipt.PanelName, PanelRunUUID: receipt.PanelRunUUID, PanelRole: receipt.PanelRole, JobType: receipt.JobType, Status: "done", Verdict: verdict}}, nil
+}
+func (s *fakeReviewService) JobOutputStatus(context.Context, int64) (roborev.JobOutputStatus, error) {
+	s.mu.Lock()
+	count := s.reviewCount
+	statusError := s.statusError
+	pending := s.statusPending
+	receipt := s.receipts[int64(count)]
+	hook := s.statusHook
+	s.statusHook = nil
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if statusError {
+		return roborev.JobOutputStatus{JobID: receipt.ID, Status: "done"}, nil
+	}
+	if pending {
+		return roborev.JobOutputStatus{JobID: receipt.ID, Status: "queued"}, nil
+	}
+	return roborev.JobOutputStatus{JobID: receipt.ID, Status: "done"}, nil
+}
+func (s *fakeReviewService) TerminalJobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	receipt := s.receipts[id]
+	verdict := "P"
+	if len(s.verdicts) >= int(id) {
+		verdict = s.verdicts[id-1]
+	}
+	if s.statusError {
+		verdict = "?"
+	}
+	return roborev.JobMetadata{ID: receipt.ID, RepoPath: receipt.RepoPath, GitRef: receipt.GitRef, Branch: receipt.Branch, PanelName: receipt.PanelName, PanelRunUUID: receipt.PanelRunUUID, PanelRole: receipt.PanelRole, JobType: receipt.JobType, Status: "done", Verdict: verdict}, nil
 }
 func (s *fakeReviewService) Fix(ctx context.Context, request roborev.FixRequest) error {
 	s.mu.Lock()
@@ -335,13 +421,13 @@ type blockingReviewService struct {
 	started chan struct{}
 }
 
-func (s *blockingReviewService) SynthesisStatus(ctx context.Context, _ int64) (roborev.SynthesisStatus, error) {
+func (s *blockingReviewService) JobOutputStatus(ctx context.Context, _ int64) (roborev.JobOutputStatus, error) {
 	select {
 	case s.started <- struct{}{}:
 	default:
 	}
 	<-ctx.Done()
-	return roborev.SynthesisStatus{}, ctx.Err()
+	return roborev.JobOutputStatus{}, ctx.Err()
 }
 
 func TestManagerCancelSignalsWorkerAndCleansReceipt(t *testing.T) {
@@ -531,6 +617,118 @@ func TestManagerBoundsStatusPollingErrors(t *testing.T) {
 	result := waitRun(t, manager, run.ID)
 	if result.Phase != PhaseFailed || result.StopReason != StopMalformedReviewStatus {
 		t.Fatalf("polling errors were not bounded: %#v", result)
+	}
+}
+
+func TestManagerMapsMalformedStatusAndTerminalMetadataToMalformedStop(t *testing.T) {
+	tests := []struct {
+		name          string
+		outputError   error
+		metadataError error
+	}{
+		{name: "status", outputError: roborev.ErrMalformedJobOutputStatus},
+		{name: "terminal metadata", metadataError: roborev.ErrMalformedJobMetadata},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := &fakeReviewService{verdicts: []string{"P"}}
+			service := &lightweightReviewService{fakeReviewService: base, statuses: []string{"done"}, outputErrors: 1, outputError: test.outputError, metadataError: test.metadataError}
+			service.metadata = roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
+			if test.metadataError != nil {
+				service.outputErrors = 0
+			}
+			manager, _ := newTestManager(t, base)
+			manager.service = service
+			manager.wait = func(context.Context, time.Duration) error { return nil }
+			defer manager.Shutdown(context.Background())
+			run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := waitRun(t, manager, run.ID)
+			if result.StopReason != StopMalformedReviewStatus {
+				t.Fatalf("stop reason=%s, want %s; result=%#v", result.StopReason, StopMalformedReviewStatus, result)
+			}
+		})
+	}
+}
+
+func TestManagerUsesBoundedOutputStatusAndFetchesTerminalMetadataOnce(t *testing.T) {
+	base := &fakeReviewService{verdicts: []string{"P"}}
+	service := &lightweightReviewService{fakeReviewService: base, statuses: []string{"running", "done"}}
+	service.metadata = roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
+	manager, _ := newTestManager(t, base)
+	manager.service = service
+	manager.wait = func(context.Context, time.Duration) error { return nil }
+	defer manager.Shutdown(context.Background())
+	run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := waitRun(t, manager, run.ID)
+	if result.Phase != PhasePassed || service.statusCalls < 2 || service.metadataCalls != 1 {
+		t.Fatalf("bounded status flow = phase=%s statusCalls=%d metadataCalls=%d", result.Phase, service.statusCalls, service.metadataCalls)
+	}
+}
+
+func TestTerminalPanelResultRejectsEveryReceiptIdentityAndTerminalMismatch(t *testing.T) {
+	request := roborev.ReviewRequest{RepoPath: `C:\repo`, GitRef: "head", Branch: "main", Panel: "cross"}
+	receipt := roborev.PanelEnqueueResponse{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "run-1", PanelRole: "synthesis", JobType: "synthesis"}
+	base := roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "run-1", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
+	cases := []struct {
+		name   string
+		mutate func(*roborev.JobMetadata)
+	}{
+		{name: "repository", mutate: func(value *roborev.JobMetadata) { value.RepoPath = `C:\other` }},
+		{name: "ref", mutate: func(value *roborev.JobMetadata) { value.GitRef = "other" }},
+		{name: "branch", mutate: func(value *roborev.JobMetadata) { value.Branch = "other" }},
+		{name: "panel", mutate: func(value *roborev.JobMetadata) { value.PanelName = "other" }},
+		{name: "run uuid", mutate: func(value *roborev.JobMetadata) { value.PanelRunUUID = "run-2" }},
+		{name: "role", mutate: func(value *roborev.JobMetadata) { value.PanelRole = "member" }},
+		{name: "job type", mutate: func(value *roborev.JobMetadata) { value.JobType = "review" }},
+		{name: "skipped", mutate: func(value *roborev.JobMetadata) { value.Skipped = true }},
+		{name: "status", mutate: func(value *roborev.JobMetadata) { value.Status = "failed" }},
+		{name: "verdict", mutate: func(value *roborev.JobMetadata) { value.Verdict = "?" }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			value := base
+			test.mutate(&value)
+			if _, err := terminalPanelResult(value, request, receipt); err == nil {
+				t.Fatal("terminal metadata mismatch was accepted")
+			}
+		})
+	}
+}
+
+func TestManagerRetriesGenericStatusTransportButNotPermanentContractErrors(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		outputErrors int
+		outputError  error
+		wantCalls    int
+	}{
+		{name: "transient transport", outputErrors: 2, wantCalls: 3},
+		{name: "malformed contract", outputErrors: 1, outputError: roborev.ErrMalformedJobOutputStatus, wantCalls: 1},
+		{name: "unsupported contract", outputErrors: 1, outputError: roborev.ErrUnsupportedJobOutputStatus, wantCalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := &fakeReviewService{verdicts: []string{"P"}}
+			service := &lightweightReviewService{fakeReviewService: base, outputErrors: test.outputErrors, outputError: test.outputError}
+			service.metadata = roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
+			manager, _ := newTestManager(t, base)
+			manager.service = service
+			manager.wait = func(context.Context, time.Duration) error { return nil }
+			defer manager.Shutdown(context.Background())
+			run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := waitRun(t, manager, run.ID)
+			if service.statusCalls != test.wantCalls {
+				t.Fatalf("status calls=%d, want %d; result=%#v", service.statusCalls, test.wantCalls, result)
+			}
+		})
 	}
 }
 
@@ -803,6 +1001,23 @@ func TestManagerStartPreflightRejectsDirtyUnregisteredUnsupportedAndInvalidPanel
 			}
 			if _, err := manager.Start(context.Background(), request); err == nil {
 				t.Fatal("invalid preflight was accepted")
+			} else {
+				var typed *StartError
+				if !errors.As(err, &typed) {
+					t.Fatalf("start error was not typed: %v", err)
+				}
+				want := StartInvalid
+				switch tc.name {
+				case "dirty":
+					want = StartConflict
+				case "unregistered":
+					want = StartForbidden
+				case "unsupported":
+					want = StartUnavailable
+				}
+				if typed.Kind != want {
+					t.Fatalf("start error kind=%s, want %s", typed.Kind, want)
+				}
 			}
 		})
 	}

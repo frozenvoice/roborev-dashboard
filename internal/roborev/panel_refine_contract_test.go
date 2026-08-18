@@ -5,11 +5,33 @@ import (
 	"encoding/json"
 	"errors"
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+type countedResponseBody struct {
+	data  []byte
+	reads int
+}
+
+func (b *countedResponseBody) Read(p []byte) (int, error) {
+	b.reads += len(p)
+	if len(b.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	return n, nil
+}
+func (b *countedResponseBody) Close() error { return nil }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestDecodePanelEnqueueResponseRequiresExactSynthesisShape(t *testing.T) {
 	request := ReviewRequest{RepoPath: `C:\repo`, GitRef: "head-1", Branch: "main", Panel: "dashboard_cross"}
@@ -62,8 +84,16 @@ func TestSynthesisStatusUsesExactIDEndpointAndExpandedMetadata(t *testing.T) {
 			_, _ = w.Write([]byte(`{"healthy":true}`))
 			return
 		}
+		if r.URL.Path == "/api/job/output" {
+			if r.URL.Query().Get("job_id") != "42" {
+				t.Fatalf("unexpected status query: %s", r.URL.String())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"job_id":42,"status":"done","lines":["large tail"],"has_more":false}`))
+			return
+		}
 		if r.URL.Path != "/api/jobs" || r.URL.Query().Get("id") != "42" || r.URL.Query().Get("limit") != "1" || r.URL.Query().Get("omit_prompt") != "true" {
-			t.Fatalf("unexpected status query: %s", r.URL.String())
+			t.Fatalf("unexpected metadata query: %s", r.URL.String())
 		}
 		_, _ = w.Write([]byte(`{"jobs":[{"id":42,"repo_path":"C:\\repo","git_ref":"head-1","branch":"main","panel_name":"dashboard_cross","panel_run_uuid":"00000000-0000-0000-0000-000000000042","panel_role":"synthesis","job_type":"synthesis","status":"done","verdict":"P"}]}`))
 	}))
@@ -72,6 +102,105 @@ func TestSynthesisStatusUsesExactIDEndpointAndExpandedMetadata(t *testing.T) {
 	status, err := client.SynthesisStatus(context.Background(), 42)
 	if err != nil || status.ID != 42 || status.JobType != "synthesis" || status.Verdict != "P" {
 		t.Fatalf("status = %#v, err = %v", status, err)
+	}
+}
+
+func TestJobOutputStatusReadsOnlyOrderedPrefix(t *testing.T) {
+	client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
+	tail := strings.Repeat("secret prompt and review lines ", 200_000)
+	body := &countedResponseBody{data: []byte(`{"job_id":42,"status":"running","lines":["`)}
+	body.data = append(body.data, []byte(tail)...)
+	body.data = append(body.data, []byte(`"],"has_more":false}`)...)
+	client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, Request: request}, nil
+	})
+	status, err := client.JobOutputStatus(context.Background(), 42)
+	if err != nil || status.Status != "running" || body.reads >= len(tail) {
+		t.Fatalf("status=%#v err=%v bytes-read=%d tail=%d", status, err, body.reads, len(tail))
+	}
+}
+
+func TestJobOutputStatusFailsClosedForMalformedOrderWrongIDAndUnsupportedVersion(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+		want error
+	}{
+		{name: "wrong order", data: `{"status":"done","job_id":42,"lines":[]}`, want: ErrMalformedJobOutputStatus},
+		{name: "wrong id", data: `{"job_id":43,"status":"done","lines":[]}`, want: ErrMalformedJobOutputStatus},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
+			client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(test.data)), Request: request}, nil
+			})
+			_, err := client.JobOutputStatus(context.Background(), 42)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v, want %v", err, test.want)
+			}
+		})
+	}
+	unsupported := newMutationClient(t, "v0.65.0", "http://127.0.0.1:7373")
+	if _, err := unsupported.JobOutputStatus(context.Background(), 42); !errors.Is(err, ErrUnsupportedJobOutputStatus) {
+		t.Fatalf("unsupported v0.65 status error = %v", err)
+	}
+	for _, statusCode := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
+		client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: statusCode, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"status"}`)), Request: request}, nil
+		})
+		_, err := client.JobOutputStatus(context.Background(), 42)
+		if statusCode == http.StatusNotFound && !errors.Is(err, ErrUnsupportedJobOutputStatus) {
+			t.Fatalf("4xx error=%v, want permanent contract error", err)
+		}
+		if statusCode == http.StatusInternalServerError && errors.Is(err, ErrUnsupportedJobOutputStatus) {
+			t.Fatalf("5xx error=%v, unexpectedly classified as permanent contract error", err)
+		}
+	}
+}
+
+func TestTerminalJobMetadataBoundsOverflowAndMalformedPayloads(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "overflow", body: `{"jobs":[{"id":42,"prompt":"` + strings.Repeat("x", 300<<10) + `"}]}`},
+		{name: "malformed", body: `{"jobs":[`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
+			client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(test.body)), Request: request}, nil
+			})
+			if _, err := client.TerminalJobMetadata(context.Background(), 42); !errors.Is(err, ErrMalformedJobMetadata) {
+				t.Fatalf("error=%v, want malformed metadata", err)
+			}
+		})
+	}
+}
+
+func TestJobOutputStatusPropagatesCancellationAndDeadline(t *testing.T) {
+	client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
+	client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, err := client.JobOutputStatus(ctx, 42); done <- err }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled status request did not return")
+	}
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer deadlineCancel()
+	if _, err := client.JobOutputStatus(deadlineCtx, 42); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline error=%v", err)
 	}
 }
 

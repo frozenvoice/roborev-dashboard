@@ -42,6 +42,23 @@ function renderPanel(overrides: Partial<PanelRefineProps> = {}) {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('PanelRefine', () => {
+  it('synchronizes a late panel discovery without overwriting an open dialog selection', async () => {
+    const user = userEvent.setup()
+    const view = renderPanel({ panelConfiguration: null })
+    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeDisabled()
+    view.rerender(<PanelRefine {...view.props} panelConfiguration={configuration} />)
+    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Panel Refine' }))
+    const iteration = screen.getByLabelText('Iteration panel')
+    expect(iteration).toHaveValue('dashboard_cross')
+    await user.selectOptions(iteration, 'dashboard_deep')
+    const changedConfiguration = { ...configuration, selectedPanel: 'dashboard_deep' }
+    view.rerender(<PanelRefine {...view.props} panelConfiguration={changedConfiguration} />)
+    expect(screen.getByLabelText('Iteration panel')).toHaveValue('dashboard_deep')
+    view.rerender(<PanelRefine {...view.props} panelConfiguration={{ ...configuration, selectedPanel: 'dashboard_cross' }} />)
+    expect(screen.getByLabelText('Iteration panel')).toHaveValue('dashboard_deep')
+  })
+
   it('opens a dialog with valid named panels, codex default, attempts and exact start body', async () => {
     const user = userEvent.setup()
     const onStart = vi.fn(async () => undefined)

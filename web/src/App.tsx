@@ -284,8 +284,15 @@ export function App() {
   const runtimeGeneration = useRef(0)
   const panelGeneration = useRef(0)
   const repoSwitchGeneration = useRef(0)
+  const panelRefineReviewGeneration = useRef(0)
+  const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
   const repo = bootstrap?.repositories.find(item => item.identity === selectedRepositoryIdentity)
+
+  useEffect(() => {
+    currentRepositoryIdentity.current = selectedRepositoryIdentity
+    panelRefineReviewGeneration.current++
+  }, [selectedRepositoryIdentity])
 
   const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
   const loadReviews = useCallback(async (repo?: string, identity?: string) => {
@@ -338,22 +345,22 @@ export function App() {
       const raw = await request<unknown>(`/api/panel-refines?repo=${encodeURIComponent(repoPath)}`)
       if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray((raw as Record<string, unknown>).runs)) {
         if (generation === panelRefineGeneration.current) setPanelRefineError('The Panel Refine response was malformed.')
-        return null
+        return { run: null, ok: false }
       }
       const envelope = raw as { runs: unknown[] }
       const payload = normalizePanelRefineResponse(envelope)
       if (envelope.runs.length > 0 && payload.runs.length === 0) throw new APIError('The Panel Refine response contained no valid runs.')
-      if (generation !== panelRefineGeneration.current) return null
+      if (generation !== panelRefineGeneration.current) return { run: null, ok: false }
       const next = payload.run && payload.run.repositoryIdentity === identity ? payload.run : null
       if (payload.run && !next) throw new APIError('The Panel Refine response belonged to a different repository.')
       setPanelRefineRun(next)
       setPanelRefineOptions(payload.options)
       setPanelRefineError('')
-      return next
+      return { run: next, ok: true }
     } catch (error) {
       if (generation !== panelRefineGeneration.current) return null
       setPanelRefineError((error as Error).message)
-      return null
+      return { run: null, ok: false }
     } finally {
       if (generation === panelRefineGeneration.current) setPanelRefineLoading(false)
     }
@@ -364,7 +371,7 @@ export function App() {
       .catch(error => toast('error', (error as Error).message))
       .finally(() => { setInitialized(true); setLoading(false) })
   }, [loadBootstrap, toast])
-  useEffect(() => () => { reviewActionGeneration.current++; repoSwitchGeneration.current++ }, [])
+  useEffect(() => () => { reviewActionGeneration.current++; repoSwitchGeneration.current++; panelRefineReviewGeneration.current++ }, [])
   useEffect(() => {
     panelGeneration.current++
     if (!initialized || !repo) {
@@ -390,9 +397,17 @@ export function App() {
     let observedActive = isPanelRefineActive(panelRefineRun)
     let observedPhase = panelRefineRun?.phase
     let observedHead = panelRefineRun?.currentHead
+    let retryDelay = 2_000
     const poll = async () => {
-      const next = await loadPanelRefine(repo.path, repo.identity)
+      const loaded = await loadPanelRefine(repo.path, repo.identity)
       if (cancelled) return
+      if (!loaded?.ok) {
+        timer = setTimeout(poll, retryDelay)
+        retryDelay = Math.min(30_000, retryDelay * 2)
+        return
+      }
+      retryDelay = 2_000
+      const next = loaded.run
       const changed = Boolean(next && (next.phase !== observedPhase || next.currentHead !== observedHead))
       if (next && (changed || !isPanelRefineActive(next)) && (observedActive || next.phase === 'passed' || next.phase === 'needs_attention' || next.phase === 'failed' || next.phase === 'cancelled')) {
         void request<Bootstrap>('/api/bootstrap').then(data => {
@@ -556,9 +571,10 @@ export function App() {
     const existing = jobs.find(job => idOf(job) === id)
     if (existing) { setSelected(existing); return }
     const identity = selectedRepositoryIdentity
+    const generation = ++panelRefineReviewGeneration.current
     void request<ReviewJob>(`/api/reviews/${encodeURIComponent(id)}`).then(value => {
-      if (identity === selectedRepositoryIdentity) setSelected({ ...value, id, job_id: id })
-    }).catch(error => toast('error', (error as Error).message))
+      if (generation === panelRefineReviewGeneration.current && identity === currentRepositoryIdentity.current) setSelected({ ...value, id, job_id: id })
+    }).catch(error => { if (generation === panelRefineReviewGeneration.current && identity === currentRepositoryIdentity.current) toast('error', (error as Error).message) })
   }
   const switchRepo = async (identity: string) => {
     const target = bootstrap?.repositories.find(item => item.identity === identity)
@@ -566,6 +582,7 @@ export function App() {
     const generation = ++repoSwitchGeneration.current
     setRepoSwitching(true)
     reviewActionGeneration.current++
+    panelRefineReviewGeneration.current++
     reviewGeneration.current++
     panelGeneration.current++
     panelRefineGeneration.current++
@@ -610,8 +627,9 @@ export function App() {
 
   const reviewSupported = Boolean(bootstrap?.roborev?.capabilities?.reviewEnqueueApi)
   const panelRefineActive = isPanelRefineActive(panelRefineRun)
-  const panelRefineAvailable = Boolean(bootstrap?.roborev?.installed && daemonRunning && bootstrap.roborev.capabilities.panelReview && bootstrap.roborev.capabilities.fixCommand)
-  const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? 'RoboRev is not installed.' : !daemonRunning ? 'The RoboRev daemon is not running.' : !bootstrap.roborev.capabilities.panelReview ? 'This RoboRev version does not support panel review.' : !bootstrap.roborev.capabilities.fixCommand ? 'This RoboRev version does not support the typed fix command.' : ''
+  const panelOutputStatusAvailable = bootstrap?.roborev?.capabilities?.jobOutputStatusApi === true
+  const panelRefineAvailable = Boolean(bootstrap?.roborev?.installed && daemonRunning && bootstrap.roborev.capabilities.panelReview && bootstrap.roborev.capabilities.fixCommand && panelOutputStatusAvailable)
+  const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? 'RoboRev is not installed.' : !daemonRunning ? 'The RoboRev daemon is not running.' : !bootstrap.roborev.capabilities.panelReview ? 'This RoboRev version does not support panel review.' : !bootstrap.roborev.capabilities.fixCommand ? 'This RoboRev version does not support the typed fix command.' : !panelOutputStatusAvailable ? 'This RoboRev version does not support the bounded panel status contract.' : ''
   const reviewsReady = !canPollReviews || !selectedRepositoryIdentity || loadedReviewIdentity === selectedRepositoryIdentity
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
   return <div className="shell">

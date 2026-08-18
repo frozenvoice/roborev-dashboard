@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,16 +22,16 @@ type blockingAppRefineService struct {
 type offlineAppRefineService struct{ *fakeService }
 
 func (offlineAppRefineService) Installation(context.Context) roborev.Installation {
-	return roborev.Installation{Installed: true, Version: "v0.64.0", Status: json.RawMessage(`{"running":false}`), Capabilities: roborev.Capabilities{PanelReview: true, FixCommand: true}}
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Status: json.RawMessage(`{"running":false}`), Capabilities: roborev.Capabilities{PanelReview: true, FixCommand: true, JobOutputStatusAPI: true}}
 }
 
-func (s *blockingAppRefineService) SynthesisStatus(ctx context.Context, _ int64) (roborev.SynthesisStatus, error) {
+func (s *blockingAppRefineService) JobOutputStatus(ctx context.Context, _ int64) (roborev.JobOutputStatus, error) {
 	select {
 	case s.started <- struct{}{}:
 	default:
 	}
 	<-ctx.Done()
-	return roborev.SynthesisStatus{}, ctx.Err()
+	return roborev.JobOutputStatus{}, ctx.Err()
 }
 
 func newEndpointRefineManager(t *testing.T, server *Server, service refine.ReviewService) *refine.Manager {
@@ -218,7 +219,7 @@ func TestPanelRefineStartRejectsAttemptsAndUnknownPanel(t *testing.T) {
 		want int
 	}{
 		{name: "attempts", body: `{"repoPath":"E:\\repo","panel":"dashboard_cross","maxFixAttempts":11}`, want: http.StatusBadRequest},
-		{name: "panel", body: `{"repoPath":"E:\\repo","panel":"missing"}`, want: http.StatusConflict},
+		{name: "panel", body: `{"repoPath":"E:\\repo","panel":"missing"}`, want: http.StatusBadRequest},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
@@ -243,5 +244,27 @@ func TestPanelRefineStartMapsOfflineDaemonToServiceUnavailable(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("offline start status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPanelRefineStartStatusUsesTypedKindNotMessage(t *testing.T) {
+	for _, test := range []struct {
+		kind refine.StartErrorKind
+		want int
+	}{
+		{kind: refine.StartInvalid, want: http.StatusBadRequest},
+		{kind: refine.StartForbidden, want: http.StatusForbidden},
+		{kind: refine.StartConflict, want: http.StatusConflict},
+		{kind: refine.StartUnavailable, want: http.StatusServiceUnavailable},
+		{kind: refine.StartInternal, want: http.StatusInternalServerError},
+	} {
+		t.Run(string(test.kind), func(t *testing.T) {
+			if got := panelRefineStartStatus(&refine.StartError{Kind: test.kind, Err: errors.New("same detail")}); got != test.want {
+				t.Fatalf("status=%d, want %d", got, test.want)
+			}
+		})
+	}
+	if got := panelRefineStartStatus(errors.New("invalid request")); got != http.StatusInternalServerError {
+		t.Fatalf("untyped status=%d, want 500", got)
 	}
 }

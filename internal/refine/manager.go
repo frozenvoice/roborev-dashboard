@@ -121,6 +121,37 @@ type StartRequest struct {
 	FinalPanel     string `json:"finalPanel"`
 }
 
+type StartErrorKind string
+
+const (
+	StartInvalid     StartErrorKind = "invalid"
+	StartForbidden   StartErrorKind = "forbidden"
+	StartUnavailable StartErrorKind = "unavailable"
+	StartConflict    StartErrorKind = "conflict"
+	StartInternal    StartErrorKind = "internal"
+)
+
+// StartError carries stable HTTP classification separately from its user-facing
+// detail. Callers must not infer policy from error strings.
+type StartError struct {
+	Kind StartErrorKind
+	Err  error
+}
+
+func (e *StartError) Error() string {
+	if e == nil || e.Err == nil {
+		return string(StartInternal)
+	}
+	return e.Err.Error()
+}
+func (e *StartError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+func startError(kind StartErrorKind, err error) error { return &StartError{Kind: kind, Err: err} }
+
 type RepositoryRegistry interface {
 	Resolve(string) (string, error)
 	Contains(string) bool
@@ -130,7 +161,8 @@ type RepositoryRegistry interface {
 
 type ReviewService interface {
 	Installation(context.Context) roborev.Installation
-	SynthesisStatus(context.Context, int64) (roborev.SynthesisStatus, error)
+	JobOutputStatus(context.Context, int64) (roborev.JobOutputStatus, error)
+	TerminalJobMetadata(context.Context, int64) (roborev.JobMetadata, error)
 	ReviewPanel(context.Context, roborev.ReviewRequest) (roborev.PanelEnqueueResponse, error)
 	Fix(context.Context, roborev.FixRequest) error
 	Cancel(context.Context, int64) error
@@ -145,6 +177,11 @@ type Dependencies struct {
 	Wait         func(context.Context, time.Duration) error
 	HistoryLimit int
 }
+
+var (
+	ErrPanelConfigurationUnavailable = errors.New("panel configuration is unavailable")
+	ErrPanelUnavailable              = errors.New("panel is not currently available")
+)
 
 const (
 	defaultFixAttempts = 3
@@ -221,54 +258,63 @@ func newID() string {
 
 func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRefineRun, error) {
 	if m == nil || m.registry == nil || m.panels == nil || m.service == nil {
-		return nil, errors.New("panel refine manager is unavailable")
+		return nil, startError(StartUnavailable, errors.New("panel refine manager is unavailable"))
 	}
 	if strings.TrimSpace(request.FixAgent) == "" {
 		request.FixAgent = "codex"
 	}
 	if request.FixAgent != "codex" {
-		return nil, errors.New("only the codex fix agent is supported")
+		return nil, startError(StartInvalid, errors.New("only the codex fix agent is supported"))
 	}
 	if request.MaxFixAttempts == 0 {
 		request.MaxFixAttempts = defaultFixAttempts
 	}
 	if request.MaxFixAttempts < 1 || request.MaxFixAttempts > 10 {
-		return nil, errors.New("maxFixAttempts must be between 1 and 10")
+		return nil, startError(StartInvalid, errors.New("maxFixAttempts must be between 1 and 10"))
 	}
 	if strings.TrimSpace(request.Panel) == "" {
-		return nil, errors.New("panel is required")
+		return nil, startError(StartInvalid, errors.New("panel is required"))
 	}
 	installation := m.service.Installation(parent)
 	if err := validateInstallation(installation); err != nil {
-		return nil, err
+		return nil, startError(StartUnavailable, err)
 	}
-	if !installation.Capabilities.PanelReview || !installation.Capabilities.FixCommand {
-		return nil, errors.New("RoboRev version does not support Panel Refine")
+	if !installation.Capabilities.PanelReview || !installation.Capabilities.FixCommand || !installation.Capabilities.JobOutputStatusAPI {
+		return nil, startError(StartUnavailable, errors.New("RoboRev version does not support Panel Refine"))
 	}
 	path, err := m.registry.Resolve(request.RepoPath)
 	if err != nil {
-		return nil, err
+		if strings.TrimSpace(request.RepoPath) == "" {
+			return nil, startError(StartInvalid, err)
+		}
+		return nil, startError(StartForbidden, err)
 	}
 	repo, err := m.registry.Inspect(parent, path)
 	if err != nil {
-		return nil, fmt.Errorf("repository state is unavailable: %w", err)
+		return nil, startError(StartUnavailable, fmt.Errorf("repository state is unavailable: %w", err))
 	}
 	if repo.Dirty {
-		return nil, errors.New("Panel Refine requires a clean working tree")
+		return nil, startError(StartConflict, errors.New("Panel Refine requires a clean working tree"))
 	}
 	if !m.registry.Contains(repo.Path) {
-		return nil, errors.New("repository is not registered")
+		return nil, startError(StartForbidden, errors.New("repository is not registered"))
 	}
 	identity, err := m.registry.Identity(repo.Path)
 	if err != nil {
-		return nil, err
+		return nil, startError(StartInternal, err)
 	}
 	if err := m.validatePanel(parent, repo.Path, request.Panel); err != nil {
-		return nil, err
+		if errors.Is(err, ErrPanelConfigurationUnavailable) {
+			return nil, startError(StartUnavailable, err)
+		}
+		return nil, startError(StartInvalid, err)
 	}
 	if request.FinalPanel != "" {
 		if err := m.validatePanel(parent, repo.Path, request.FinalPanel); err != nil {
-			return nil, err
+			if errors.Is(err, ErrPanelConfigurationUnavailable) {
+				return nil, startError(StartUnavailable, err)
+			}
+			return nil, startError(StartInvalid, err)
 		}
 		if request.FinalPanel == request.Panel {
 			request.FinalPanel = ""
@@ -278,11 +324,11 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	m.mu.Lock()
 	if existing := m.locks[identity]; existing != "" {
 		m.mu.Unlock()
-		return nil, errors.New("a Panel Refine is already active for this repository")
+		return nil, startError(StartConflict, errors.New("a Panel Refine is already active for this repository"))
 	}
 	if m.leases[identity] != "" {
 		m.mu.Unlock()
-		return nil, errors.New("repository has an active review mutation")
+		return nil, startError(StartConflict, errors.New("repository has an active review mutation"))
 	}
 	id := newID()
 	now := time.Now().UTC()
@@ -329,28 +375,14 @@ func (m *Manager) AcquireReviewLease(path string) (func(), error) {
 	}, nil
 }
 
-func (m *Manager) IsActive(path string) bool {
-	resolved, err := m.registry.Resolve(path)
-	if err != nil {
-		return false
-	}
-	identity, err := m.registry.Identity(resolved)
-	if err != nil {
-		return false
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.locks[identity] != ""
-}
-
 func (m *Manager) validatePanel(ctx context.Context, path, name string) error {
 	catalog, err := m.panels.Resolve(ctx, path)
 	if err != nil {
-		return fmt.Errorf("panel configuration is unavailable: %w", err)
+		return fmt.Errorf("%w: %v", ErrPanelConfigurationUnavailable, err)
 	}
 	panel, ok := catalog.Find(name)
 	if !ok || !panel.Valid || panel.Kind != "panel" {
-		return errors.New("panel is not currently available")
+		return ErrPanelUnavailable
 	}
 	return nil
 }
@@ -439,6 +471,9 @@ func (m *Manager) execute(ctx context.Context, id string) {
 func classifyReviewStop(err error) StopReason {
 	if strings.Contains(err.Error(), "malformed panel review receipt") {
 		return StopMalformedReviewReceipt
+	}
+	if errors.Is(err, roborev.ErrMalformedJobOutputStatus) || errors.Is(err, roborev.ErrMalformedJobMetadata) {
+		return StopMalformedReviewStatus
 	}
 	if strings.Contains(err.Error(), "malformed panel status") || strings.Contains(err.Error(), "unknown panel review status") || strings.Contains(err.Error(), "no P/F verdict") || strings.Contains(err.Error(), "status identity") {
 		return StopMalformedReviewStatus
@@ -549,8 +584,11 @@ func (m *Manager) verifyReviewTarget(ctx context.Context, id, targetHead string)
 func (m *Manager) poll(ctx context.Context, request roborev.ReviewRequest, receipt roborev.PanelEnqueueResponse) (string, error) {
 	statusErrors := 0
 	for {
-		status, err := m.service.SynthesisStatus(ctx, receipt.ID)
+		prefix, err := m.service.JobOutputStatus(ctx, receipt.ID)
 		if err != nil {
+			if errors.Is(err, roborev.ErrMalformedJobOutputStatus) || errors.Is(err, roborev.ErrUnsupportedJobOutputStatus) {
+				return "", err
+			}
 			statusErrors++
 			if statusErrors > 3 {
 				return "", errors.New("panel status polling failed repeatedly")
@@ -561,12 +599,20 @@ func (m *Manager) poll(ctx context.Context, request roborev.ReviewRequest, recei
 			continue
 		}
 		statusErrors = 0
-		result, terminal, err := panelStatus(status, request, receipt)
-		if err != nil {
-			return "", err
+		if prefix.JobID != receipt.ID {
+			return "", errors.New("panel status identity does not match review receipt")
 		}
-		if terminal {
-			return result, nil
+		switch prefix.Status {
+		case "queued", "running":
+			// Active output is deliberately not decoded beyond the prefix.
+		case "done":
+			job, err := m.terminalMetadata(ctx, receipt.ID)
+			if err != nil {
+				return "", err
+			}
+			return terminalPanelResult(job, request, receipt)
+		default:
+			return "", fmt.Errorf("unknown panel review status: %s", prefix.Status)
 		}
 		if err := m.wait(ctx, m.pollInterval); err != nil {
 			return "", err
@@ -574,25 +620,39 @@ func (m *Manager) poll(ctx context.Context, request roborev.ReviewRequest, recei
 	}
 }
 
-func panelStatus(status roborev.SynthesisStatus, request roborev.ReviewRequest, receipt roborev.PanelEnqueueResponse) (string, bool, error) {
-	job := status.JobMetadata
-	if job.ID != receipt.ID || !gitx.SameRepositoryPath(job.RepoPath, request.RepoPath) || job.GitRef != request.GitRef || job.Branch != request.Branch || job.PanelName != request.Panel || job.PanelRunUUID != receipt.PanelRunUUID || job.PanelRole != "synthesis" || job.JobType != "synthesis" || job.Skipped {
-		return "", false, errors.New("panel status identity does not match review receipt")
-	}
-	switch job.Status {
-	case "queued", "running":
-		return "", false, nil
-	case "done":
-		switch job.Verdict {
-		case "P":
-			return "P", true, nil
-		case "F":
-			return "F", true, nil
-		default:
-			return "", false, errors.New("panel synthesis has no P/F verdict")
+func (m *Manager) terminalMetadata(ctx context.Context, id int64) (roborev.JobMetadata, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		job, err := m.service.TerminalJobMetadata(ctx, id)
+		if err == nil {
+			return job, nil
 		}
+		if errors.Is(err, roborev.ErrMalformedJobMetadata) || errors.Is(err, roborev.ErrUnsupportedJobMetadata) {
+			return roborev.JobMetadata{}, fmt.Errorf("terminal panel metadata lookup failed: %w", err)
+		}
+		if attempt == 3 {
+			return roborev.JobMetadata{}, fmt.Errorf("terminal panel metadata lookup failed repeatedly: %w", err)
+		}
+		if waitErr := m.wait(ctx, time.Duration(attempt+1)*time.Second); waitErr != nil {
+			return roborev.JobMetadata{}, waitErr
+		}
+	}
+	return roborev.JobMetadata{}, errors.New("terminal panel metadata lookup failed repeatedly")
+}
+
+func terminalPanelResult(job roborev.JobMetadata, request roborev.ReviewRequest, receipt roborev.PanelEnqueueResponse) (string, error) {
+	if job.ID != receipt.ID || !gitx.SameRepositoryPath(job.RepoPath, request.RepoPath) || job.GitRef != request.GitRef || job.Branch != request.Branch || job.PanelName != request.Panel || job.PanelRunUUID != receipt.PanelRunUUID || job.PanelRole != "synthesis" || job.JobType != "synthesis" || job.Skipped {
+		return "", errors.New("panel status identity does not match review receipt")
+	}
+	if job.Status != "done" {
+		return "", fmt.Errorf("unknown panel review status: %s", job.Status)
+	}
+	switch job.Verdict {
+	case "P":
+		return "P", nil
+	case "F":
+		return "F", nil
 	default:
-		return "", false, errors.New("unknown panel review status")
+		return "", errors.New("panel synthesis has no P/F verdict")
 	}
 }
 

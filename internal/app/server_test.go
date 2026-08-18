@@ -64,7 +64,7 @@ type fakeService struct {
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
 	f.installationCalls++
-	return roborev.Installation{Installed: true, Version: "v0.64.0", Capabilities: roborev.Capabilities{ReviewEnqueueAPI: true, FrozenRerunAPI: true, JobListAPI: true, PanelReview: true, FixCommand: true}, Status: json.RawMessage(`{"running":true,"known":true}`)}
+	return roborev.Installation{Installed: true, Version: "v0.64.0", Capabilities: roborev.Capabilities{ReviewEnqueueAPI: true, FrozenRerunAPI: true, JobListAPI: true, JobOutputStatusAPI: true, PanelReview: true, FixCommand: true}, Status: json.RawMessage(`{"running":true,"known":true}`)}
 }
 func (f *fakeService) List(context.Context, string, int) (json.RawMessage, error) {
 	return json.RawMessage(`[]`), nil
@@ -75,6 +75,16 @@ func (f *fakeService) SynthesisStatus(_ context.Context, id int64) (roborev.Synt
 		path = `E:\repo`
 	}
 	return roborev.SynthesisStatus{JobMetadata: roborev.JobMetadata{ID: id, RepoPath: path, GitRef: "abcdef123456", Branch: "main", PanelName: "dashboard_cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}}, nil
+}
+func (f *fakeService) JobOutputStatus(_ context.Context, id int64) (roborev.JobOutputStatus, error) {
+	return roborev.JobOutputStatus{JobID: id, Status: "done"}, nil
+}
+func (f *fakeService) TerminalJobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
+	path := f.repoPath
+	if path == "" {
+		path = `E:\repo`
+	}
+	return roborev.JobMetadata{ID: id, RepoPath: path, GitRef: "abcdef123456", Branch: "main", PanelName: "dashboard_cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}, nil
 }
 func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
 	path := f.repoPath

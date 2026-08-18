@@ -93,11 +93,15 @@ export function PanelRefine({ repoPath, panelConfiguration, options, run, availa
   const defaultAttempts = options?.defaultMaxFixAttempts ?? 3
 
   useEffect(() => {
-    if (!dialogOpen) return
+    if (dialogOpen) return
     setIterationPanel(defaultPanel)
+  }, [defaultPanel, dialogOpen])
+
+  useEffect(() => {
+    if (!dialogOpen) return
     setFinalPanel('')
     setMaxFixAttempts(defaultAttempts)
-  }, [defaultAttempts, defaultPanel, dialogOpen])
+  }, [defaultAttempts, dialogOpen])
 
   const start = async () => {
     if (!repoPath || !iterationPanel) return
@@ -112,11 +116,12 @@ export function PanelRefine({ repoPath, panelConfiguration, options, run, availa
   const active = isActive(run)
   const terminal = Boolean(run && terminalPhases.includes(run.phase))
   const optionsReady = Boolean(options && options.executable && options.args.length && options.allowedFixAgents.includes('codex') && options.defaultFixAgent === 'codex' && options.defaultMaxFixAttempts >= options.minFixAttempts && options.defaultMaxFixAttempts <= options.maxFixAttempts)
-  const canStart = Boolean(available && optionsReady && panels.length && iterationPanel && repoPath && !loading && maxFixAttempts >= (options?.minFixAttempts ?? 1) && maxFixAttempts <= (options?.maxFixAttempts ?? 10))
+  const canOpen = Boolean(available && optionsReady && panels.length && repoPath && !loading)
+  const canStart = Boolean(canOpen && panels.some(panel => panel.name === iterationPanel) && maxFixAttempts >= (options?.minFixAttempts ?? 1) && maxFixAttempts <= (options?.maxFixAttempts ?? 10))
   const title = run?.phase === 'passed' ? 'Panel Refine passed' : run?.phase === 'needs_attention' ? 'Panel Refine needs attention' : run?.phase === 'failed' ? 'Panel Refine failed' : run?.phase === 'cancelled' ? 'Panel Refine cancelled' : 'Panel Refine'
   return <section className="panel-refine" aria-label="Panel Refine">
     {!available && disabledReason && <p className="refine-disabled-reason" role="status">Panel Refine unavailable: {disabledReason}</p>}
-    <div className="section-heading refine-heading"><div><span className="eyebrow">Automated quality gate</span><h2>Panel Refine</h2><p>Repeat the selected panel review, apply a Codex fix, and verify each new HEAD.</p></div><button className="button primary" disabled={busy || active || !canStart} onClick={() => setDialogOpen(true)}><ShieldCheck size={16} />Panel Refine</button></div>
+    <div className="section-heading refine-heading"><div><span className="eyebrow">Automated quality gate</span><h2>Panel Refine</h2><p>Repeat the selected panel review, apply a Codex fix, and verify each new HEAD.</p></div><button className="button primary" disabled={busy || active || !canOpen} onClick={() => setDialogOpen(true)}><ShieldCheck size={16} />Panel Refine</button></div>
     {error && <p className="refine-inline-error" role="alert">Panel Refine could not be refreshed: {error}</p>}
     {loading && !run && <div className="skeleton" />}
     {run && <article className={`refine-card ${phaseTone(run.phase)}`}>

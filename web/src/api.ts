@@ -20,6 +20,7 @@ export type Installation = {
     reviewEnqueueApi: boolean
     frozenRerunApi: boolean
     jobListApi: boolean
+    jobOutputStatusApi: boolean
     panelReview: boolean
     fixCommand: boolean
     panelMembersApi: boolean
