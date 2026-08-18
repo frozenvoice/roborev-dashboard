@@ -1,13 +1,13 @@
 # Handoff
 
-마지막 갱신: 2026-08-17
+마지막 갱신: 2026-08-18
 
 ## 현재 상태
 
 - 새 Git 저장소를 `main` branch로 초기화했다.
 - 설치된 RoboRev v0.64.0의 command surface와 upstream v0.64.0 source를 조사했다.
 - `AGENTS.md`, review 지침, architecture와 capability matrix를 작성했다.
-- Windows에 Go 1.26.5를 설치했다. 현재 shell PATH 갱신 전에는 `C:\Program Files\Go\bin\go.exe`를 사용할 수 있다.
+- 소스 개발 bootstrap을 `scripts/prerequisites.ps1`, `scripts/install.ps1`로 분리했다. 전자는 정의·검사만 수행하고, 후자는 allowlist된 Git/Node.js LTS/Go만 winget으로 설치한 뒤 현재 프로세스 PATH를 갱신하고 `npm ci`를 실행한다. `scripts/build.ps1`, `scripts/test.ps1`, `scripts/dev.ps1`는 공통 prerequisite assertion이 반환한 절대 npm/go 경로만 사용하며 RoboRev를 검사하거나 실행하지 않는다.
 - Checkpoint A/B vertical slice와 후속 hardening을 `fb88aa9`, `cff6d45`, `d3ed6b2`, `666086c`, `ea1174b`로 commit했다.
 - RoboRev panel jobs 13, 17, 21, 25, 29, 33, 37, 41의 finding을 재현·분류했고, Jobs 58, 59, 60은 Codex/Claude/Grok 모두 PASS했다. 실제 수정과 근거는 `docs/REVIEW-FINDINGS.md`에 있다.
 - `39ae550`은 Jobs 58/59/60 quality gate를 통과한 기준 commit이다.
@@ -31,6 +31,7 @@
 - Fix Prompt는 terminal F single/synthesis/individual member의 bounded `show --json` subset으로 로컬에서 결정적으로 생성하며 LLM이나 mutation을 호출하지 않는다.
 - review list는 각 요청 완료 4초 뒤, 작은 `/api/runtime` health 상태는 각 요청 완료 10초 뒤 다음 poll을 예약한다. `/api/runtime`은 repository inspect/list를 수행하지 않는다. `status --json`과 `list --json`은 full prompt/diff를 포함할 수 있어 polling에 사용하지 않는다.
 - `roborev init`은 post-commit hook과 daemon start를 함께 수행하므로 자동 호출하지 않는다. `.roborev.toml`을 직접 관리하고 manual panel review를 사용한다.
+- 릴리스 exe는 embed된 frontend assets만 사용하므로 Go/Node.js/npm 없이 실행할 수 있다. RoboRev가 없는 runtime도 Dashboard와 Setup 상태까지는 열리지만, 현재 onboarding이 RoboRev를 자동 설치하지 않는다.
 
 ## 다음 작업
 

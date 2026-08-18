@@ -4,13 +4,32 @@ RoboRev Dashboard는 기존 [`roborev`](https://github.com/kenn-io/roborev) CLI/
 
 현재 목표는 Windows 11 Tier 1의 단일 실행 파일과 핵심 review workflow다. 설치된 RoboRev를 런타임에 감지하고 repository/HEAD 상태, repository별 panel 선택, 결과와 member 상태, comment/close/reopen/cancel, prompt/log lazy-load와 finding용 Fix Prompt를 제공한다.
 
-## 개발 요구사항
+## 새 clone에서 개발 시작
 
-- Go 1.24 이상
+소스에서 Dashboard를 빌드하려면 Windows 개발 도구가 필요하다.
+
+- Git
 - Node.js 22 이상과 npm
-- dogfood smoke test에만 RoboRev v0.64.0 이상
+- Go 1.24 이상
+
+새 checkout에서는 다음 순서로 검사·설치 계획을 확인하고 개발 의존성을 준비한다.
+
+```powershell
+git clone <repository-url>
+Set-Location roborev-dashboard
+.\scripts\install.ps1
+.\scripts\test.ps1
+.\scripts\build.ps1
+.\dist\roborev-dashboard.exe
+```
+
+`install.ps1`은 정의된 Git/Node.js LTS/Go 패키지만 Windows Package Manager로 설치하거나 업그레이드하고, 현재 PowerShell 프로세스의 PATH만 새로 합친다. 이후 `web` 의존성을 `npm ci`로 설치한다. 이 과정은 RoboRev를 검사하거나 설치하거나 실행하지 않는다. winget이 필요 없는 상태라면 winget을 요구하지 않는다.
 
 자동 테스트는 실제 RoboRev나 LLM을 호출하지 않는다.
+
+## 릴리스 실행 요구사항
+
+배포된 `roborev-dashboard.exe`에는 frontend assets가 embed되어 있으므로 Go, Node.js, npm 같은 개발 도구가 필요 없다. review workflow를 사용하려면 실행 시점에 Git과 RoboRev daemon/CLI를 별도로 설치해야 한다. RoboRev가 없어도 Dashboard 자체는 시작되며 Setup이 필요하다는 상태를 보여주지만, 현재 runtime onboarding이 RoboRev를 자동 설치하지는 않는다. RoboRev 설치 onboarding은 향후 작업으로 계획되어 있다.
 
 ## 실행
 

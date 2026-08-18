@@ -1,14 +1,14 @@
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction Stop).Path
+. (Join-Path $PSScriptRoot 'prerequisites.ps1')
 . (Join-Path $PSScriptRoot 'native-command.ps1')
-$goPath = (Get-Command go -ErrorAction SilentlyContinue).Source
-if (-not $goPath) { $goPath = 'C:\Program Files\Go\bin\go.exe' }
+$tooling = Assert-DevelopmentPrerequisites -RootPath $root
 
 Push-Location $root
 try {
-    Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('--prefix', 'web', 'run', 'build')
+    Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'run', 'build')
     New-Item -ItemType Directory -Force -Path dist | Out-Null
-    Invoke-NativeCommand -FilePath $goPath -ArgumentList @('build', '-trimpath', '-ldflags', '-s -w', '-o', 'dist\roborev-dashboard.exe', './cmd/dashboard')
+    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList @('build', '-trimpath', '-ldflags', '-s -w', '-o', 'dist\roborev-dashboard.exe', './cmd/dashboard')
     Write-Host "Built $root\dist\roborev-dashboard.exe"
 } finally {
     Pop-Location

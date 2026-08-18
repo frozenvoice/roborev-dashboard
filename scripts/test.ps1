@@ -1,14 +1,17 @@
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot
+$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction Stop).Path
+. (Join-Path $PSScriptRoot 'prerequisites.ps1')
 . (Join-Path $PSScriptRoot 'native-command.ps1')
-$goPath = (Get-Command go -ErrorAction SilentlyContinue).Source
-if (-not $goPath) { $goPath = 'C:\Program Files\Go\bin\go.exe' }
+
+# Keep the bootstrap contract itself deterministic and independently testable.
+& (Join-Path $PSScriptRoot 'prerequisites.tests.ps1')
+$tooling = Assert-DevelopmentPrerequisites -RootPath $root
 
 Push-Location $root
 try {
-    Invoke-NativeCommand -FilePath $goPath -ArgumentList @('test', './...')
-    Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('--prefix', 'web', 'test', '--', '--run')
-    Invoke-NativeCommand -FilePath 'npm' -ArgumentList @('--prefix', 'web', 'run', 'build')
+    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList @('test', './...')
+    Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'test', '--', '--run')
+    Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'run', 'build')
 } finally {
     Pop-Location
 }

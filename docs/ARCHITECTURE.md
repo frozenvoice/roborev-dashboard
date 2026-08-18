@@ -20,7 +20,7 @@ RoboRev daemon -> RoboRev-owned storage
 
 ### 단일 실행 파일
 
-Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 포함한다. 최종 사용자는 Node나 Go 없이 `roborev-dashboard.exe` 하나만 실행한다. 개발 스크립트는 frontend build 후 Go build 순서를 보장한다.
+Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 포함한다. 최종 사용자는 Node나 Go 없이 `roborev-dashboard.exe` 하나만 실행한다. 개발 스크립트는 frontend build 후 Go build 순서를 보장한다. 소스 bootstrap은 이 runtime 경계와 분리되어 개발 도구만 준비하며 RoboRev를 설치하거나 실행하지 않는다. RoboRev runtime onboarding은 별도 향후 capability다.
 
 ### transport
 
