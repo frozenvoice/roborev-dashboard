@@ -1,0 +1,303 @@
+package app
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/froze/roborev-dashboard/internal/roborev"
+	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
+)
+
+type appRuntimeAdapter struct {
+	mu             sync.Mutex
+	online         bool
+	paused         bool
+	restartStarted chan struct{}
+	restartRelease chan struct{}
+	restartCancel  chan struct{}
+}
+
+func (a *appRuntimeAdapter) DaemonHealth(context.Context) (bool, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.online, nil
+}
+func (a *appRuntimeAdapter) StartDaemon(context.Context) error {
+	a.mu.Lock()
+	a.online = true
+	a.mu.Unlock()
+	return nil
+}
+func (a *appRuntimeAdapter) StopDaemon(context.Context) error {
+	a.mu.Lock()
+	a.online = false
+	a.mu.Unlock()
+	return nil
+}
+func (a *appRuntimeAdapter) RestartDaemon(ctx context.Context) error {
+	if a.restartStarted != nil {
+		close(a.restartStarted)
+	}
+	if a.restartRelease != nil {
+		select {
+		case <-ctx.Done():
+			if a.restartCancel != nil {
+				close(a.restartCancel)
+			}
+			return ctx.Err()
+		case <-a.restartRelease:
+		}
+	}
+	a.mu.Lock()
+	a.online = true
+	a.mu.Unlock()
+	return nil
+}
+func (a *appRuntimeAdapter) QueueStatus(context.Context) (roborev.QueueState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.online {
+		return roborev.QueueState{}, roborev.ErrDaemonOffline
+	}
+	return roborev.QueueState{Known: true, Paused: a.paused}, nil
+}
+func (a *appRuntimeAdapter) SetQueuePaused(_ context.Context, paused bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.online {
+		return roborev.ErrDaemonOffline
+	}
+	a.paused = paused
+	return nil
+}
+
+func replaceRuntimeManager(t *testing.T, server *Server, adapter *appRuntimeAdapter) {
+	t.Helper()
+	if err := server.Runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := runtimecontrol.NewManagerWithDependencies(runtimecontrol.Dependencies{
+		Adapter: adapter, Gate: server.Gate, Timeout: time.Second,
+		RetryDelays: []time.Duration{time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Runtime = manager
+}
+
+func TestQueueControlUsesAuthorizationGateAndTypedState(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	adapter := &appRuntimeAdapter{online: true}
+	replaceRuntimeManager(t, server, adapter)
+
+	request := httptest.NewRequest(http.MethodPost, "/api/runtime-control/queue/pause", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("pause without CSRF = %d", recorder.Code)
+	}
+
+	release, err := server.Gate.AcquireRefine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/runtime-control/queue/pause", nil)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	release()
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("pause during refine = %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/runtime-control/queue/pause", nil)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("pause = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response runtimeControlDTO
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.QueueState != "paused" || !response.CanResume || response.CanPause {
+		t.Fatalf("pause state = %#v", response)
+	}
+}
+
+func TestDaemonRestartSurvivesCompletedHTTPRequestAndShutdownCancelsActiveWork(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	adapter := &appRuntimeAdapter{restartStarted: make(chan struct{}), restartRelease: make(chan struct{}), restartCancel: make(chan struct{})}
+	replaceRuntimeManager(t, server, adapter)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	request, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/daemon/restart", strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	request.Header.Set("Origin", httpServer.URL)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("restart status = %d", response.StatusCode)
+	}
+	select {
+	case <-adapter.restartStarted:
+	case <-time.After(time.Second):
+		t.Fatal("restart did not start")
+	}
+	select {
+	case <-adapter.restartCancel:
+		t.Fatal("completed HTTP request canceled accepted restart")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		shutdownDone <- server.Shutdown(ctx)
+	}()
+	select {
+	case <-adapter.restartCancel:
+	case <-time.After(time.Second):
+		t.Fatal("Dashboard shutdown did not cancel restart")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Dashboard shutdown did not wait for runtime operation")
+	}
+	if _, err := server.Gate.AcquireRuntimeControl(); err != nil {
+		t.Fatalf("runtime gate was not released after shutdown: %v", err)
+	}
+}
+
+func TestDaemonRestartCompletesAfterRequestAndReportsReady(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	adapter := &appRuntimeAdapter{restartStarted: make(chan struct{}), restartRelease: make(chan struct{})}
+	replaceRuntimeManager(t, server, adapter)
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+
+	request, _ := http.NewRequest(http.MethodPost, httpServer.URL+"/api/daemon/restart", nil)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	request.Header.Set("Origin", httpServer.URL)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("restart status = %d", response.StatusCode)
+	}
+	<-adapter.restartStarted
+	close(adapter.restartRelease)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		get, getErr := http.Get(httpServer.URL + "/api/runtime-control")
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		var state runtimeControlDTO
+		decodeErr := json.NewDecoder(get.Body).Decode(&state)
+		get.Body.Close()
+		if decodeErr == nil && !state.OperationActive && state.DaemonRunning {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("restart did not reach terminal ready state")
+}
+
+type unsupportedRuntimeService struct {
+	*fakeService
+	version string
+}
+
+func (s *unsupportedRuntimeService) Installation(context.Context) roborev.Installation {
+	return roborev.Installation{Installed: true, Version: s.version}
+}
+
+func TestRuntimeStatusFailsClosedAndUsesBackendCommandPreviews(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	request := httptest.NewRequest(http.MethodGet, "/api/runtime-control", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("runtime status = %d", recorder.Code)
+	}
+	var response struct {
+		CanStart, CanStop, CanRestart, CanPause, CanResume bool
+		DisabledReason                                     string
+		DaemonCommands                                     map[string]struct {
+			Executable string   `json:"executable"`
+			Args       []string `json:"args"`
+		} `json:"daemonCommands"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.DaemonCommands) != 3 || response.DaemonCommands["restart"].Executable != "roborev" || strings.Join(response.DaemonCommands["restart"].Args, " ") != "daemon restart" {
+		t.Fatalf("backend previews = %#v", response.DaemonCommands)
+	}
+
+	unsupported := &unsupportedRuntimeService{fakeService: &fakeService{}, version: "v0.65.0"}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := NewServer(unsupported, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/runtime-control", nil)
+	recorder = httptest.NewRecorder()
+	blocked.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unsupported runtime status = %d", recorder.Code)
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.CanStart || response.CanStop || response.CanRestart || response.CanPause || response.CanResume || response.DisabledReason == "" {
+		t.Fatalf("unsupported runtime controls were enabled: %#v", response)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/daemon/restart", nil)
+	request.Header.Set("X-CSRF-Token", blocked.csrfToken)
+	recorder = httptest.NewRecorder()
+	blocked.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unsupported runtime action = %d", recorder.Code)
+	}
+}
+
+func TestDecodeBodyRejectsTrailingJSONValues(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	for _, body := range []string{`{"comment":"ok"}{"comment":"trailing"}`, `{"comment":"ok"} 42`} {
+		request := httptest.NewRequest(http.MethodPost, "/api/reviews/42/comment", strings.NewReader(body))
+		request.Header.Set("X-CSRF-Token", server.csrfToken)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("trailing body %q = %d", body, recorder.Code)
+		}
+	}
+}

@@ -14,11 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/agentstatus"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/operation"
 	"github.com/froze/roborev-dashboard/internal/refine"
 	"github.com/froze/roborev-dashboard/internal/roborev"
+	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 	"github.com/froze/roborev-dashboard/internal/setup"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
@@ -29,6 +31,8 @@ type Server struct {
 	Panels      roborev.PanelCatalogResolver
 	Refines     *refine.Manager
 	Setup       *setup.Manager
+	Agents      *agentstatus.Service
+	Runtime     *runtimecontrol.Manager
 	Gate        *operation.Gate
 	AllowedHost string
 	csrfToken   string
@@ -73,7 +77,15 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if setupManager != nil {
 		setupManager.SetGate(gate)
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	var checker agentstatus.HealthChecker
+	if candidate, ok := service.(agentstatus.HealthChecker); ok {
+		checker = candidate
+	}
+	runtimeManager, err := runtimecontrol.NewManagerWithGate(service, gate)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -91,23 +103,33 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// Shutdown cancels process-scoped Panel Refine runs and waits for their
-// child review/fix orchestration to stop.
+// Shutdown cancels every process-scoped operation and waits for its gate
+// lease and child work to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
+	var shutdownErrors []error
+	if s.Runtime != nil {
+		if err := s.Runtime.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.Refines != nil {
 		if err := s.Refines.Shutdown(ctx); err != nil {
-			return err
+			shutdownErrors = append(shutdownErrors, err)
 		}
 	}
 	if s.Setup != nil {
-		return s.Setup.Shutdown(ctx)
+		if err := s.Setup.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
 	}
-	return nil
+	return errors.Join(shutdownErrors...)
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
 	s.mux.HandleFunc("GET /api/runtime", s.runtime)
+	s.mux.HandleFunc("GET /api/agents", s.agentStatuses)
+	s.mux.HandleFunc("GET /api/runtime-control", s.runtimeControlStatus)
 	s.mux.HandleFunc("GET /api/setup/roborev", s.setupStatus)
 	s.mux.HandleFunc("GET /api/reviews", s.listReviews)
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
@@ -130,7 +152,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos", s.mutation(s.addRepository))
 	s.mux.HandleFunc("POST /api/repos/select", s.mutation(s.selectRepository))
 	s.mux.HandleFunc("POST /api/repos/panel-selection", s.mutation(s.selectRepositoryPanel))
-	s.mux.HandleFunc("POST /api/daemon/start", s.mutation(s.startDaemon))
+	s.mux.HandleFunc("POST /api/agents/check", s.setupMutation(s.checkAgent))
+	s.mux.HandleFunc("POST /api/runtime-control/queue/pause", s.setupMutation(s.pauseQueue))
+	s.mux.HandleFunc("POST /api/runtime-control/queue/resume", s.setupMutation(s.resumeQueue))
+	s.mux.HandleFunc("POST /api/daemon/start", s.setupMutation(s.startDaemon))
+	s.mux.HandleFunc("POST /api/daemon/stop", s.setupMutation(s.stopDaemon))
+	s.mux.HandleFunc("POST /api/daemon/restart", s.setupMutation(s.restartDaemon))
 	s.mux.HandleFunc("POST /api/setup/roborev/install", s.setupMutation(s.installRoboRev))
 	s.mux.HandleFunc("POST /api/setup/roborev/retry", s.setupMutation(s.retryRoboRev))
 	s.mux.Handle("/", spaHandler())
@@ -141,6 +168,11 @@ func (s *Server) routes() {
 func serviceBinary(service roborev.Service) string {
 	if client, ok := service.(*roborev.Client); ok {
 		return client.BinaryPath()
+	}
+	if provider, ok := service.(interface{ BinaryPath() string }); ok {
+		if binary := strings.TrimSpace(provider.BinaryPath()); binary != "" {
+			return binary
+		}
 	}
 	return "roborev"
 }
@@ -267,6 +299,15 @@ func decodeBody(w http.ResponseWriter, r *http.Request, target any) bool {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request: "+err.Error(), "request")
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			writeError(w, http.StatusBadRequest, "invalid request: trailing JSON value", "request")
+		} else {
+			writeError(w, http.StatusBadRequest, "invalid request: "+err.Error(), "request")
+		}
 		return false
 	}
 	return true
@@ -877,54 +918,6 @@ func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
-func (s *Server) startDaemon(w http.ResponseWriter, r *http.Request) {
-	if !requireEmptyBody(w, r) {
-		return
-	}
-	ctx, cancel := mutationContext()
-	defer cancel()
-	if installation := s.RoboRev.Installation(ctx); daemonRunning(installation.Status) {
-		writeJSON(w, http.StatusOK, map[string]bool{"success": true})
-		return
-	}
-	if err := s.RoboRev.StartDaemon(ctx); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "daemon")
-		return
-	}
-	var lastErr error
-	for _, delay := range []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, time.Second} {
-		installation := s.RoboRev.Installation(ctx)
-		if daemonRunning(installation.Status) {
-			writeJSON(w, http.StatusOK, map[string]bool{"success": true})
-			return
-		}
-		if installation.Error != "" {
-			lastErr = errors.New(installation.Error)
-		}
-		select {
-		case <-ctx.Done():
-			writeError(w, http.StatusGatewayTimeout, "daemon health check timed out: "+healthDetail(lastErr, ctx.Err()), "daemon")
-			return
-		case <-time.After(delay):
-		}
-	}
-	writeError(w, http.StatusBadGateway, "daemon started but health did not become ready: "+healthDetail(lastErr, errors.New("health endpoint did not report running")), "daemon")
-}
-
-func daemonRunning(raw json.RawMessage) bool {
-	var status struct {
-		Running *bool `json:"running"`
-	}
-	return json.Unmarshal(raw, &status) == nil && status.Running != nil && *status.Running
-}
-
-func healthDetail(last, fallback error) string {
-	if last != nil {
-		return last.Error()
-	}
-	return fallback.Error()
-}
-
 func spaHandler() http.Handler {
 	assets, err := fs.Sub(webui.Files, "dist")
 	if err != nil {

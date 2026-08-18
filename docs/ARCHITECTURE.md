@@ -36,6 +36,20 @@ setup은 process-scoped background state machine으로 checking, downloading, ve
 
 Windows가 exact policy error code로 실행을 거부하면 설치를 ready로 표시하지 않고 `blocked`로 분류한다. Dashboard는 target, requested version과 pinned digest를 계속 표시하지만 Smart App Control/WDAC, registry, Defender 설정을 변경하거나 `Unblock-File` 같은 우회를 실행하지 않는다. generic permission failure는 policy block으로 가장하지 않는다. runtime onboarding은 `roborev init`, Git hook, AI agent 설치·검사, credential 저장과 update를 수행하지 않는다.
 
+### Agent detection과 quota 경계
+
+Agent 목록은 exact v0.64.0 compatibility descriptor와 bounded config reader가 제공하는 safe subset으로 구성한다. global command override와 global/local `[review.subagents]` whole-entry merge를 적용하되 alias, canonical agent, model, reasoning과 resolved command만 반환하고 instructions, provider credential, API key, raw TOML과 dynamic ACP command/args는 읽어 내보내지 않는다. 자동 detection은 regular executable lookup만 사용하며 Cursor의 ambiguous `agent` command에 한해 upstream과 같은 `--version`/`-v` bounded identity probe를 수행한다. probe는 임시 working directory, nil stdin, 짧은 timeout/WaitDelay, bounded combined output과 forge credential/preload hook이 제거된 환경을 사용한다. timeout, empty/crashed/oversized output 또는 Grok identity는 Cursor로 인정하지 않는다.
+
+`Detected`는 executable/config presence이고 `Checked`는 실제 smoke request 성공이다. `GET /api/agents`와 background refresh는 `check-agents` 또는 Agent.Review를 호출하지 않는다. 사용자가 canonical allowlist의 agent 하나를 confirmation한 `POST /api/agents/check`만 fixed `check-agents --agent <canonical> --timeout 60` argv를 request context에서 실행한다. CLI 내부 timeout보다 긴 bounded outer timeout을 두고 v0.64.0의 bounded single-agent output만 최소 parser로 분류하며 결과는 process memory에만 둔다. browser disconnect cancellation은 failure가 아니라 canceled/not-completed다. 설치되지 않았거나 exact v0.64.0이 아닌 runtime에서는 discovery/check를 fail closed해 다른 agent contract를 추측하지 않는다.
+
+### Runtime control lifecycle
+
+Queue state는 prompt/log를 포함하지 않는 official v0.64.0 daemon `GET /api/status`의 typed bounded `queue_paused` 필드에서 읽는다. Pause/Resume은 이미 healthy한 daemon에 `POST /api/queue/pause` 또는 `/api/queue/unpause`를 보내고 exact boolean response를 검증한다. CLI `pause`가 daemon을 암묵적으로 시작하는 경로와 RoboRev DB 직접 읽기는 사용하지 않는다. Pause 중에도 running job은 계속되고 새 queued job만 시작하지 않는다.
+
+Daemon Start/Stop/Restart는 typed `daemon start|stop|restart` argv만 사용하며 확인 UI에는 backend가 제공한 executable과 exact argv만 표시한다. Stop/Restart는 acceptance 뒤 request context와 분리된 process-owned manager가 bounded health/offline verification까지 소유하며, Dashboard shutdown은 active context를 cancel하고 worker와 gate release를 기다린다. restart는 upstream command 하나를 사용해 daemon이 이미 stopped인 경우 start하는 semantics를 보존한다. Stop verification은 transport-level 연결 불가만 offline 증거로 인정하고, reachable HTTP 오류·malformed/oversized/unhealthy health 응답은 실패로 유지한다. CLI 성공 뒤 health가 기대 상태와 다르면 성공으로 표시하지 않는다. exact v0.64.0 이외에서는 status discovery를 포함한 runtime control 계약을 fail closed한다.
+
+전역 operation gate의 runtime-control lease는 setup, Panel Refine, ordinary mutation과 다른 runtime control 모두와 fail-fast 409로 충돌한다. setup도 runtime control을, mutation/refine도 active runtime control을 거부한다. Queue Pause/Resume은 짧은 runtime-control lease를, daemon lifecycle은 terminal success/failure/cancel까지 유지되는 lease를 사용한다. 따라서 active Panel Refine 중 queue pause나 daemon restart가 workflow를 중간에 stall시키지 않는다.
+
 ### transport
 
 stable JSON CLI를 우선한다. v0.64.0의 `review` 명령에는 JSON launch receipt가 없으므로 새 review는 감지된 daemon endpoint의 public `/api/enqueue` 계약을 version capability로 캡슐화한다. Dashboard가 요청 시점에 Git으로 `HEAD`를 full SHA로 고정해 daemon에 전송하고, enqueue receipt와 동일한 fresh repository metadata를 browser에 반환하므로 실제 target이 audit 가능하다. UI는 실행되지 않는 CLI command preview를 만들지 않는다.

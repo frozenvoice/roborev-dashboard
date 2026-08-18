@@ -10,6 +10,9 @@ const bootstrap = {
 }
 const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
+const setupReady = { status: 'ready', phase: 'ready', operationActive: false, installed: true, binaryPath: 'C:\\Tools\\roborev.exe', version: 'v0.64.0', recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: true, blocked: false, retryable: false, installAvailable: false, canInstall: false, canRetry: false, canStartDaemon: false, architecture: 'windows-amd64', sourceURL: 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0', sourceLabel: 'Official GitHub release', assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev.exe', downloadedBytes: 1200, totalBytes: 1200 }
+const setupAgents = { roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+const setupRuntime = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
 const refineOptions = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
 function refineRun(overrides: Record<string, unknown> = {}) {
   return { id: 'refine-1', repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', branch: 'main', iterationPanel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, fixAttempts: 0, phase: 'reviewing', startingHead: 'abcdef123456', currentHead: 'abcdef123456', currentReviewJobId: 42, iterations: [], command: refineOptions, ...overrides }
@@ -1147,6 +1150,123 @@ describe('App review workflow', () => {
     await screen.findByText('Reviewing')
     await userEvent.click(screen.getByRole('button', { name: 'Cancel Panel Refine' }))
     expect(await screen.findByText('cancel rejected')).toHaveClass('toast', 'error')
+  })
+
+  it('does not post an agent check until confirmation and sends only the canonical agent', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/agents') return response(setupAgents)
+      if (path === '/api/runtime-control') return response(setupRuntime)
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/agents/check' && init?.method === 'POST') return response({ ...setupAgents, configured: [{ ...setupAgents.configured[0], health: 'passed' }] })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run check' }))
+    expect(calls.some(call => call.path === '/api/agents/check')).toBe(false)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('small real request through RoboRev')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Run check' }))
+    await waitFor(() => expect(calls.filter(call => call.path === '/api/agents/check')).toHaveLength(1))
+    expect(JSON.parse(String(calls.find(call => call.path === '/api/agents/check')?.init?.body))).toEqual({ agent: 'claude-code' })
+  })
+
+  it('does not report daemon success when the terminal runtime state contains an error', async () => {
+    let runtimeControlCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/agents') return response(setupAgents)
+      if (path === '/api/runtime-control') {
+        runtimeControlCalls += 1
+        return response(runtimeControlCalls === 1 ? setupRuntime : runtimeControlCalls === 2 ? { ...setupRuntime, operationActive: true, daemonOperation: 'stopping' } : { ...setupRuntime, operationActive: false, error: 'daemon stop failed' })
+      }
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/daemon/stop' && init?.method === 'POST') return response({ accepted: true }, 202)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop daemon' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop daemon' }))
+    await waitFor(() => expect(screen.getAllByText('daemon stop failed').some(element => element.closest('.toast.error'))).toBe(true))
+    expect(screen.queryByText('RoboRev daemon stopped.')).not.toBeInTheDocument()
+  })
+
+  it('polls an accepted daemon stop and refreshes runtime, agents, panels, and reviews', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    let runtimeControlCalls = 0
+    let panelCalls = 0
+    let reviewCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) { reviewCalls += 1; return response([]) }
+      if (path === '/api/agents') return response(setupAgents)
+      if (path === '/api/runtime-control') {
+        runtimeControlCalls += 1
+        return response(runtimeControlCalls === 1 ? setupRuntime : runtimeControlCalls === 2 ? { ...setupRuntime, operationActive: true, daemonOperation: 'stopping' } : { ...setupRuntime, daemonRunning: false, operationActive: false, queueState: 'unknown', canStart: true, canStop: false, canRestart: false })
+      }
+      if (path === '/api/runtime') return response({ ...bootstrap.roborev, status: { running: runtimeControlCalls < 3 } })
+      if (path === '/api/daemon/stop' && init?.method === 'POST') return response({ accepted: true }, 202)
+      return response({ success: true })
+    }, () => { panelCalls += 1; return response(panelConfiguration()) }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop daemon' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Active jobs may be interrupted; queued jobs remain queued.')
+    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['C:\\Tools\\roborev.exe', 'daemon', 'stop']))
+    const beforePanels = panelCalls
+    const beforeReviews = reviewCalls
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop daemon' }))
+    await waitFor(() => expect(calls.some(call => call.path === '/api/daemon/stop' && call.init?.method === 'POST')).toBe(true))
+    await waitFor(() => expect(runtimeControlCalls).toBeGreaterThanOrEqual(4), { timeout: 4000 })
+    await waitFor(() => expect(panelCalls).toBeGreaterThan(beforePanels))
+    await waitFor(() => expect(reviewCalls).toBeGreaterThan(beforeReviews))
+  })
+
+  it('keeps polling an accepted daemon operation beyond ten seconds until terminal success', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const startedAt = Date.now()
+    let runtimeControlCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/agents') return response(setupAgents)
+      if (path === '/api/runtime-control') {
+        runtimeControlCalls += 1
+        if (runtimeControlCalls === 1) return response(setupRuntime)
+        return Date.now() - startedAt < 12_000 ? response({ ...setupRuntime, operationActive: true, daemonOperation: 'stopping' }) : response({ ...setupRuntime, daemonRunning: false, operationActive: false, queueState: 'unknown', canStart: true, canStop: false, canRestart: false })
+      }
+      if (path === '/api/runtime') return response({ ...bootstrap.roborev, status: { running: Date.now() - startedAt < 12_000 } })
+      if (path === '/api/daemon/stop' && init?.method === 'POST') return response({ accepted: true }, 202)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop daemon' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop daemon' }))
+    await vi.advanceTimersByTimeAsync(10_500)
+    expect(runtimeControlCalls).toBeGreaterThan(10)
+    expect(screen.queryByText('RoboRev daemon stopped.')).not.toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(3_000)
+    await waitFor(() => expect(screen.getByText('RoboRev daemon stopped.')).toHaveClass('toast', 'success'))
   })
 })
 

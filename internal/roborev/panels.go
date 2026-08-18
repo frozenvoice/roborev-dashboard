@@ -63,7 +63,47 @@ type PanelResolver struct {
 }
 
 type panelConfigFile struct {
-	Review panelReviewConfig `toml:"review"`
+	Review        panelReviewConfig `toml:"review"`
+	CodexCmd      string            `toml:"codex_cmd"`
+	ClaudeCodeCmd string            `toml:"claude_code_cmd"`
+	GeminiCmd     string            `toml:"gemini_cmd"`
+	OpenCodeCmd   string            `toml:"opencode_cmd"`
+	CursorCmd     string            `toml:"cursor_cmd"`
+	PiCmd         string            `toml:"pi_cmd"`
+	GrokCmd       string            `toml:"grok_cmd"`
+}
+
+type panelAgentCommands struct {
+	Codex      string
+	ClaudeCode string
+	Gemini     string
+	OpenCode   string
+	Cursor     string
+	Pi         string
+	Grok       string
+}
+
+// ConfiguredSubagent is the safe projection of one [review.subagents.NAME]
+// entry.  Provider, instructions, timeout and all other raw TOML fields are
+// intentionally omitted because they can contain secrets or executable
+// policy. Agent preserves the spelling from config (including an alias),
+// while CanonicalAgent supplies the v0.64 identity used by health checks.
+type ConfiguredSubagent struct {
+	Name                 string `json:"name"`
+	Agent                string `json:"agent"`
+	CanonicalAgent       string `json:"canonicalAgent,omitempty"`
+	Model                string `json:"model,omitempty"`
+	Reasoning            string `json:"reasoning,omitempty"`
+	Origin               string `json:"origin"`
+	DetectionUnavailable bool   `json:"detectionUnavailable,omitempty"`
+}
+
+// AgentConfiguration contains only safe, machine-readable configuration
+// needed by agent discovery. Command overrides come from the global config;
+// repository configs never override command executable selection.
+type AgentConfiguration struct {
+	Commands  map[string]string    `json:"commands,omitempty"`
+	Subagents []ConfiguredSubagent `json:"subagents,omitempty"`
 }
 
 type panelReviewConfig struct {
@@ -115,36 +155,44 @@ func (r *PanelResolver) globalPath() (string, error) {
 }
 
 func loadPanelConfig(path string) (panelReviewConfig, bool, error) {
+	review, _, present, err := loadPanelConfigWithCommands(path)
+	return review, present, err
+}
+
+func loadPanelConfigWithCommands(path string) (panelReviewConfig, panelAgentCommands, bool, error) {
 	var file panelConfigFile
 	handle, err := openPanelConfigNoFollow(path)
 	if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
-		return panelReviewConfig{}, false, nil
+		return panelReviewConfig{}, panelAgentCommands{}, false, nil
 	}
 	if err != nil {
-		return panelReviewConfig{}, true, errors.New("panel config could not be opened")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config could not be opened")
 	}
 	defer handle.Close()
 	info, err := handle.Stat()
 	if err != nil {
-		return panelReviewConfig{}, true, errors.New("panel config metadata could not be read")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config metadata could not be read")
 	}
 	if !info.Mode().IsRegular() {
-		return panelReviewConfig{}, true, errors.New("panel config must be a regular file")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config must be a regular file")
 	}
 	if info.Size() < 0 || info.Size() > maxPanelConfigBytes {
-		return panelReviewConfig{}, true, errors.New("panel config exceeds the maximum size")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config exceeds the maximum size")
 	}
 	data, err := io.ReadAll(io.LimitReader(handle, maxPanelConfigBytes+1))
 	if err != nil {
-		return panelReviewConfig{}, true, errors.New("panel config could not be read")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config could not be read")
 	}
 	if len(data) > maxPanelConfigBytes {
-		return panelReviewConfig{}, true, errors.New("panel config exceeds the maximum size")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config exceeds the maximum size")
 	}
 	if _, err := toml.Decode(string(data), &file); err != nil {
-		return panelReviewConfig{}, true, errors.New("panel config contains invalid TOML syntax or types")
+		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config contains invalid TOML syntax or types")
 	}
-	return file.Review, true, nil
+	return file.Review, panelAgentCommands{
+		Codex: file.CodexCmd, ClaudeCode: file.ClaudeCodeCmd, Gemini: file.GeminiCmd,
+		OpenCode: file.OpenCodeCmd, Cursor: file.CursorCmd, Pi: file.PiCmd, Grok: file.GrokCmd,
+	}, true, nil
 }
 
 func (r *PanelResolver) Resolve(ctx context.Context, repoPath string) (PanelCatalog, error) {
@@ -232,6 +280,112 @@ func (r *PanelResolver) Resolve(ctx context.Context, repoPath string) (PanelCata
 		return builtinNoneCatalog(), nil
 	}
 	return PanelCatalog{Panels: result}, nil
+}
+
+// ResolveAgentConfiguration reads the bounded global/repository config files
+// and returns the safe agent projection used by the dashboard. Repository
+// subagent entries replace global entries as whole TOML entries. Executable
+// command overrides are deliberately read from the global file only; local
+// command fields are ignored even when present.
+func (r *PanelResolver) ResolveAgentConfiguration(ctx context.Context, repoPath string) (AgentConfiguration, error) {
+	_ = ctx // kept in the resolver contract for parity with panel discovery
+	if r == nil {
+		r = &PanelResolver{}
+	}
+	globalPath, err := r.globalPath()
+	if err != nil {
+		return AgentConfiguration{}, err
+	}
+	globalReview, globalCommands, _, err := loadPanelConfigWithCommands(globalPath)
+	if err != nil {
+		return AgentConfiguration{}, fmt.Errorf("global RoboRev config: %w", err)
+	}
+
+	var localReview panelReviewConfig
+	if strings.TrimSpace(repoPath) != "" {
+		localPath := filepath.Join(repoPath, ".roborev.toml")
+		localReview, _, _, err = loadPanelConfigWithCommands(localPath)
+		if err != nil {
+			return AgentConfiguration{}, fmt.Errorf("repository RoboRev config: %w", err)
+		}
+	}
+
+	type sourceSpec struct {
+		spec   panelSubagentSpec
+		origin string
+	}
+	merged := make(map[string]sourceSpec, len(globalReview.Subagents)+len(localReview.Subagents))
+	for name, spec := range globalReview.Subagents {
+		merged[name] = sourceSpec{spec: spec, origin: "global"}
+	}
+	for name, spec := range localReview.Subagents {
+		merged[name] = sourceSpec{spec: spec, origin: "local"}
+	}
+
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	result := AgentConfiguration{
+		Commands:  make(map[string]string),
+		Subagents: make([]ConfiguredSubagent, 0, len(names)),
+	}
+	for _, name := range names {
+		entry := merged[name]
+		agent := strings.TrimSpace(entry.spec.Agent)
+		if !safeAgentConfigValue(name) {
+			continue
+		}
+		model := safeAgentConfigField(entry.spec.Model, 512)
+		reasoning := safeAgentConfigField(entry.spec.Reasoning, 128)
+		if agent == "" {
+			result.Subagents = append(result.Subagents, ConfiguredSubagent{
+				Name: name, Model: model, Reasoning: reasoning, Origin: entry.origin,
+				DetectionUnavailable: true,
+			})
+			continue
+		}
+		canonical, ok := CanonicalAgentName(agent)
+		if !ok || !safeAgentConfigValue(agent) {
+			// Unknown names may be dynamic ACP entries. They are not exposed
+			// as dashboard agents because their command/args are user-defined.
+			continue
+		}
+		result.Subagents = append(result.Subagents, ConfiguredSubagent{
+			Name: name, Agent: agent, CanonicalAgent: canonical,
+			Model: model, Reasoning: reasoning, Origin: entry.origin,
+		})
+	}
+	for key, value := range map[string]string{
+		"codex_cmd": globalCommands.Codex, "claude_code_cmd": globalCommands.ClaudeCode,
+		"gemini_cmd": globalCommands.Gemini, "opencode_cmd": globalCommands.OpenCode,
+		"cursor_cmd": globalCommands.Cursor, "pi_cmd": globalCommands.Pi, "grok_cmd": globalCommands.Grok,
+	} {
+		value = strings.TrimSpace(value)
+		if value != "" && safeAgentConfigField(value, 4096) != "" {
+			result.Commands[key] = value
+		}
+	}
+	if len(result.Commands) == 0 {
+		result.Commands = nil
+	}
+	if len(result.Subagents) == 0 {
+		result.Subagents = nil
+	}
+	return result, nil
+}
+
+func safeAgentConfigValue(value string) bool {
+	return strings.TrimSpace(value) == value && value != "" && len(value) <= 128 && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+func safeAgentConfigField(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > max || strings.ContainsAny(value, "\x00\r\n") {
+		return ""
+	}
+	return value
 }
 
 func builtinNoneCatalog() PanelCatalog {

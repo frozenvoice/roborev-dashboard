@@ -1,7 +1,7 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeSetupState, type SetupState } from './api'
+import { normalizeSetupState, type AgentsResponse, type RuntimeControlState, type SetupState } from './api'
 import { Setup, SetupBanner } from './Setup'
 import { App } from './App'
 
@@ -22,6 +22,72 @@ function jsonResponse(value: unknown, status = 200) { return Promise.resolve(new
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('RoboRev setup', () => {
+  const readySetup = { ...baseState, status: 'ready' as const, phase: 'ready' as const, operationActive: false, installed: true, canInstall: false, installAvailable: false, canStartDaemon: false, daemonRunning: true, compatible: true, panelRefineCompatible: true }
+  const runningRuntime: RuntimeControlState = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
+  const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+
+  it('does not health-check on render and checks only the confirmed canonical agent', async () => {
+    const onCheck = vi.fn().mockResolvedValue(undefined)
+    render(<Setup state={readySetup} agents={configuredAgents} onCheckAgent={onCheck} />)
+    expect(onCheck).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Run check' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('small real request through RoboRev')
+    expect(screen.getByRole('dialog')).toHaveTextContent('subscription/API quota')
+    expect(onCheck).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('dialog').querySelector('button.button.primary')!)
+    await waitFor(() => expect(onCheck).toHaveBeenCalledWith('claude-code'))
+  })
+
+  it('keeps paused queue semantics and disables queue controls when offline or unknown', async () => {
+    const onQueue = vi.fn().mockResolvedValue(undefined)
+    const paused: RuntimeControlState = { ...runningRuntime, queueState: 'paused', canPause: false, canResume: true }
+    const { rerender } = render(<Setup state={readySetup} runtimeControl={paused} onQueueAction={onQueue} />)
+    expect(screen.getByText('Running jobs continue; new queued jobs will not start.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pause queue' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Resume queue' })).toBeEnabled()
+    rerender(<Setup state={{ ...readySetup, daemonRunning: false }} runtimeControl={{ ...paused, daemonRunning: false, queueState: 'unknown', canResume: false }} onQueueAction={onQueue} onRefreshRuntime={vi.fn().mockResolvedValue(undefined)} />)
+    expect(screen.getByText('Queue state is unavailable while the daemon is offline or unknown.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Pause queue' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Resume queue' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  })
+
+  it('fails closed when a daemon command preview is missing or mismatched', async () => {
+    const onDaemonAction = vi.fn().mockResolvedValue(undefined)
+    const invalid = { ...runningRuntime, daemonCommands: { ...runningRuntime.daemonCommands!, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
+    render(<Setup state={readySetup} runtimeControl={invalid} onDaemonAction={onDaemonAction} />)
+    expect(screen.getByRole('button', { name: 'Stop daemon' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Restart daemon' })).toBeEnabled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('requires restrained stop/restart confirmation, gates active operations, and ignores double confirmation', async () => {
+    const deferredAction = (() => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } })()
+    const onDaemonAction = vi.fn().mockReturnValue(deferredAction.promise)
+    const { rerender } = render(<Setup state={readySetup} runtimeControl={runningRuntime} onDaemonAction={onDaemonAction} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Stop daemon' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('Active jobs may be interrupted; queued jobs remain queued.')
+    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['C:\\Tools\\roborev.exe', 'daemon', 'stop']))
+    expect(onDaemonAction).not.toHaveBeenCalled()
+    const confirmStop = screen.getByRole('dialog').querySelector('button.button.danger')!
+    fireEvent.click(confirmStop)
+    fireEvent.click(confirmStop)
+    expect(onDaemonAction).toHaveBeenCalledTimes(1)
+    expect(onDaemonAction).toHaveBeenCalledWith('stop')
+    deferredAction.resolve()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Restart daemon' }))
+    expect(screen.getByRole('dialog')).toHaveTextContent('This stops and starts the daemon.')
+    await userEvent.click(screen.getByRole('dialog').querySelector('button.button.danger')!)
+    await waitFor(() => expect(onDaemonAction).toHaveBeenCalledWith('restart'))
+    const active = { ...runningRuntime, operationActive: true, disabledReason: 'Another daemon operation is active.' }
+    rerender(<Setup state={readySetup} runtimeControl={active} onDaemonAction={onDaemonAction} panelRefineActive />)
+    expect(screen.getByRole('button', { name: 'Start daemon' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Stop daemon' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Restart daemon' })).toBeDisabled()
+    expect(screen.getByText(/Controls disabled: Panel Refine is active/)).toBeInTheDocument()
+  })
+
   it('shows a missing banner but does not install on render, then confirms exact values', async () => {
     const install = vi.fn().mockResolvedValue(undefined)
     render(<Setup state={baseState} onInstall={install} />)

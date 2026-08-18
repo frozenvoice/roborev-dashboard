@@ -72,6 +72,138 @@ export type SetupState = {
   capabilities?: Record<string, unknown>
 }
 
+/** The health result is deliberately separate from executable/config detection. */
+export type AgentHealth = 'not_checked' | 'passed' | 'failed' | 'skipped' | 'canceled'
+
+export type AgentCommand = string | { executable: string; args: string[] }
+
+export type ConfiguredReviewAgent = {
+  name: string
+  agent: string
+  model?: string
+  reasoning?: string
+  command: AgentCommand
+  commandSource?: string
+  detected: boolean
+  detectionReason?: string
+  resolvedPath?: string
+  health: AgentHealth
+  lastCheckedAt?: string
+}
+
+export type AgentsResponse = {
+  roborevVersion?: string
+  configured: ConfiguredReviewAgent[]
+}
+
+export type QueueState = 'processing' | 'paused' | 'unknown'
+
+export type DaemonAction = 'start' | 'stop' | 'restart'
+export type DaemonCommandPreview = { executable: string; args: string[] }
+export type DaemonCommands = Record<DaemonAction, DaemonCommandPreview>
+
+export type RuntimeControlState = {
+  daemonRunning: boolean
+  daemonOperation?: string
+  operationActive: boolean
+  queueState: QueueState
+  canPause: boolean
+  canResume: boolean
+  canStart: boolean
+  canStop: boolean
+  canRestart: boolean
+  daemonCommands?: DaemonCommands
+  disabledReason?: string
+  error?: string
+}
+
+const agentHealthValues: AgentHealth[] = ['not_checked', 'passed', 'failed', 'skipped', 'canceled']
+const queueStateValues: QueueState[] = ['processing', 'paused', 'unknown']
+
+function objectValue(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function optionalString(value: unknown) { return typeof value === 'string' ? value : undefined }
+function readAlias(object: Record<string, unknown>, camel: string, snake: string) { return object[camel] ?? object[snake] }
+
+function normalizeDaemonCommands(value: unknown): DaemonCommands | undefined {
+  const object = objectValue(value)
+  if (!object) return undefined
+  const actions: DaemonAction[] = ['start', 'stop', 'restart']
+  const result = {} as DaemonCommands
+  for (const action of actions) {
+    const command = objectValue(object[action])
+    if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || !command.args.every(item => typeof item === 'string')) return undefined
+    result[action] = { executable: command.executable, args: command.args as string[] }
+  }
+  return result
+}
+
+function normalizeAgentHealth(value: unknown): AgentHealth {
+  if (typeof value !== 'string') return 'not_checked'
+  const normalized = value.toLowerCase().replace(/[ -]/g, '_')
+  return agentHealthValues.includes(normalized as AgentHealth) ? normalized as AgentHealth : 'not_checked'
+}
+
+function normalizeAgentCommand(value: unknown): AgentCommand {
+  if (typeof value === 'string') return value
+  const object = objectValue(value)
+  if (object && typeof object.executable === 'string' && Array.isArray(object.args) && object.args.every(item => typeof item === 'string')) return { executable: object.executable, args: object.args as string[] }
+  return 'Command supplied by RoboRev'
+}
+
+/** Parse the machine-readable configured-agent response. Unknown fields are ignored. */
+export function normalizeAgentsResponse(value: unknown): AgentsResponse | null {
+  const object = objectValue(value)
+  if (!object || !Array.isArray(object.configured)) return null
+  const configured: ConfiguredReviewAgent[] = []
+  for (const item of object.configured) {
+    const agent = objectValue(item)
+    if (!agent || typeof agent.name !== 'string' || typeof agent.agent !== 'string' || typeof agent.detected !== 'boolean') return null
+    configured.push({
+      name: agent.name,
+      agent: agent.agent,
+      model: optionalString(agent.model),
+      reasoning: optionalString(agent.reasoning),
+      command: normalizeAgentCommand(agent.command),
+      commandSource: optionalString(readAlias(agent, 'commandSource', 'command_source')),
+      detected: agent.detected,
+      detectionReason: optionalString(readAlias(agent, 'detectionReason', 'detection_reason')),
+      resolvedPath: optionalString(readAlias(agent, 'resolvedPath', 'resolved_path')),
+      health: normalizeAgentHealth(agent.health),
+      lastCheckedAt: optionalString(readAlias(agent, 'lastCheckedAt', 'last_checked_at')),
+    })
+  }
+  return { roborevVersion: optionalString(readAlias(object, 'roborevVersion', 'roborev_version')), configured }
+}
+
+/** Parse runtime/queue capabilities and fail closed to unknown queue controls. */
+export function normalizeRuntimeControl(value: unknown): RuntimeControlState | null {
+  const object = objectValue(value)
+  if (!object || typeof object.daemonRunning !== 'boolean') return null
+  const operation = readAlias(object, 'operationActive', 'operation_active')
+  const queue = readAlias(object, 'queueState', 'queue_state')
+  const operationActive = operation === undefined ? false : operation === true
+  const queueState = typeof queue === 'string' && queueStateValues.includes(queue as QueueState) ? queue as QueueState : 'unknown'
+  const readCapability = (camel: string, snake: string) => object[camel] === true || object[snake] === true
+  const daemonCommands = normalizeDaemonCommands(readAlias(object, 'daemonCommands', 'daemon_commands'))
+  return {
+    daemonRunning: object.daemonRunning,
+    daemonOperation: optionalString(readAlias(object, 'daemonOperation', 'daemon_operation')),
+    operationActive,
+    queueState,
+    canPause: readCapability('canPause', 'can_pause'),
+    canResume: readCapability('canResume', 'can_resume'),
+    canStart: readCapability('canStart', 'can_start'),
+    canStop: readCapability('canStop', 'can_stop'),
+    canRestart: readCapability('canRestart', 'can_restart'),
+    daemonCommands,
+    disabledReason: optionalString(readAlias(object, 'disabledReason', 'disabled_reason')),
+    error: optionalString(object.error),
+  }
+}
+
 const setupPhases: SetupPhase[] = ['idle', 'checking', 'downloading', 'verifying', 'extracting', 'installing', 'binding', 'starting_daemon', 'waiting_for_daemon', 'ready', 'failed', 'blocked', 'unsupported', 'canceled']
 const setupActivePhases: SetupPhase[] = ['checking', 'downloading', 'verifying', 'extracting', 'installing', 'binding', 'starting_daemon', 'waiting_for_daemon']
 function setupField(object: Record<string, unknown>, ...names: string[]) {

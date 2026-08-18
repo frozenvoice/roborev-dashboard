@@ -1,9 +1,9 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, normalizePanelRefineResponse, normalizeSetupState, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type SetupState, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeRuntimeControl, normalizeSetupState, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { PanelRefine } from './PanelRefine'
-import { InstallConfirmation, Setup, SetupBanner, setupIsActive } from './Setup'
+import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonAction } from './Setup'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
@@ -282,6 +282,12 @@ export function App() {
   const [setupError, setSetupError] = useState('')
   const [setupReloadEpoch, setSetupReloadEpoch] = useState(0)
   const [setupConfirming, setSetupConfirming] = useState(false)
+  const [agents, setAgents] = useState<AgentsResponse | null>(null)
+  const [agentsLoading, setAgentsLoading] = useState(false)
+  const [agentsError, setAgentsError] = useState('')
+  const [runtimeControl, setRuntimeControl] = useState<RuntimeControlState | null>(null)
+  const [runtimeControlLoading, setRuntimeControlLoading] = useState(false)
+  const [runtimeControlError, setRuntimeControlError] = useState('')
   const panelRefineGeneration = useRef(0)
   const reviewGeneration = useRef(0)
   const reviewActionGeneration = useRef(0)
@@ -291,6 +297,7 @@ export function App() {
   const panelRefineReviewGeneration = useRef(0)
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
+  const runtimeControlGeneration = useRef(0)
   const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
   const repo = bootstrap?.repositories.find(item => item.identity === selectedRepositoryIdentity)
@@ -340,6 +347,37 @@ export function App() {
       setSetupState(null)
       setSetupError((error as Error).message)
       return null
+    }
+  }, [])
+  const loadAgents = useCallback(async () => {
+    setAgentsLoading(true)
+    try {
+      const next = normalizeAgentsResponse(await request<unknown>('/api/agents'))
+      if (!next) throw new APIError('The configured-agent response was malformed.')
+      setAgents(next)
+      setAgentsError('')
+      return next
+    } catch (error) {
+      setAgentsError((error as Error).message)
+      return null
+    } finally { setAgentsLoading(false) }
+  }, [])
+  const loadRuntimeControl = useCallback(async () => {
+    const generation = ++runtimeControlGeneration.current
+    setRuntimeControlLoading(true)
+    try {
+      const next = normalizeRuntimeControl(await request<unknown>('/api/runtime-control'))
+      if (!next) throw new APIError('The runtime-control response was malformed.')
+      if (generation === runtimeControlGeneration.current) {
+        setRuntimeControl(next)
+        setRuntimeControlError(next.error || '')
+      }
+      return next
+    } catch (error) {
+      if (generation === runtimeControlGeneration.current) setRuntimeControlError((error as Error).message)
+      return null
+    } finally {
+      if (generation === runtimeControlGeneration.current) setRuntimeControlLoading(false)
     }
   }, [])
   const loadPanels = useCallback(async (repoPath: string, identity: string) => {
@@ -431,6 +469,20 @@ export function App() {
       if (timer) clearTimeout(timer)
     }
   }, [initialized, loadSetup, setupReloadEpoch])
+  useEffect(() => {
+    if (!initialized || activeNav !== 'Agents & Setup') return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      const [runtime] = await Promise.all([loadRuntimeControl(), loadAgents()])
+      if (cancelled) return
+      // Runtime-control operations are asynchronous. Poll only for the
+      // bounded transition; idle setup pages do not generate background GETs.
+      if (runtime?.operationActive) timer = setTimeout(poll, 800)
+    }
+    void poll()
+    return () => { cancelled = true; runtimeControlGeneration.current++; if (timer) clearTimeout(timer) }
+  }, [activeNav, initialized, loadAgents, loadRuntimeControl])
   const setupPhase = setupState?.phase
   const previousSetupPhase = useRef<SetupState['phase'] | undefined>(undefined)
   useEffect(() => {
@@ -564,6 +616,70 @@ export function App() {
     await mutate(path)
     setSetupReloadEpoch(epoch => epoch + 1)
   }, [mutate])
+  const refreshRuntimeSurfaces = useCallback(async () => {
+    const data = await loadBootstrap().catch(() => null)
+    await Promise.allSettled([
+      loadSetup(),
+      loadAgents(),
+      loadRuntimeControl(),
+      request<Installation>('/api/runtime').then(runtime => {
+        if (runtime && typeof runtime === 'object' && typeof runtime.installed === 'boolean') setBootstrap(current => current ? { ...current, roborev: runtime } : current)
+      }),
+    ])
+    const target = data ?? bootstrap
+    const targetRepo = target?.repositories.find(item => item.identity === target.selectedRepositoryIdentity)
+    if (targetRepo) await Promise.allSettled([loadPanels(targetRepo.path, targetRepo.identity), loadReviews(targetRepo.path, targetRepo.identity)])
+  }, [bootstrap, loadAgents, loadBootstrap, loadPanels, loadReviews, loadRuntimeControl, loadSetup])
+  const pollRuntimeOperation = useCallback(async () => {
+    let latest: RuntimeControlState | null = null
+    // Daemon operations can include process teardown/startup on Windows. Keep
+    // polling bounded just beyond RoboRev's two-minute operation ceiling.
+    for (let attempt = 0; attempt < 125; attempt += 1) {
+      latest = await loadRuntimeControl()
+      if (latest?.error) throw new APIError(latest.error)
+      if (latest && !latest.operationActive) return latest
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+    throw new APIError('The RoboRev daemon operation did not reach a terminal state before the timeout.')
+  }, [loadRuntimeControl])
+  const runDaemonAction: DaemonAction = useCallback(async action => {
+    setBusy(true)
+    try {
+      await request(`/api/daemon/${action}`, { method: 'POST' })
+      await pollRuntimeOperation()
+      await refreshRuntimeSurfaces()
+      toast('success', action === 'start' ? 'RoboRev daemon started.' : action === 'stop' ? 'RoboRev daemon stopped.' : 'RoboRev daemon restarted.')
+    } catch (error) {
+      // A 202 transition can temporarily make bootstrap/review reads
+      // unavailable. The operation itself is the authoritative result; only
+      // a failed command request is surfaced as an error toast.
+      toast('error', (error as Error).message)
+      throw error
+    } finally { setBusy(false) }
+  }, [pollRuntimeOperation, refreshRuntimeSurfaces, toast])
+  const runQueueAction = useCallback(async (action: 'pause' | 'resume') => {
+    setBusy(true)
+    try {
+      await request(`/api/runtime-control/queue/${action}`, { method: 'POST' })
+      await pollRuntimeOperation()
+      await Promise.allSettled([loadRuntimeControl(), loadReviews(bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity)])
+      toast('success', action === 'pause' ? 'Review queue paused.' : 'Review queue resumed.')
+    } catch (error) {
+      toast('error', (error as Error).message)
+      throw error
+    } finally { setBusy(false) }
+  }, [bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity, loadReviews, loadRuntimeControl, pollRuntimeOperation, toast])
+  const runAgentCheck = useCallback(async (agent: string) => {
+    setBusy(true)
+    try {
+      await request('/api/agents/check', { method: 'POST', body: JSON.stringify({ agent }) })
+      await loadAgents()
+      toast('success', `Agent check completed for ${agent}.`)
+    } catch (error) {
+      toast('error', (error as Error).message)
+      throw error
+    } finally { setBusy(false) }
+  }, [loadAgents, toast])
 
   const runningCount = jobs.filter(isRunning).length
   const daemonRunning = Boolean(bootstrap?.roborev?.status?.running)
@@ -711,11 +827,11 @@ export function App() {
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev?.version || 'Setup required'}</span></div></div></aside>
     <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching || setupOperationActive} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || setupOperationActive || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || setupOperationActive || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
-      {!loading && bootstrap && setupState && activeNav !== 'Agents & Setup' && <SetupBanner state={setupState} busy={busy || setupOperationActive} onInstall={() => { setSetupConfirming(true); return Promise.resolve() }} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => setupMutation('/api/daemon/start')} />}
-      {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => setupMutation('/api/daemon/start')}>Start daemon</button>}</section>}
+      {!loading && bootstrap && setupState && activeNav !== 'Agents & Setup' && <SetupBanner state={setupState} busy={busy || setupOperationActive} onInstall={() => { setSetupConfirming(true); return Promise.resolve() }} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} />}
+      {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => runDaemonAction('start')}>Start daemon</button>}</section>}
       {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Panel configuration unavailable</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>Retry panel discovery</button>}</section>}
       {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup state={setupState} busy={busy || setupOperationActive} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => setupMutation('/api/daemon/start')} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup state={setupState} busy={busy || setupOperationActive} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={agents} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { await loadAgents() }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBorev-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
     </main>
     {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || setupOperationActive || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !setupOperationActive && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
     {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}

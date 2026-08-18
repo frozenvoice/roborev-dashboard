@@ -23,6 +23,8 @@
 - RoboRev가 없는 Windows에서 Dashboard first launch와 Setup-required 상태까지 실행되는 것을 확인했다. 새 Setup & Install checkpoint는 Dashboard가 지원하는 RoboRev v0.64.0 Windows amd64 release의 exact asset size와 SHA-256을 immutable manifest에 pin하고, 명시적 UI 확인 뒤에만 bounded HTTPS download, safe ZIP extraction, user-level no-replace publish, strict version probe, current-process rebind와 bounded daemon health를 수행한다.
 - runtime installer는 existing supported binary를 존중하며 explicit override와 newer/unknown/broken/blocked binary를 자동 downgrade 또는 overwrite하지 않는다. PATH, `roborev init`, Git hook, agent/credential과 Windows security policy를 변경하지 않는다. exact Windows policy error는 typed `blocked` 상태로 표시하되 우회하지 않는다.
 - 설치 상태는 process-scoped manager가 소유하고 global operation gate가 setup과 Review/Rerun/comment/close/cancel/Panel Refine mutation의 동시 실행을 fail-fast 409로 막는다. 설치 뒤 daemon 시작이 실패해도 verified binary를 보존하고 재다운로드 없는 Start daemon retry를 제공한다.
+- Setup acceptance lifecycle hardening은 request 종료 뒤 install/retry가 process context에서 계속되고 Dashboard shutdown/ceiling에서 취소·wait·gate release되는 regression suite를 통과했다. Jobs 91/92/93과 후속 GPT review는 모두 PASS했다.
+- Agent Status + Runtime Control checkpoint는 exact v0.64.0 command descriptor와 safe global/local config merge로 zero-quota detection을 제공하고, 격리된 bounded Cursor identity probe로 Grok collision을 fail closed하며, 명시적으로 확인한 canonical agent 하나에만 quota-consuming `check-agents` smoke check를 허용한다. Queue는 official daemon status/pause/unpause API를 사용한다. Stop/Restart는 backend exact argv preview, transport-aware health verification, process-scoped lifecycle과 global runtime-control gate로 Setup/Panel Refine/mutation과 충돌을 막는다. 다른 RoboRev 버전은 agent/runtime contract를 실행하지 않는다.
 - 자동 backend/frontend test와 production build에서는 fake HTTP/filesystem/process만 사용했으며 실제 RoboRev, GitHub release download, daemon 또는 LLM을 실행하지 않았다. 완성된 **Install & Start**의 실제 clean-machine E2E는 이 노트북의 missing-RoboRev 상태를 보존한 채 사용자 수동 검증을 기다린다.
 
 ## 결정
@@ -43,4 +45,5 @@
 1. clean-machine Windows에서 최신 Dashboard exe를 실행하고 Setup confirmation의 repository/version/target/size/full SHA와 no-init/no-agent/no-security-change 범위를 검토한 뒤 사용자가 직접 **Install & Start** 실행
 2. 설치, runtime rebind, daemon online, repository panel 복원, Review HEAD와 Panel Refine 활성화를 같은 session에서 확인
 3. 별도 checkpoint로 v0.65+ compatibility adapter를 검증한 뒤에만 update policy 검토; 자동 downgrade 금지 유지
-4. 이후 check-agents/hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행
+4. Agent Status + Runtime Control 실제 E2E는 사용자 검증 대기: agent detection 확인, 선택한 agent 하나만 Run check, Pause/Resume, Restart, 마지막 Stop/Start 순서
+5. 이후 hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행

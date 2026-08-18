@@ -71,6 +71,55 @@ func TestPanelResolverMergesGlobalAndLocalByWholeKey(t *testing.T) {
 	}
 }
 
+func TestPanelResolverSafeAgentConfigurationMergesAliasesAndGlobalCommands(t *testing.T) {
+	root := t.TempDir()
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	writePanelConfig(t, globalPath, "codex_cmd='C:/tools/codex proxy.exe'\nclaude_code_cmd='claude-global'\n[review.subagents.shared]\nagent='claude'\nmodel='global-model'\nreasoning='high'\ninstructions='SECRET_GLOBAL_INSTRUCTIONS'\n[review.subagents.dynamic]\nagent='custom-acp'\n[review.subagents.global]\nagent='codex'\n")
+	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "codex_cmd='local-must-be-ignored'\n[review.subagents.shared]\nagent='claude-code'\nreasoning='fast'\nprovider='SECRET_PROVIDER'\n[review.subagents.local]\nagent='grok-build'\nmodel='local-model'\n")
+	configuration, err := (&PanelResolver{GlobalConfigPath: globalPath}).ResolveAgentConfiguration(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.Commands["codex_cmd"] != "C:/tools/codex proxy.exe" || configuration.Commands["codex_cmd"] == "local-must-be-ignored" {
+		t.Fatalf("global command override was not preserved: %#v", configuration.Commands)
+	}
+	if configuration.Commands["claude_code_cmd"] != "claude-global" {
+		t.Fatalf("global Claude command override missing: %#v", configuration.Commands)
+	}
+	if len(configuration.Subagents) != 3 {
+		t.Fatalf("safe subagents = %#v", configuration.Subagents)
+	}
+	shared := configuration.Subagents[2]
+	if configuration.Subagents[1].Name != "local" || shared.Name != "shared" {
+		t.Fatalf("subagent order = %#v", configuration.Subagents)
+	}
+	if shared.Agent != "claude-code" || shared.CanonicalAgent != "claude-code" || shared.Model != "" || shared.Reasoning != "fast" || shared.Origin != "local" {
+		t.Fatalf("whole-entry local override failed: %#v", shared)
+	}
+	data, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"SECRET_GLOBAL_INSTRUCTIONS", "SECRET_PROVIDER", "custom-acp", "local-must-be-ignored"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("safe config leaked %q: %s", secret, data)
+		}
+	}
+}
+
+func TestPanelResolverPreservesInheritedSubagentAsDetectionUnavailable(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(t.TempDir(), "config.toml")
+	writePanelConfig(t, filepath.Join(root, ".roborev.toml"), "[review.subagents.inherited]\nmodel='workflow-default'\nreasoning='medium'\ninstructions='SECRET'\n[review.subagents.dynamic]\nagent='custom-acp'\n")
+	got, err := (&PanelResolver{GlobalConfigPath: config}).ResolveAgentConfiguration(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Subagents) != 1 || got.Subagents[0].Name != "inherited" || !got.Subagents[0].DetectionUnavailable || got.Subagents[0].CanonicalAgent != "" || got.Subagents[0].Model != "workflow-default" {
+		t.Fatalf("inherited projection = %#v", got.Subagents)
+	}
+}
+
 func TestPanelResolverNeverExposesSecretConfigFields(t *testing.T) {
 	root := t.TempDir()
 	config := "[review.subagents.audit]\nagent='codex'\nmodel='secret-model'\nprovider='secret-provider'\ninstructions='SECRET_SENTINEL_INSTRUCTIONS'\nreasoning='high'\ntimeout='2m'\n[review.panels.audit]\nmembers=['audit']\nsynthesis_model='secret-synthesis-model'\nsynthesis_backup_model='secret-backup-model'\n"

@@ -31,10 +31,12 @@
 | `close <id>` | close | typed CLI | B | 예 | Comment & Close 순서/부분 실패 보장 |
 | `close <id> --reopen` | reopen | typed CLI | B | 예 | 독립 `reopen` command 없음 |
 | `stream --repo` | live JSONL events | JSONL CLI/SSE relay | P | 아니요 | 초기에는 4초 polling |
-| `pause`, `unpause` | queue control | typed CLI | P | 아니요 | running job 정지로 표현 금지 |
+| `pause`, `unpause` | queue control | daemon `POST /api/queue/pause`, `/api/queue/unpause` | B | 예 | daemon online에서만 실행; running job은 계속되고 새 queued job만 시작하지 않음 |
 | `daemon start` | 설치 직후/기존 설치 daemon 시작 | typed CLI + bounded health retry | B | 예 | health precheck; 시작 실패 시 설치 보존, 재다운로드 없는 retry |
-| `daemon stop/restart/run` | 추가 lifecycle | typed CLI | P | 아니요 | run은 local UI에서 제외 가능 |
-| `check-agents` | agent health | CLI text | P | 아니요 | 현재 JSON flag 없음 |
+| `daemon stop/restart` | global lifecycle | typed CLI + process-scoped bounded health verification | B | 예 | backend exact argv preview; request disconnect와 분리; shutdown cancellation; transport 연결 불가만 offline으로 인정; restart는 stopped daemon도 start하는 upstream semantics 유지 |
+| `daemon run` | foreground lifecycle | typed CLI | N/P | 아니요 | local UI에서 제외 |
+| `check-agents --agent <canonical> --timeout 60` | 선택한 agent health | bounded v0.64 CLI text adapter | B | 예 | explicit confirmation 뒤에만 실행하는 quota-consuming manual check; 자동/page-load 실행 금지 |
+| v0.64 command agent discovery | configured agent detection | bounded typed read-only TOML + isolated executable/identity probe | B | 예 | exact v0.64.0 gate; zero-quota; Detected와 Checked 분리; Cursor/Grok collision fail closed; secret/raw config 미노출 |
 | `fix` | preview/full fix | typed CLI stream | P | 아니요 | confirmation 필수 |
 | `refine` | iterative refine | typed CLI stream | P | 아니요 | unsafe 기본 OFF, confirmation 필수 |
 | `compact` | dry-run/background/wait | typed CLI stream | P | 아니요 | same-branch concurrency 경고 |

@@ -55,6 +55,10 @@ Dashboard runtime installer는 현재 Windows amd64에서 RoboRev v0.64.0만 설
 
 Dashboard는 선택한 repository의 global/local RoboRev panel을 발견한다. panel이 하나면 자동 선택하고 여러 개면 사용자가 선택할 때까지 `Review HEAD`를 실행하지 않는다. `Single agent · no panel`은 RoboRev v0.64.0의 명시적 `none` bypass다.
 
+**Agents & Setup**은 effective `[review.subagents]` alias와 underlying RoboRev agent를 구분해 표시하고, exact v0.64.0 command descriptor와 safe executable lookup으로 quota를 사용하지 않는 `Detected` 상태를 제공한다. Cursor의 `agent` command는 격리된 임시 working directory와 credential/preload 변수가 제거된 환경에서 bounded version-only identity probe를 실행해 Grok alias와 혼동하지 않도록 fail closed한다. `Health`는 자동 실행되지 않으며, 사용자가 특정 canonical agent의 **Run check**를 확인한 경우에만 작은 실제 RoboRev smoke request를 보내므로 subscription/API quota를 사용할 수 있다. 다른 RoboRev 버전에서는 discovery와 check를 실행하지 않는다.
+
+같은 화면의 **RoboRev Runtime**에서는 daemon Start/Stop/Restart와 queue Pause/Resume을 제공한다. Pause는 실행 중인 job을 중지하지 않고 새 queued job의 시작만 막는다. Queue control은 이미 실행 중인 daemon의 typed HTTP API만 사용하며 daemon을 암묵적으로 시작하지 않는다. Stop/Restart 확인 화면은 backend가 생성한 RoboRev executable과 exact argument array를 표시한다. Stop/Restart는 명시적 확인 뒤 process-scoped operation으로 진행되고 Dashboard shutdown에서 취소되며, exact v0.64.0 이외의 버전에서는 모든 runtime mutation을 차단한다.
+
 Finding review의 detail에서는 `Copy Fix Prompt` 또는 `Open Fix Prompt`로 현재 코드에서 finding을 검증·수정하도록 안내하는 편집 가능한 prompt를 만들 수 있다. 이 작업은 로컬 deterministic template이며 LLM, review rerun, fix 또는 file mutation을 실행하지 않는다.
 
 ## Panel Refine

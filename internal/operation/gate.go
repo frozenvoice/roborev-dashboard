@@ -15,6 +15,7 @@ var ErrBusy = errors.New("another Dashboard operation is active")
 type Gate struct {
 	mu        sync.Mutex
 	setup     bool
+	runtime   bool
 	refine    int
 	mutations int
 }
@@ -27,17 +28,19 @@ func (g *Gate) AcquireSetup() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.refine > 0 || g.mutations > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 {
 		return nil, ErrBusy
 	}
 	g.setup = true
-	return g.releaseSetup, nil
-}
-
-func (g *Gate) releaseSetup() {
-	g.mu.Lock()
-	g.setup = false
-	g.mu.Unlock()
+	released := false
+	return func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !released {
+			released = true
+			g.setup = false
+		}
+	}, nil
 }
 
 func (g *Gate) AcquireMutation() (func(), error) {
@@ -46,7 +49,7 @@ func (g *Gate) AcquireMutation() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup {
+	if g.setup || g.runtime {
 		return nil, ErrBusy
 	}
 	g.mutations++
@@ -67,7 +70,7 @@ func (g *Gate) AcquireRefine() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup {
+	if g.setup || g.runtime {
 		return nil, ErrBusy
 	}
 	g.refine++
@@ -82,6 +85,32 @@ func (g *Gate) AcquireRefine() (func(), error) {
 	}, nil
 }
 
+// AcquireRuntimeControl reserves the single runtime-control slot. Lifecycle
+// actions (daemon start/stop/restart) and queue pause/resume are mutually
+// exclusive with setup, panel refine, ordinary mutations, and one another.
+// Acquisition is deliberately non-blocking so HTTP callers can fail fast with
+// a conflict response.
+func (g *Gate) AcquireRuntimeControl() (func(), error) {
+	if g == nil {
+		return nil, ErrBusy
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 {
+		return nil, ErrBusy
+	}
+	g.runtime = true
+	released := false
+	return func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if !released {
+			released = true
+			g.runtime = false
+		}
+	}, nil
+}
+
 func (g *Gate) Snapshot() (setup bool, refine, mutations int) {
 	if g == nil {
 		return false, 0, 0
@@ -89,4 +118,22 @@ func (g *Gate) Snapshot() (setup bool, refine, mutations int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.setup, g.refine, g.mutations
+}
+
+// DetailedSnapshot exposes the runtime lease without changing Snapshot's
+// historical three-value return signature.
+type DetailedSnapshot struct {
+	Setup          bool
+	RuntimeControl bool
+	Refine         int
+	Mutations      int
+}
+
+func (g *Gate) SnapshotDetailed() DetailedSnapshot {
+	if g == nil {
+		return DetailedSnapshot{}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return DetailedSnapshot{Setup: g.setup, RuntimeControl: g.runtime, Refine: g.refine, Mutations: g.mutations}
 }

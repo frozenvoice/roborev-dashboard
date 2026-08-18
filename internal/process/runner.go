@@ -15,10 +15,15 @@ import (
 const DefaultOutputLimit = 4 << 20
 
 type Command struct {
-	Executable  string
-	Args        []string
-	Dir         string
-	Timeout     time.Duration
+	Executable string
+	Args       []string
+	Dir        string
+	// Env replaces the inherited environment when non-nil.
+	Env     []string
+	Timeout time.Duration
+	// WaitDelay overrides the post-cancellation Wait bound; zero keeps the
+	// existing two-second default.
+	WaitDelay   time.Duration
 	OutputLimit int
 	// AllowDetachedChildren is reserved for lifecycle commands such as
 	// `roborev daemon start` whose purpose is to leave a child process running.
@@ -93,12 +98,18 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	stderr := newLimitedBuffer(command.OutputLimit)
 	cmd := exec.CommandContext(ctx, command.Executable, command.Args...)
 	cmd.Dir = command.Dir
+	if command.Env != nil {
+		cmd.Env = append([]string(nil), command.Env...)
+	}
 	prepareCommand(cmd, !command.AllowDetachedChildren)
 	cmd.Stdout = io.Writer(stdout)
 	cmd.Stderr = io.Writer(stderr)
 
 	started := time.Now()
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = command.WaitDelay
+	if cmd.WaitDelay <= 0 {
+		cmd.WaitDelay = 2 * time.Second
+	}
 	var treeMu sync.Mutex
 	var tree processTree
 	cmd.Cancel = func() error {
