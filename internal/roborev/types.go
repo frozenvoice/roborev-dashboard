@@ -22,6 +22,7 @@ type Capabilities struct {
 	PanelMembersAPI    bool `json:"panelMembersApi"`
 	PromptLazyLoad     bool `json:"promptLazyLoad"`
 	RawLog             bool `json:"rawLog"`
+	StreamEvents       bool `json:"streamEvents"`
 }
 
 type JobMetadata struct {

@@ -30,7 +30,7 @@
 | `comment --job <id> --message ... --commenter ...` | comment | typed CLI | B | 예 | 설치된 help로 확인; argument array, multiline 지원 |
 | `close <id>` | close | typed CLI | B | 예 | Comment & Close 순서/부분 실패 보장 |
 | `close <id> --reopen` | reopen | typed CLI | B | 예 | 독립 `reopen` command 없음 |
-| `stream --repo` | live JSONL events | JSONL CLI/SSE relay | P | 아니요 | 초기에는 4초 polling |
+| `stream --repo` | live JSONL events | bounded JSONL CLI + sanitized SSE relay | B | 예 | exact v0.64.0 only; daemon already-online/healthy preflight; repository별 source 1개와 0..N subscribers; stream은 lossy refresh/invalidation hint이고 `/api/reviews` authoritative API가 actual state이며 4초 polling은 fallback/safety net |
 | `pause`, `unpause` | queue control | daemon `POST /api/queue/pause`, `/api/queue/unpause` | B | 예 | daemon online에서만 실행; running job은 계속되고 새 queued job만 시작하지 않음 |
 | `daemon start` | 설치 직후/기존 설치 daemon 시작 | typed CLI + bounded health retry | B | 예 | health precheck; 시작 실패 시 설치 보존, 재다운로드 없는 retry |
 | `daemon stop/restart` | global lifecycle | typed CLI + process-scoped bounded health verification | B | 예 | backend exact argv preview; request disconnect와 분리; shutdown cancellation; transport 연결 불가만 offline으로 인정; restart는 stopped daemon도 start하는 upstream semantics 유지 |
@@ -79,4 +79,5 @@
 - v0.64.0은 panel enumeration JSON/API를 제공하지 않는다. Dashboard는 typed TOML로 global/local panel map을 병합하지만 linked worktree의 untracked main-checkout `.roborev.toml` 상속은 지원하지 않는다. local config가 없고 `.git`이 regular file인 ambiguous layout에서만 `--git-dir`과 `--git-common-dir` metadata를 요구하며, metadata resolution 실패는 global named panel을 숨기고 discovery/mutation을 fail closed한다. metadata가 성공해 actual linked worktree가 아니면 global catalog를 유지하고, `.git` directory/absent도 metadata 없이 global catalog를 유지한다.
 - Fix Prompt는 요청한 job의 `show --job --json` top-level finding과 job metadata만 사용하고 original prompt, diff, log, 다른 member aggregate 및 config를 포함하지 않는다.
 - `repo list --json`과 독립 `reopen` command는 없다. reopen은 `close --reopen`이다.
-- `stream`은 JSONL이며 UI source of truth가 충분한지 검증 전까지 polling 보조 신호로만 계획한다.
+- `stream --repo` checkpoint는 exact v0.64.0 capability로 구현했다. 시작 전에 installation/version/capability와 daemon already-online/healthy 상태를 확인하며 offline에서 daemon이나 stream process를 자동 시작하지 않는다. source는 repository identity별 하나만 유지하고 0..N SSE subscriber가 공유한다. stdout JSONL line은 1 MiB, stderr sink는 64 KiB로 bounded하며 malformed/unknown/oversized line, process exit, cancellation과 Dashboard shutdown을 안전하게 처리한다. recognized event는 raw payload를 버리고 `jobs-changed`와 monotonic sequence만 SSE로 전달한다.
+- `stream`은 **lossy refresh/invalidation hint**이며 UI source of truth가 아니다. frontend는 event burst를 coalesce/debounce한 뒤 `/api/reviews` **authoritative API = actual state**를 다시 요청하고, repository epoch로 stale event/late response를 거부한다. EventSource reconnect를 지원하지만 **4초 polling = fallback/safety net**을 유지한다. 자동 테스트는 `internal/process/stream_test.go`, `internal/roborev/stream_test.go`, `internal/streamrelay/manager_test.go`, `internal/app/server_events_test.go`에서 deterministic fake process/service만 사용하며 실제 RoboRev/daemon/LLM은 실행하지 않는다.

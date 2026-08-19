@@ -22,6 +22,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 	"github.com/froze/roborev-dashboard/internal/setup"
+	"github.com/froze/roborev-dashboard/internal/streamrelay"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
 
@@ -33,6 +34,7 @@ type Server struct {
 	Setup       *setup.Manager
 	Agents      *agentstatus.Service
 	Runtime     *runtimecontrol.Manager
+	Events      *streamrelay.Manager
 	Gate        *operation.Gate
 	AllowedHost string
 	csrfToken   string
@@ -85,7 +87,11 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	var events *streamrelay.Manager
+	if source, ok := service.(streamrelay.Source); ok {
+		events = streamrelay.NewManager(source)
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -103,10 +109,25 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// BeginShutdown stops long-lived SSE sources before net/http begins waiting
+// for active handlers.  It is idempotent with Shutdown and intentionally does
+// not wait for the other process-scoped managers.
+func (s *Server) BeginShutdown(ctx context.Context) error {
+	if s.Events == nil {
+		return nil
+	}
+	return s.Events.Shutdown(ctx)
+}
+
 // Shutdown cancels every process-scoped operation and waits for its gate
 // lease and child work to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.Events != nil {
+		if err := s.Events.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.Runtime != nil {
 		if err := s.Runtime.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -132,6 +153,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runtime-control", s.runtimeControlStatus)
 	s.mux.HandleFunc("GET /api/setup/roborev", s.setupStatus)
 	s.mux.HandleFunc("GET /api/reviews", s.listReviews)
+	s.mux.HandleFunc("GET /api/events", s.events)
 	s.mux.HandleFunc("GET /api/reviews/{id}", s.showReview)
 	s.mux.HandleFunc("GET /api/reviews/{id}/prompt", s.showPrompt)
 	s.mux.HandleFunc("GET /api/reviews/{id}/log", s.showLog)
@@ -179,6 +201,77 @@ func serviceBinary(service roborev.Service) string {
 
 func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.RoboRev.Installation(r.Context()))
+}
+
+// events relays only a repository-scoped jobs-changed invalidation signal.
+// The repository path is never accepted from the browser: identity lookup and
+// a fresh canonical-root inspection are centralized in Registry.
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	identities, hasIdentity := query["repositoryIdentity"]
+	if len(query) != 1 || !hasIdentity || len(identities) != 1 {
+		writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
+		return
+	}
+	identity := strings.TrimSpace(identities[0])
+	if identity == "" {
+		writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming responses are unsupported", "stream")
+		return
+	}
+	repo, err := s.Registry.InspectIdentity(r.Context(), identity)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
+		return
+	}
+	if s.Events == nil {
+		writeError(w, http.StatusServiceUnavailable, "live updates are unavailable", "stream")
+		return
+	}
+	updates, unsubscribe, err := s.Events.Subscribe(r.Context(), identity, repo.Path)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "live updates are unavailable", "stream")
+		return
+	}
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	// A comment establishes the stream without leaking any upstream state.
+	_, _ = io.WriteString(w, ": connected\n\n")
+	flusher.Flush()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event, ok := <-updates:
+			if !ok {
+				return
+			}
+			payload, marshalErr := json.Marshal(event)
+			if marshalErr != nil {
+				return
+			}
+			if _, writeErr := io.WriteString(w, "data: "+string(payload)+"\n\n"); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		case <-keepAlive.C:
+			if _, writeErr := io.WriteString(w, ": keepalive\n\n"); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {

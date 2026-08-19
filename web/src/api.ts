@@ -26,6 +26,8 @@ export type Installation = {
     panelMembersApi: boolean
     promptLazyLoad: boolean
     rawLog: boolean
+    /** Optional because older bootstrap responses predate the stream relay. */
+    streamEvents?: boolean
   }
 }
 
@@ -483,6 +485,37 @@ export type ReviewJob = {
   member_job_ids?: number[]
   duration_ms?: number
   [key: string]: unknown
+}
+
+/**
+ * The stream is deliberately a tiny invalidation signal.  It is not a
+ * review/job state contract: callers must fetch the authoritative review
+ * list after accepting one of these messages.
+ */
+export type ReviewInvalidationEvent = {
+  repositoryIdentity: string
+  sequence: number
+  kind: 'jobs-changed'
+}
+
+export function reviewEventsURL(repositoryIdentity: string): string | null {
+  if (!repositoryIdentity.trim()) return null
+  return `/api/events?repositoryIdentity=${encodeURIComponent(repositoryIdentity)}`
+}
+
+export function normalizeReviewInvalidationEvent(value: unknown): ReviewInvalidationEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim()) return null
+  if (typeof object.sequence !== 'number' || !Number.isSafeInteger(object.sequence) || object.sequence < 0) return null
+  if (object.kind !== 'jobs-changed') return null
+  return { repositoryIdentity: object.repositoryIdentity, sequence: object.sequence, kind: 'jobs-changed' }
+}
+
+/** Parse EventSource.data without ever treating raw stream fields as state. */
+export function parseReviewInvalidationEvent(data: unknown): ReviewInvalidationEvent | null {
+  if (typeof data !== 'string') return null
+  try { return normalizeReviewInvalidationEvent(JSON.parse(data)) } catch { return null }
 }
 
 let csrfToken = ''

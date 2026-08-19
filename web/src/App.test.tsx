@@ -3,10 +3,11 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, CommentBox } from './App'
 import type { PanelInfo } from './api'
+import { I18nProvider, LANGUAGE_STORAGE_KEY } from './i18n'
 
 const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', selectedRepositoryIdentity: 'repo-1', repositories: [{ identity: 'repo-1', name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
-  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, jobOutputStatusApi: true, panelReview: true, fixCommand: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true } },
+  roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, jobOutputStatusApi: true, panelReview: true, fixCommand: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true, streamEvents: true } },
 }
 const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
@@ -43,7 +44,27 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+type FakeEventMessage = { data: string }
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  readonly url: string
+  onopen: (() => void) | null = null
+  onmessage: ((event: FakeEventMessage) => void) | null = null
+  onerror: (() => void) | null = null
+  closed = false
+
+  constructor(url: string) {
+    this.url = url
+    FakeEventSource.instances.push(this)
+  }
+
+  close() { this.closed = true }
+  open() { this.onopen?.() }
+  emit(data: unknown) { this.onmessage?.({ data: JSON.stringify(data) }) }
+  fail() { this.onerror?.() }
+}
+
+afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('App review workflow', () => {
   it('keeps Review HEAD distinct from frozen rerun', async () => {
@@ -1602,6 +1623,198 @@ describe('App review workflow', () => {
     expect(screen.queryByText('RoboRev daemon stopped.')).not.toBeInTheDocument()
     await vi.advanceTimersByTimeAsync(3_000)
     await waitFor(() => expect(screen.getByText('RoboRev daemon stopped.')).toHaveClass('toast', 'success'))
+  })
+
+  it('uses a sanitized SSE event only to trigger the authoritative review GET', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const authoritative = deferred<Response>()
+    const updated = { ...jobs[0], verdict: 'P', review: { output: '# Authoritative pass' } }
+    let reviewCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) {
+        reviewCalls += 1
+        return reviewCalls === 1 ? response(jobs) : authoritative.promise
+      }
+      if (path === '/api/reviews/42') return response(jobs[0])
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText(/#42/)).toBeInTheDocument()
+    const source = FakeEventSource.instances[0]
+    expect(source.url).toBe('/api/events?repositoryIdentity=repo-1')
+    source.emit({ repositoryIdentity: 'repo-1', sequence: 1, kind: 'jobs-changed', verdict: 'P', output: 'event payload must not render' })
+    await vi.advanceTimersByTimeAsync(75)
+    await waitFor(() => expect(reviewCalls).toBe(2))
+    expect(screen.queryByText('Pass')).not.toBeInTheDocument()
+    authoritative.resolve(new Response(JSON.stringify([updated]), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Pass')).toBeInTheDocument()
+    expect(screen.queryByText('event payload must not render')).not.toBeInTheDocument()
+  })
+
+  it('coalesces an event burst and allows only one trailing refresh after an in-flight GET', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const eventRefresh = deferred<Response>()
+    let reviewCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) {
+        reviewCalls += 1
+        return reviewCalls === 1 || reviewCalls === 3 ? response(jobs) : eventRefresh.promise
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText(/#42/)).toBeInTheDocument()
+    const source = FakeEventSource.instances[0]
+    source.emit({ repositoryIdentity: 'repo-1', sequence: 1, kind: 'jobs-changed' })
+    await vi.advanceTimersByTimeAsync(75)
+    await waitFor(() => expect(reviewCalls).toBe(2))
+    for (let sequence = 2; sequence <= 21; sequence += 1) source.emit({ repositoryIdentity: 'repo-1', sequence, kind: 'jobs-changed' })
+    await vi.advanceTimersByTimeAsync(75)
+    expect(reviewCalls).toBe(2)
+    eventRefresh.resolve(new Response(JSON.stringify(jobs), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(reviewCalls).toBe(3))
+    await vi.advanceTimersByTimeAsync(75)
+    expect(reviewCalls).toBe(3)
+  })
+
+  it('closes the old source and ignores late old events and GET responses after a repository switch', async () => {
+    const oldReview = deferred<Response>()
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    const switched = { ...initial, selectedRepository: other.path, selectedRepositoryIdentity: other.identity }
+    let bootstrapCalls = 0
+    let oldReviewCalls = 0
+    let newReviewCalls = 0
+    vi.stubGlobal('EventSource', FakeEventSource)
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path.startsWith('/api/reviews?')) {
+        if (path.includes(encodeURIComponent('E:\\other'))) { newReviewCalls += 1; return response([{ ...jobs[0], id: 84, commit_subject: 'Other repository review' }]) }
+        oldReviewCalls += 1
+        return oldReview.promise
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+    const selector = await screen.findByRole('combobox', { name: 'Current repository' })
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const sourceA = FakeEventSource.instances[0]
+    await waitFor(() => expect(oldReviewCalls).toBe(1))
+    fireEvent.change(selector, { target: { value: other.identity } })
+    await waitFor(() => expect(selector).toHaveValue(other.identity))
+    await waitFor(() => expect(sourceA.closed).toBe(true))
+    const callsAfterSwitch = oldReviewCalls
+    sourceA.emit({ repositoryIdentity: 'repo-1', sequence: 99, kind: 'jobs-changed' })
+    oldReview.resolve(new Response(JSON.stringify(jobs), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(oldReviewCalls).toBe(callsAfterSwitch)
+    expect(screen.queryByText(/#42/)).not.toBeInTheDocument()
+    expect(await screen.findByText(/#84/)).toBeInTheDocument()
+    expect(newReviewCalls).toBeGreaterThan(0)
+  })
+
+  it('keeps repository A stream and polling alive when the switch is rejected', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    let reviewCalls = 0
+    vi.stubGlobal('EventSource', FakeEventSource)
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(initial)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ error: 'selection rejected' }, 409)
+      if (path.startsWith('/api/reviews?')) { reviewCalls += 1; return response(jobs) }
+      return response({ success: true })
+    }))
+    render(<App />)
+    const selector = await screen.findByRole('combobox', { name: 'Current repository' })
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1))
+    const sourceA = FakeEventSource.instances[0]
+    fireEvent.change(selector, { target: { value: other.identity } })
+    await waitFor(() => expect(screen.getByText('selection rejected')).toBeInTheDocument())
+    expect(selector).toHaveValue('repo-1')
+    expect(sourceA.closed).toBe(false)
+    const beforeEvent = reviewCalls
+    sourceA.emit({ repositoryIdentity: 'repo-1', sequence: 1, kind: 'jobs-changed' })
+    await vi.advanceTimersByTimeAsync(75)
+    await waitFor(() => expect(reviewCalls).toBeGreaterThan(beforeEvent))
+  })
+
+  it('closes on SSE error, reconnects with bounded backoff, and keeps polling reviews', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal('EventSource', FakeEventSource)
+    let reviewCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) { reviewCalls += 1; return response(jobs) }
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText(/#42/)).toBeInTheDocument()
+    const sourceA = FakeEventSource.instances[0]
+    sourceA.fail()
+    expect(sourceA.closed).toBe(true)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(FakeEventSource.instances).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2))
+    await vi.advanceTimersByTimeAsync(4_000)
+    expect(reviewCalls).toBeGreaterThan(1)
+  })
+
+  it.each([
+    ['missing capability', { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, streamEvents: undefined } } }],
+    ['explicitly disabled capability', { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, streamEvents: false } } }],
+  ])('keeps polling without creating EventSource when stream capability is %s', async (_label, unsupported) => {
+    vi.stubGlobal('EventSource', FakeEventSource)
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(unsupported)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      return response({ success: true })
+    }))
+    render(<App />)
+    expect(await screen.findByText(/#42/)).toBeInTheDocument()
+    expect(FakeEventSource.instances).toHaveLength(0)
+  })
+
+  it('keeps the open detail comment form and one SSE subscription across locale changes', async () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const calls: Array<{ path: string; method: string }> = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, method: init?.method ?? 'GET' })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await userEvent.click(await screen.findByText(/#42/))
+    await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })
+    await userEvent.click(screen.getByRole('button', { name: 'Comments' }))
+    const comment = screen.getByRole('textbox', { name: 'Comment' })
+    await userEvent.type(comment, 'Preserve this draft')
+    const beforeCalls = calls.length
+    const source = FakeEventSource.instances[0]
+    fireEvent.change(screen.getAllByLabelText('Select language')[0], { target: { value: 'ko' } })
+    expect(screen.getByRole('button', { name: '댓글' })).toHaveClass('active')
+    expect(screen.getByRole('textbox', { name: '댓글' })).toHaveValue('Preserve this draft')
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(source.closed).toBe(false)
+    expect(calls.length).toBe(beforeCalls)
+    expect(calls.some(call => call.method === 'POST')).toBe(false)
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
   })
 })
 

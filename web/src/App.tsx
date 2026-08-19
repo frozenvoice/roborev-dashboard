@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeRuntimeControl, normalizeSetupState, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeRuntimeControl, normalizeSetupState, parseReviewInvalidationEvent, reviewEventsURL, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { PanelRefine } from './PanelRefine'
 import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonAction } from './Setup'
@@ -64,6 +64,9 @@ function elapsed(job: ReviewJob) {
 function panelLabel(panel: PanelInfo, t: ReturnType<typeof useI18n>['t']) { return panel.name === 'none' ? t('review.singleAgent') : t('review.crossReview', { panel: panel.name }) }
 function validPanelConfiguration(value: PanelConfiguration, identity: string) {
   return value?.repositoryIdentity === identity && Array.isArray(value.panels) && typeof value.selectedPanel === 'string' && typeof value.selectionRequired === 'boolean' && value.panels.every(panel => panel && typeof panel.name === 'string' && ['panel', 'single'].includes(panel.kind) && Array.isArray(panel.members) && ['global', 'local', 'builtin'].includes(panel.origin) && typeof panel.valid === 'boolean')
+}
+function reviewStreamSupported(installation?: Installation) {
+  return installation?.capabilities?.streamEvents === true
 }
 export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: Error }> {
   state: { error?: Error } = {}
@@ -323,6 +326,9 @@ export function App() {
   const panelRefineReviewGeneration = useRef(0)
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
+  const reviewEffectEpoch = useRef(0)
+  const reviewCleanup = useRef<(() => void) | null>(null)
+  const reviewSwitchInProgress = useRef(false)
   // Request generation only orders overlapping GET /api/agents calls. It is
   // intentionally independent from the repository epoch so a same-repo
   // refresh cannot make an in-flight health check look stale.
@@ -357,20 +363,24 @@ export function App() {
   }, [selectedRepositoryIdentity])
 
   const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
-  const loadReviews = useCallback(async (repo?: string, identity?: string) => {
+  const loadReviews = useCallback(async (repo?: string, identity?: string, expectedEffectEpoch?: number) => {
     if (!repo || !identity) return []
     const generation = ++reviewGeneration.current
+    const isCurrent = () => generation === reviewGeneration.current
+      && identity === currentRepositoryIdentity.current
+      && !reviewSwitchInProgress.current
+      && (expectedEffectEpoch === undefined || expectedEffectEpoch === reviewEffectEpoch.current)
     try {
       const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repo)}`))
-      if (generation === reviewGeneration.current) {
+      if (isCurrent()) {
         setJobs(next)
         setSelected(current => current ? next.find(job => idOf(job) === idOf(current)) ?? current : current)
         setReviewPollError('')
         setLoadedReviewIdentity(identity)
       }
-      return generation === reviewGeneration.current ? next : []
+      return isCurrent() ? next : []
     } catch (error) {
-      if (generation === reviewGeneration.current) {
+      if (isCurrent()) {
         setReviewPollError((error as Error).message)
         setLoadedReviewIdentity(identity)
       }
@@ -613,8 +623,10 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, panelRefineReloadEpoch, repo?.identity, repo?.path, loadPanelRefine])
   const canPollReviews = Boolean(bootstrap?.roborev?.installed && bootstrap.roborev?.capabilities?.jobListApi && bootstrap.roborev?.status?.running)
+  const canStreamReviews = canPollReviews && reviewStreamSupported(bootstrap?.roborev)
   useEffect(() => {
     if (!initialized) return
+    const effectEpoch = ++reviewEffectEpoch.current
     reviewGeneration.current++
     if (!canPollReviews) {
       setJobs([])
@@ -627,17 +639,106 @@ export function App() {
     if (!repoPath || !repoIdentity) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    let eventSource: EventSource | undefined
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined
+    let authoritativeInFlight = false
+    let refreshPending = false
+    let reconnectDelay = 1_000
+    let cleaned = false
+    const scopeActive = () => !cancelled && effectEpoch === reviewEffectEpoch.current && repoIdentity === currentRepositoryIdentity.current
+    const eventScopeActive = () => scopeActive() && !reviewSwitchInProgress.current
+
+    // A stream message only invalidates the list.  Keep the leading refresh
+    // short, coalesce a burst into one request, and permit one trailing
+    // refresh when events arrive while the authoritative GET is in flight.
+    const refreshReviews = async () => {
+      if (!scopeActive()) return
+      if (authoritativeInFlight) {
+        refreshPending = true
+        return
+      }
+      authoritativeInFlight = true
+      try {
+        await loadReviews(repoPath, repoIdentity, effectEpoch)
+      } finally {
+        authoritativeInFlight = false
+        if (!cancelled && refreshPending) {
+          refreshPending = false
+          scheduleEventRefresh()
+        }
+      }
+    }
+    const scheduleEventRefresh = () => {
+      if (!eventScopeActive() || refreshTimer) return
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined
+        void refreshReviews()
+      }, 75)
+    }
+    const scheduleReconnect = () => {
+      if (!scopeActive() || reconnectTimer) return
+      const delay = reconnectDelay
+      reconnectDelay = Math.min(30_000, reconnectDelay * 2)
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined
+        connectEvents()
+      }, delay)
+    }
+    const connectEvents = () => {
+      if (!scopeActive() || eventSource || typeof EventSource === 'undefined') return
+      const eventsURL = reviewEventsURL(repoIdentity)
+      if (!eventsURL) return
+      try {
+        const next = new EventSource(eventsURL)
+        eventSource = next
+        next.onopen = () => { reconnectDelay = 1_000 }
+        next.onmessage = event => {
+          if (!eventScopeActive() || eventSource !== next) return
+          const signal = parseReviewInvalidationEvent(event.data)
+          if (!signal || signal.repositoryIdentity !== repoIdentity || signal.kind !== 'jobs-changed') return
+          scheduleEventRefresh()
+        }
+        next.onerror = () => {
+          if (!scopeActive() || eventSource !== next) return
+          // Native EventSource retries automatically. Close first so that we
+          // own a single bounded retry timer and never duplicate connections.
+          next.close()
+          eventSource = undefined
+          scheduleReconnect()
+        }
+      } catch {
+        // An unavailable/unsupported SSE implementation must not affect the
+        // ordinary four-second review polling fallback.
+        eventSource = undefined
+        scheduleReconnect()
+      }
+    }
     const poll = async () => {
-      await loadReviews(repoPath, repoIdentity)
-      if (!cancelled) timer = setTimeout(poll, 4000)
+      await refreshReviews()
+      if (scopeActive()) timer = setTimeout(poll, 4000)
     }
     void poll()
-    return () => {
+    if (canStreamReviews) connectEvents()
+    const cleanup = () => {
+      if (cleaned) return
+      cleaned = true
       cancelled = true
+      reviewEffectEpoch.current++
       reviewGeneration.current++
       if (timer) clearTimeout(timer)
+      if (refreshTimer) clearTimeout(refreshTimer)
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      eventSource?.close()
+      eventSource = undefined
+      refreshPending = false
     }
-  }, [bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity, canPollReviews, initialized, loadReviews])
+    reviewCleanup.current = cleanup
+    return () => {
+      if (reviewCleanup.current === cleanup) reviewCleanup.current = null
+      cleanup()
+    }
+  }, [bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity, canPollReviews, canStreamReviews, initialized, loadReviews])
   useEffect(() => {
     if (!initialized) return
     let cancelled = false
@@ -844,6 +945,11 @@ export function App() {
     const target = bootstrap?.repositories.find(item => item.identity === identity)
     if (!target) return
     const generation = ++repoSwitchGeneration.current
+    // Keep the old coordinator alive until the backend confirms the selected
+    // repository. While that round trip is pending, suppress event refreshes
+    // and prevent old GETs from committing; a failed switch can therefore
+    // resume the same A coordinator without losing its fallback polling.
+    reviewSwitchInProgress.current = true
     setupReadyGeneration.current++
     setRepoSwitching(true)
     reviewActionGeneration.current++
@@ -885,10 +991,14 @@ export function App() {
       setBootstrap(data)
       const restored = data.repositories.find(item => item.identity === data.selectedRepositoryIdentity)
       if (!restored) throw new APIError(t('error.bootstrapRepositoryMissing'))
+      // Move the request scope forward before the eager review GET below;
+      // React's identity effect will mirror this ref after the render.
+      currentRepositoryIdentity.current = data.selectedRepositoryIdentity
       setPanelLoadEpoch(epoch => epoch + 1)
       setAgentsReloadEpoch(epoch => epoch + 1)
       if (selectError) toast('error', selectError.message)
       else toast('success', t('review.stateUpdated'))
+      reviewSwitchInProgress.current = false
       await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
     } catch (error) {
       if (generation !== repoSwitchGeneration.current) return
@@ -896,7 +1006,10 @@ export function App() {
       setPanelError(t('error.repositoryRestoreFailed', { error: (error as Error).message }))
       setPanelLoading(false)
     } finally {
-      if (generation === repoSwitchGeneration.current) setRepoSwitching(false)
+      if (generation === repoSwitchGeneration.current) {
+        reviewSwitchInProgress.current = false
+        setRepoSwitching(false)
+      }
     }
   }
 

@@ -28,6 +28,7 @@
 - Agent health check는 selected-repository 전용 read lease로 repository selection commit과 quota dispatch를 선형화하고, service의 single discovery에서 configured/detected eligibility를 재검증한다. Frontend의 repository epoch는 실제 identity 변경만 추적하고 GET generation은 same-repository latest-wins만 담당하므로 concurrent refresh와 failed repository switch 뒤에도 올바른 scope의 Agent cards와 completion 상태를 복원한다.
 - 자동 backend/frontend test와 production build에서는 fake HTTP/filesystem/process만 사용했으며 실제 RoboRev, GitHub release download, daemon 또는 LLM을 실행하지 않았다. 완성된 **Install & Start**의 실제 clean-machine E2E는 이 노트북의 missing-RoboRev 상태를 보존한 채 사용자 수동 검증을 기다린다.
 - Frontend ko/en localization checkpoint를 구현했다. `web/src/i18n.tsx`가 typed English/Korean catalog, safe `roborev-dashboard-language` storage/browser fallback, stable `t`/`format` callbacks와 `<html lang>`을 제공하며 App/Setup/Panel Refine chrome, empty/loading/error/action 안내와 sidebar/modal language selector를 번역한다. locale 전환은 repo/panel/review/detail/tab/modal/setup/progress/refine/agent/runtime/form 상태를 보존하고 fetch/mutation을 시작하지 않는다. RoboRev, Git/SHA/API/CLI/CSRF/URL/JSON, names/branches/IDs/paths/versions, argv/preview와 backend raw error는 technical source-of-truth로 유지한다. 단위·통합 frontend tests와 Vite build는 통과했으며 RoboRev는 아직 설치하지 않았다.
+- RoboRev v0.64.0 `stream --repo` live relay checkpoint를 구현했다. exact version/capability와 daemon already-online/healthy preflight 뒤에만 typed argv로 시작하며, repository identity별 source 하나를 0..N SSE subscribers가 공유한다. bounded JSONL/stderr, malformed·oversized line, process exit/restart, subscriber disconnect, identity isolation, sanitized payload와 shutdown cleanup을 구현했다. SSE는 `jobs-changed` invalidation만 전달하고, frontend는 burst coalescing/reconnect 뒤 `/api/reviews` authoritative fetch를 수행한다. 기존 4초 polling은 fallback/safety net으로 유지된다. deterministic fake 기반 backend/frontend tests에서 실제 RoboRev/daemon/LLM을 호출하지 않았다.
 
 ## 결정
 
@@ -49,4 +50,5 @@
 3. 같은 clean-machine session에서 sidebar와 열린 install/daemon/agent-check/Fix Prompt/Panel Refine modal의 한국어↔English 전환, technical preview 보존, network/mutation 부재와 mobile wrapping을 수동 확인
 4. 별도 checkpoint로 v0.65+ compatibility adapter를 검증한 뒤에만 update policy 검토; 자동 downgrade 금지 유지
 5. Agent Status + Runtime Control 실제 E2E는 사용자 검증 대기: agent detection 확인, 선택한 agent 하나만 Run check, Pause/Resume, Restart, 마지막 Stop/Start 순서
-6. 이후 hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행
+6. clean-machine Windows에서 RoboRev v0.64.0 daemon online 상태로 stream relay를 수동 smoke test: Review enqueue/complete event, browser reconnect/sleep/network flap, repository switch isolation, SSE unavailable 시 4초 polling fallback과 Dashboard shutdown/child cleanup 확인
+7. 이후 hooks/config와 analyze/run 같은 agentic workflow 진행

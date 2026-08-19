@@ -7,6 +7,21 @@ import (
 	"unicode"
 )
 
+// StreamArgs is the exact v0.64.0 JSONL stream contract.  The repository
+// value must already be a canonical path authorized by the Dashboard registry;
+// this builder does not accept arbitrary browser input.
+func StreamArgs(repo string) ([]string, error) {
+	if strings.TrimSpace(repo) == "" {
+		return nil, errors.New("repository is required")
+	}
+	for _, char := range repo {
+		if unicode.IsControl(char) {
+			return nil, errors.New("repository path contains control characters")
+		}
+	}
+	return []string{"stream", "--repo", repo}, nil
+}
+
 func validateJobID(id int64) error {
 	if id <= 0 {
 		return errors.New("job ID must be positive")

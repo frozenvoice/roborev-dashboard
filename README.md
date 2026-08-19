@@ -61,6 +61,10 @@ Dashboard runtime installer는 현재 Windows amd64에서 RoboRev v0.64.0만 설
 
 Dashboard는 선택한 repository의 global/local RoboRev panel을 발견한다. panel이 하나면 자동 선택하고 여러 개면 사용자가 선택할 때까지 `Review HEAD`를 실행하지 않는다. `Single agent · no panel`은 RoboRev v0.64.0의 명시적 `none` bypass다.
 
+### Live review updates
+
+RoboRev v0.64.0 daemon이 이미 online/healthy일 때 Dashboard는 repository별 `roborev stream --repo` JSONL source를 backend에서 bounded하게 relay한다. browser SSE(`GET /api/events?repositoryIdentity=...`)에는 raw event가 아닌 `{repositoryIdentity, sequence, kind: "jobs-changed"}`만 전달된다. stream은 **lossy refresh/invalidation hint**이고 `/api/reviews` **authoritative API = actual state**다. frontend는 event burst를 coalesce한 뒤 기존 review API를 다시 조회하며, 기존 **4초 polling = fallback/safety net**은 stream 실패·재연결·unsupported runtime에서도 유지된다. repository identity가 바뀌면 이전 event와 late response는 무시된다.
+
 현재 clean-machine checkpoint는 RoboRev가 설치되지 않은 상태를 보존한다. 다음 수동 E2E에서 Setup 화면의 pinned v0.64.0 확인 범위와 Install & Start를 검토한 뒤에만 RoboRev를 설치하고, daemon online·panel 복원·Review HEAD·Panel Refine을 확인한다.
 
 **Agents & Setup**은 effective `[review.subagents]` alias와 underlying RoboRev agent를 구분해 표시하고, exact v0.64.0 command descriptor와 safe executable lookup으로 quota를 사용하지 않는 `Detected` 상태를 제공한다. Cursor의 `agent` command는 격리된 임시 working directory와 credential/preload 변수가 제거된 환경에서 bounded version-only identity probe를 실행해 Grok alias와 혼동하지 않도록 fail closed한다. `Health`는 자동 실행되지 않으며, 사용자가 특정 canonical agent의 **Run check**를 확인한 경우에만 작은 실제 RoboRev smoke request를 보내므로 subscription/API quota를 사용할 수 있다. 다른 RoboRev 버전에서는 discovery와 check를 실행하지 않는다.

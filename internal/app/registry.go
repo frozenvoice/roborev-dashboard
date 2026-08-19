@@ -323,6 +323,33 @@ func (r *Registry) Identity(path string) (string, error) {
 	return registryKey(resolved), nil
 }
 
+// ResolveIdentity authorizes an opaque repository identity against the
+// registered canonical-path map.  Browser callers never provide a path to a
+// stream or mutation endpoint.
+func (r *Registry) ResolveIdentity(identity string) (string, error) {
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return "", errors.New("repository identity is required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	path, ok := r.paths[identity]
+	if !ok {
+		return "", errors.New("repository is not registered")
+	}
+	return path, nil
+}
+
+// InspectIdentity combines identity authorization with a fresh Git inspection
+// and canonical-root verification for long-lived repository-scoped sources.
+func (r *Registry) InspectIdentity(ctx context.Context, identity string) (gitx.Repository, error) {
+	path, err := r.ResolveIdentity(identity)
+	if err != nil {
+		return gitx.Repository{}, err
+	}
+	return r.inspectExpected(ctx, path)
+}
+
 func (r *Registry) Selected() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
