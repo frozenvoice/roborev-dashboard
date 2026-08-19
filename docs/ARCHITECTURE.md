@@ -80,6 +80,12 @@ review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 사용하�
 
 repository 전환 시 panel catalog도 별도 current-generation request로 읽는다. valid saved preference가 있으면 복원하고, named panel이 하나면 자동 선택하며, 여러 개면 사용자 선택 전까지 Review HEAD를 막고, named panel이 없을 때만 reserved `none`을 자동 선택한다. 사용자가 선택하거나 Review HEAD를 누를 때 backend는 fresh repository identity와 current TOML을 다시 resolve해 exact panel 또는 built-in `none`만 daemon JSON enqueue에 전달한다.
 
+### Frontend localization
+
+`web/src/i18n.tsx`는 English source catalog와 exact-key Korean catalog, `Locale = 'ko' | 'en'`, `roborev-dashboard-language` storage key, guarded storage access와 browser fallback을 한 곳에서 소유한다. `I18nProvider`의 `t`/`format` callback은 locale 전환에도 stable identity를 유지하고 `<html lang>`만 presentation 상태로 갱신한다. App은 stable navigation/repository/panel/review IDs와 번역된 표시 label을 분리하며 locale 변경을 fetch/effect dependency나 React key/remount 조건으로 사용하지 않는다.
+
+Language selector는 sidebar footer와 overlay가 가리는 다섯 개의 confirmation surface(install, daemon, agent check, Fix Prompt, Panel Refine) 헤더에 배치한다. 전환은 현재 repo, panel, detail/tab, modal, setup/progress/refine/agent/runtime/form/search/comment 상태를 유지하고 새 network request나 mutation을 만들지 않는다. Dashboard가 만든 chrome/empty/loading/error/action 문구만 번역하며 RoboRev, Git/SHA/API/CLI/CSRF/URL/JSON, paths, versions, names, branches, IDs, executable argv와 backend/RoboRev raw error는 source of truth로서 보존한다. English fallback은 누락 key를 안전하게 표시하고 typed catalog가 build 단계에서 key drift를 검출한다.
+
 `GET /api/reviews/{id}/fix-prompt`는 job ownership과 current registered repository를 확인하고 `show --job --json`을 lazy-load한 뒤 요청한 single review, panel synthesis 또는 individual panel member의 top-level finding output과 최소 metadata만 typed decode한다. terminal F 결과에 한해 deterministic Korean template를 생성하며 LLM, `roborev fix`, mutation, close 또는 rerun을 실행하지 않는다. prompt, diff, log, comments, 다른 member의 aggregate와 config는 포함하지 않고 finding은 변형하지 않는다. target과 current HEAD가 다르면 stale warning을 넣으며 input/output 크기는 bounded하고 초과 시 truncate하지 않고 거부한다.
 
 Dashboard의 `/api/runtime`은 repository inspection이나 review listing 없이 TTL 30초의 version detection과 v0.64.0의 작은 `/api/health`만 수행하며 UI가 10초마다 호출한다. 실제 `status --json`은 최근 job의 full prompt까지 포함할 수 있어 주기적 polling transport로 사용하지 않는다. panel member도 목록에 합치지 않고 panel tab을 열 때 `/api/jobs?panel_run=...&limit=0&omit_prompt=true`로 읽고 adapter에서 heavy field를 제거하며, nonterminal member가 있는 동안 4초마다 갱신한다. upstream v0.64.0에서 `limit=0`은 unlimited로 문서화되어 있다.

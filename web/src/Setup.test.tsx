@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { normalizeSetupState, type AgentsResponse, type RuntimeControlState, type SetupState } from './api'
 import { Setup, SetupBanner } from './Setup'
 import { App } from './App'
+import { I18nProvider, LANGUAGE_STORAGE_KEY } from './i18n'
 
 const baseState: SetupState = {
   status: 'idle', phase: 'idle', operationActive: false, installed: false, recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: false, blocked: false, retryable: false, installAvailable: true, canInstall: true, canRetry: false, canStartDaemon: false,
@@ -19,7 +20,7 @@ const readyBootstrap = {
 }
 function jsonResponse(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.clear() })
 
 describe('RoboRev setup', () => {
   const readySetup = { ...baseState, status: 'ready' as const, phase: 'ready' as const, operationActive: false, installed: true, canInstall: false, installAvailable: false, canStartDaemon: false, daemonRunning: true, compatible: true, panelRefineCompatible: true }
@@ -55,6 +56,29 @@ describe('RoboRev setup', () => {
     expect(screen.getByRole('button', { name: 'Pause queue' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Resume queue' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  })
+
+  it.each([
+    ['idle', 'Ready to accept typed review operations.'],
+    ['start', 'Start daemon'],
+    ['stop', 'Stop daemon'],
+    ['restart', 'Restart daemon'],
+    ['pause', 'Pause queue'],
+    ['resume', 'Resume queue'],
+    ['unknown-operation', 'unknown-operation'],
+  ])('renders the runtime manager operation %s with a safe fallback', (_operation, expected) => {
+    render(<I18nProvider><Setup state={readySetup} runtimeControl={{ ...runningRuntime, daemonOperation: _operation }} /></I18nProvider>)
+    expect(document.querySelector('.runtime-control-card p')).toHaveTextContent(expected)
+  })
+
+  it.each([
+    ['idle', 'typed 리뷰 작업을 받을 준비가 되었습니다.'],
+    ['pause', '대기열 일시중지'],
+    ['resume', '대기열 재개'],
+  ])('renders the %s runtime operation in Korean', (operation, expected) => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'ko')
+    render(<I18nProvider><Setup state={readySetup} runtimeControl={{ ...runningRuntime, daemonOperation: operation }} /></I18nProvider>)
+    expect(document.querySelector('.runtime-control-card p')).toHaveTextContent(expected)
   })
 
   it('fails closed when a daemon command preview is missing or mismatched', async () => {

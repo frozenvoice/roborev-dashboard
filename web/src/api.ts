@@ -76,6 +76,9 @@ export type SetupState = {
 export type AgentHealth = 'not_checked' | 'passed' | 'failed' | 'skipped' | 'canceled'
 
 export type AgentCommand = string | { executable: string; args: string[] }
+// API normalization must not embed a display-language string. The Setup UI
+// maps this stable sentinel to the active catalog language.
+export const BACKEND_COMMAND_SENTINEL = '__roborev_backend_command__'
 
 export type ConfiguredReviewAgent = {
   name: string
@@ -151,7 +154,7 @@ function normalizeAgentCommand(value: unknown): AgentCommand {
   if (typeof value === 'string') return value
   const object = objectValue(value)
   if (object && typeof object.executable === 'string' && Array.isArray(object.args) && object.args.every(item => typeof item === 'string')) return { executable: object.executable, args: object.args as string[] }
-  return 'Command supplied by RoboRev'
+  return BACKEND_COMMAND_SENTINEL
 }
 
 /** Parse the machine-readable configured-agent response. Unknown fields are ignored. */

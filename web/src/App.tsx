@@ -4,6 +4,7 @@ import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normal
 import { Markdown } from './Markdown'
 import { PanelRefine } from './PanelRefine'
 import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonAction } from './Setup'
+import { I18nContext, LanguageSelector, useI18n, type MessageKey } from './i18n'
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
@@ -16,15 +17,30 @@ const navigation = [
   ['Agents & Setup', Bot], ['Configuration', Settings], ['Stats & Insights', Activity], ['Advanced', SlidersHorizontal],
 ] as const
 
+const navigationLabelKeys: Record<string, MessageKey> = {
+  Overview: 'nav.overview', Reviews: 'nav.reviews', 'Fix & Refine': 'nav.fixRefine', Analyze: 'nav.analyze', Tasks: 'nav.tasks',
+  Repositories: 'nav.repositories', 'Agents & Setup': 'nav.agentsSetup', Configuration: 'nav.configuration', 'Stats & Insights': 'nav.stats', Advanced: 'nav.advanced',
+}
+function navigationLabel(value: string, t: ReturnType<typeof useI18n>['t']) {
+  const key = navigationLabelKeys[value]
+  return key ? t(key) : value
+}
+
+const tabLabelKeys: Record<Tab, MessageKey> = {
+  review: 'review.tabReview', members: 'review.panelMembers', log: 'review.tabLog', prompt: 'review.tabPrompt', comments: 'review.tabComments', metadata: 'review.tabMetadata',
+}
+function tabLabel(value: Tab, t: ReturnType<typeof useI18n>['t']) { return t(tabLabelKeys[value]) }
+
 function statusOf(job: ReviewJob) { return String(job.verdict || job.review && typeof job.review === 'object' && job.review.verdict || job.status || 'queued').toLowerCase() }
-function statusLabel(value: string) {
-  if (value === 'p' || value === 'pass' || value === 'passed') return 'Pass'
-  if (value === 'f' || value === 'fail' || value === 'finding' || value === 'failed_review') return 'Finding'
-  if (value === 'done') return 'Done'
-  if (value === 'running' || value === 'queued') return value[0].toUpperCase() + value.slice(1)
-  if (value === 'canceled' || value === 'cancelled') return 'Canceled'
-  if (value === 'failed' || value === 'error') return 'Error'
-  return value || 'Unknown'
+function statusLabel(value: string, t: ReturnType<typeof useI18n>['t']) {
+  if (value === 'p' || value === 'pass' || value === 'passed') return t('status.pass')
+  if (value === 'f' || value === 'fail' || value === 'finding' || value === 'failed_review') return t('status.finding')
+  if (value === 'done') return t('status.done')
+  if (value === 'running') return t('status.running')
+  if (value === 'queued') return t('status.queued')
+  if (value === 'canceled' || value === 'cancelled') return t('status.canceled')
+  if (value === 'failed' || value === 'error') return t('status.error')
+  return value || t('status.unknown')
 }
 function outputOf(job: ReviewJob | null) {
   if (!job) return ''
@@ -45,7 +61,7 @@ function elapsed(job: ReviewJob) {
   const seconds = Math.max(0, Math.floor((end - Date.parse(start)) / 1000))
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
-function panelLabel(panel: PanelInfo) { return panel.name === 'none' ? 'Single agent · no panel' : `Cross review · ${panel.name}` }
+function panelLabel(panel: PanelInfo, t: ReturnType<typeof useI18n>['t']) { return panel.name === 'none' ? t('review.singleAgent') : t('review.crossReview', { panel: panel.name }) }
 function validPanelConfiguration(value: PanelConfiguration, identity: string) {
   return value?.repositoryIdentity === identity && Array.isArray(value.panels) && typeof value.selectedPanel === 'string' && typeof value.selectionRequired === 'boolean' && value.panels.every(panel => panel && typeof panel.name === 'string' && ['panel', 'single'].includes(panel.kind) && Array.isArray(panel.members) && ['global', 'local', 'builtin'].includes(panel.origin) && typeof panel.valid === 'boolean')
 }
@@ -54,40 +70,44 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: 
   static getDerivedStateFromError(error: Error) { return { error } }
   componentDidCatch(error: Error, info: ErrorInfo) { console.error(error, info) }
   render() {
-    if (this.state.error) return <main className="fatal"><XCircle /><h1>Dashboard UI failed</h1><p>{this.state.error.message}</p><button onClick={() => location.reload()}>Reload</button></main>
+    if (this.state.error) return <I18nContext.Consumer>{({ t }) => <main className="fatal"><XCircle /><h1>{t('error.dashboardFailed')}</h1><p>{this.state.error?.message}</p><button onClick={() => location.reload()}>{t('error.reload')}</button></main>}</I18nContext.Consumer>
     return this.props.children
   }
 }
 
 function StatusPill({ job }: { job: ReviewJob }) {
+  const { t } = useI18n()
   const status = statusOf(job)
   const visualStatus = status === 'p' ? 'pass' : status === 'f' ? 'finding' : status
-  return <span className={`status status-${visualStatus}`}><span className="status-dot" />{statusLabel(status)}</span>
+  return <span className={`status status-${visualStatus}`}><span className="status-dot" />{statusLabel(status, t)}</span>
 }
 
-function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
+function CopyButton({ value }: { value: string }) {
+  const { t } = useI18n()
   const [copied, setCopied] = useState(false)
-  return <button className="button ghost compact" onClick={async () => { await navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1200) }}><Clipboard size={14} />{copied ? 'Copied' : label}</button>
+  return <button className="button ghost compact" onClick={async () => { await navigator.clipboard.writeText(value); setCopied(true); setTimeout(() => setCopied(false), 1200) }}><Clipboard size={14} />{copied ? t('common.copied') : t('common.copy')}</button>
 }
 
 export function CommentBox({ jobId, mutate, busy }: { jobId: number; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
+  const { t } = useI18n()
   const [comment, setComment] = useState('')
   const submit = async (close: boolean) => {
     await mutate(`/api/reviews/${jobId}/${close ? 'comment-close' : 'comment'}`, { comment })
     setComment('')
   }
   return <section className="comment-box">
-    <label htmlFor="review-comment">Comment</label>
-    <textarea id="review-comment" value={comment} onChange={event => setComment(event.target.value)} placeholder="Paste a detailed resolution note…" rows={6} />
+    <label htmlFor="review-comment">{t('review.comment')}</label>
+    <textarea id="review-comment" value={comment} onChange={event => setComment(event.target.value)} placeholder={t('review.commentPlaceholder')} rows={6} />
     <div className="button-row">
-      <button className="button" disabled={busy || !comment.trim()} onClick={() => submit(false)}><MessageSquareText size={16} />Add comment</button>
-      <button className="button primary" disabled={busy || !comment.trim()} onClick={() => submit(true)}><Check size={16} />Comment & Close</button>
+      <button className="button" disabled={busy || !comment.trim()} onClick={() => submit(false)}><MessageSquareText size={16} />{t('review.addComment')}</button>
+      <button className="button primary" disabled={busy || !comment.trim()} onClick={() => submit(true)}><Check size={16} />{t('review.commentClose')}</button>
     </div>
-    <p className="hint">Comment is saved first. This review closes only after that succeeds.</p>
+    <p className="hint">{t('review.commentSavedFirst')}</p>
   </section>
 }
 
-function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers, repoPath, repoIdentity, toast }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean; canRerun: boolean; canLoadMembers: boolean; repoPath: string; repoIdentity: string; toast: (kind: Toast['kind'], message: string) => void }) {
+export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers, repoPath, repoIdentity, toast }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean; canRerun: boolean; canLoadMembers: boolean; repoPath: string; repoIdentity: string; toast: (kind: Toast['kind'], message: string) => void }) {
+  const { t, locale } = useI18n()
   const [tab, setTab] = useState<Tab>('review')
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
@@ -191,12 +211,12 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
     try {
       const value = await request<FixPromptResponse>(`/api/reviews/${targetJobId}/fix-prompt?repo=${encodeURIComponent(repoPath)}`)
       if (generation !== fixPromptGeneration.current) return
-      if (!value || value.jobId !== targetJobId || typeof value.text !== 'string' || typeof value.stale !== 'boolean') throw new APIError('The fix prompt response was malformed.')
+      if (!value || value.jobId !== targetJobId || typeof value.text !== 'string' || typeof value.stale !== 'boolean') throw new APIError(t('error.fixPromptMalformed'))
       if (!copy) { openFixPrompt(value); return }
       try {
         if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
         await navigator.clipboard.writeText(value.text)
-        if (generation === fixPromptGeneration.current) toast('success', `Fix prompt for review #${targetJobId} copied.`)
+        if (generation === fixPromptGeneration.current) toast('success', t('review.fixPromptCopied', { id: targetJobId }))
       } catch {
         if (generation === fixPromptGeneration.current) openFixPrompt(value)
       }
@@ -213,51 +233,53 @@ function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers
     try {
       if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
       await navigator.clipboard.writeText(fixPromptText)
-      toast('success', `Fix prompt for review #${fixPrompt?.jobId ?? id} copied.`)
+      toast('success', t('review.fixPromptCopied', { id: fixPrompt?.jobId ?? id }))
     } catch {
-      toast('error', 'Clipboard is unavailable. The editable fix prompt remains open.')
+      toast('error', t('review.clipboardUnavailable'))
     }
   }
-  return <><aside className="detail-panel" aria-label="Review detail">
-    <header className="detail-header"><div><span className="eyebrow">Review #{id}</span><h2>{current.commit_subject || current.subject || current.git_ref || current.commit_sha || 'Review detail'}</h2></div><button className="icon-button" aria-label="Close detail" onClick={close}><X /></button></header>
-    <div className="detail-summary"><StatusPill job={current} /><span><Bot size={14} />{current.panel_name || current.agent || 'default'}</span><span><Clock3 size={14} />{elapsed(current)}</span></div>
-    <nav className="tabs" aria-label="Review detail tabs">
-      {(['review', ...(canLoadMembers ? ['members' as const] : []), 'log', 'prompt', 'comments', 'metadata'] as Tab[]).map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{item === 'members' ? 'Panel members' : item[0].toUpperCase() + item.slice(1)}</button>)}
+  return <><aside className="detail-panel" aria-label={t('review.detailAria')}>
+    <header className="detail-header"><div><span className="eyebrow">{t('review.title', { id })}</span><h2>{current.commit_subject || current.subject || current.git_ref || current.commit_sha || t('review.detail')}</h2></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('review.closeDetail')} onClick={close}><X /></button></div></header>
+    <div className="detail-summary"><StatusPill job={current} /><span><Bot size={14} />{current.panel_name || current.agent || t('common.default')}</span><span><Clock3 size={14} />{elapsed(current)}</span></div>
+    <nav className="tabs" aria-label={t('review.detailTabs')}>
+      {(['review', ...(canLoadMembers ? ['members' as const] : []), 'log', 'prompt', 'comments', 'metadata'] as Tab[]).map(item => <button key={item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>{tabLabel(item, t)}</button>)}
     </nav>
     <div className="detail-content">
       {loading && <div className="skeleton tall" />}
-      {!loading && detailError && <p role="alert" className="hint">Review detail could not be refreshed: {detailError}</p>}
-      {!loading && tab === 'review' && <><div className="text-toolbar"><CopyButton value={text} /><span>{text.length.toLocaleString()} chars</span></div>{text ? <Markdown>{text}</Markdown> : <Empty title="No review output yet" body="Running reviews update automatically." />}</>}
-      {!loading && tab === 'members' && <div className="member-list">{memberError && <p role="alert" className="hint">Panel members could not be refreshed: {memberError}</p>}{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || `Member #${idOf(member)}`}</strong><span>{member.model || 'default model'}</span><span>{elapsed(member)}</span>{isFinding(member) && <div className="member-actions"><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true, idOf(member))}><Clipboard size={14} />Copy Fix Prompt</button><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false, idOf(member))}><Code2 size={14} />Open Fix Prompt</button></div>}</article>) : !memberError && <Empty title="No member jobs" body="This is a single-agent review or member metadata is unavailable." />}</div>}
-      {!loading && (tab === 'log' || tab === 'prompt') && <>{lazyError[tab] && <p role="alert" className="hint">{tab} could not be loaded: {lazyError[tab]} <button className="button ghost compact" onClick={() => setLazyLoaded(old => ({ ...old, [tab]: false }))}>Retry</button></p>}<div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || `No ${tab} is available.`}</pre></>}
+      {!loading && detailError && <p role="alert" className="hint">{t('review.detailRefreshFailed', { error: detailError })}</p>}
+      {!loading && tab === 'review' && <><div className="text-toolbar"><CopyButton value={text} /><span>{new Intl.NumberFormat(locale === 'ko' ? 'ko-KR' : 'en-US').format(text.length)} {t('common.chars')}</span></div>{text ? <Markdown>{text}</Markdown> : <Empty title={t('review.noOutput')} body={t('review.runningUpdates')} />}</>}
+      {!loading && tab === 'members' && <div className="member-list">{memberError && <p role="alert" className="hint">{t('review.membersRefreshFailed', { error: memberError })}</p>}{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || t('review.memberFallback', { id: idOf(member) })}</strong><span>{member.model || t('common.defaultModel')}</span><span>{elapsed(member)}</span>{isFinding(member) && <div className="member-actions"><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true, idOf(member))}><Clipboard size={14} />{t('review.copyFixPrompt')}</button><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false, idOf(member))}><Code2 size={14} />{t('review.openFixPrompt')}</button></div>}</article>) : !memberError && <Empty title={t('review.noMemberJobs')} body={t('review.noMemberJobsBody')} />}</div>}
+      {!loading && (tab === 'log' || tab === 'prompt') && <>{lazyError[tab] && <p role="alert" className="hint">{t('review.tabLoadFailed', { tab: tabLabel(tab, t), error: lazyError[tab] })} <button className="button ghost compact" onClick={() => setLazyLoaded(old => ({ ...old, [tab]: false }))}>{t('common.retry')}</button></p>}<div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || t('review.noContent', { tab: tabLabel(tab, t) })}</pre></>}
       {tab === 'comments' && <CommentBox jobId={id} mutate={mutate} busy={busy} />}
       {tab === 'metadata' && <><div className="text-toolbar"><CopyButton value={JSON.stringify(current, null, 2)} /></div><pre className="long-text">{JSON.stringify(current, null, 2)}</pre></>}
     </div>
     <footer className="detail-actions">
-      {finding && <button className="button" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true)}><Clipboard size={16} />Copy Fix Prompt</button>}
-      {finding && <button className="button" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false)}><Code2 size={16} />Open Fix Prompt</button>}
-      {isRunning(current) && <button className="button danger" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/cancel`)}><CircleStop size={16} />Cancel</button>}
-      {terminal && !isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/close`)}><Check size={16} />Close</button>}
-      {terminal && isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/reopen`)}><RotateCcw size={16} />Reopen</button>}
-      {terminal && canRerun && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm(`Rerun the same frozen target and resolved configuration?\n\nActual RoboRev transport:\nPOST /api/job/rerun\n{"job_id":${id}}\n\nThis does not review the current HEAD.`)) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />Rerun same target/config</button>}
+      {finding && <button className="button" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true)}><Clipboard size={16} />{t('review.copyFixPrompt')}</button>}
+      {finding && <button className="button" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false)}><Code2 size={16} />{t('review.openFixPrompt')}</button>}
+      {isRunning(current) && <button className="button danger" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/cancel`)}><CircleStop size={16} />{t('review.cancel')}</button>}
+      {terminal && !isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/close`)}><Check size={16} />{t('review.close')}</button>}
+      {terminal && isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/reopen`)}><RotateCcw size={16} />{t('review.reopen')}</button>}
+      {terminal && canRerun && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm(t('review.rerunConfirm', { id }))) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />{t('review.rerun')}</button>}
     </footer>
-  </aside>{fixPrompt && <div className="prompt-overlay"><section className="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-prompt-title"><header><div><span className="eyebrow">Finding · Review #{fixPrompt.jobId}</span><h2 id="fix-prompt-title">Fix Prompt</h2><p>{fixPrompt.stale ? 'Repository state changed after this review; verify the prompt before use.' : 'Generated from the selected review finding.'}</p></div><button className="icon-button" aria-label="Close fix prompt" onClick={() => setFixPrompt(null)}><X /></button></header><textarea aria-label="Fix prompt" value={fixPromptText} onChange={event => setFixPromptText(event.target.value)} rows={20} /><footer><button className="button" onClick={() => setFixPrompt(null)}>Close</button><button className="button primary" onClick={copyEditedFixPrompt}><Clipboard size={16} />Copy</button></footer></section></div>}</>
+  </aside>{fixPrompt && <div className="prompt-overlay"><section className="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-prompt-title"><header><div><span className="eyebrow">{t('review.finding', { id: fixPrompt.jobId })}</span><h2 id="fix-prompt-title">{t('review.fixPrompt')}</h2><p>{fixPrompt.stale ? t('review.fixPromptStale') : t('review.fixPromptGenerated')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('review.closeFixPrompt')} onClick={() => setFixPrompt(null)}><X /></button></div></header><textarea aria-label={t('review.fixPromptAria')} value={fixPromptText} onChange={event => setFixPromptText(event.target.value)} rows={20} /><footer><button className="button" onClick={() => setFixPrompt(null)}>{t('common.close')}</button><button className="button primary" onClick={copyEditedFixPrompt}><Clipboard size={16} />{t('common.copy')}</button></footer></section></div>}</>
 }
 
 function Empty({ title, body }: { title: string; body: string }) { return <div className="empty"><Code2 /><h3>{title}</h3><p>{body}</p></div> }
 
 function ReviewList({ jobs, selected, onSelect }: { jobs: ReviewJob[]; selected?: number; onSelect: (job: ReviewJob) => void }) {
+  const { t } = useI18n()
   const [query, setQuery] = useState('')
-  const filtered = jobs.filter(job => JSON.stringify([job.id, job.git_ref, job.subject, job.commit_subject, job.agent, job.panel_name, job.status, job.verdict, statusLabel(statusOf(job))]).toLowerCase().includes(query.toLowerCase()))
+  const filtered = jobs.filter(job => JSON.stringify([job.id, job.git_ref, job.subject, job.commit_subject, job.agent, job.panel_name, job.status, job.verdict, statusLabel(statusOf(job), t)]).toLowerCase().includes(query.toLowerCase()))
   return <section className="review-section">
-    <header className="section-heading"><div><span className="eyebrow">Review operations</span><h1>Review queue</h1><p>Live RoboRev jobs for the selected repository. Heavy content loads on demand.</p></div><div className="search"><Search size={16} /><input aria-label="Search reviews" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search jobs, agents, refs…" /></div></header>
-    <div className="table-wrap"><table><thead><tr><th>Status</th><th>Target</th><th>Reviewer</th><th>Branch</th><th>Elapsed</th><th>State</th><th /></tr></thead><tbody>
-      {filtered.map(job => <tr key={idOf(job)} className={selected === idOf(job) ? 'selected' : ''} onClick={() => onSelect(job)}><td><StatusPill job={job} /></td><td><strong>#{idOf(job)} · {job.commit_subject || job.subject || job.git_ref || job.commit_sha || 'Custom task'}</strong><small>{job.job_type || (job.panel_name ? 'Panel synthesis' : 'Review')}</small></td><td><span className="agent"><Bot size={14} />{job.panel_name || job.agent || 'default'}</span><small>{job.model || job.reasoning || ''}</small></td><td>{job.branch || '—'}</td><td>{elapsed(job)}</td><td><span className={isClosed(job) ? 'muted' : 'open-state'}>{isClosed(job) ? 'Closed' : 'Open'}</span></td><td><ChevronRight size={17} /></td></tr>)}
-    </tbody></table>{!filtered.length && <Empty title="No reviews found" body={query ? 'Try a different filter.' : 'Create a new review of HEAD to start.'} />}</div>
+    <header className="section-heading"><div><span className="eyebrow">{t('review.operations')}</span><h1>{t('review.queue')}</h1><p>{t('review.liveJobs')}</p></div><div className="search"><Search size={16} /><input aria-label={t('review.search')} value={query} onChange={event => setQuery(event.target.value)} placeholder={t('review.searchPlaceholder')} /></div></header>
+    <div className="table-wrap"><table><thead><tr><th>{t('review.status')}</th><th>{t('review.target')}</th><th>{t('review.reviewer')}</th><th>{t('review.branch')}</th><th>{t('review.elapsed')}</th><th>{t('review.state')}</th><th /></tr></thead><tbody>
+      {filtered.map(job => <tr key={idOf(job)} className={selected === idOf(job) ? 'selected' : ''} onClick={() => onSelect(job)}><td><StatusPill job={job} /></td><td><strong>#{idOf(job)} · {job.commit_subject || job.subject || job.git_ref || job.commit_sha || t('review.customTask')}</strong><small>{job.job_type || (job.panel_name ? t('review.panelSynthesis') : t('review.reviewHead'))}</small></td><td><span className="agent"><Bot size={14} />{job.panel_name || job.agent || t('common.default')}</span><small>{job.model || job.reasoning || ''}</small></td><td>{job.branch || '—'}</td><td>{elapsed(job)}</td><td><span className={isClosed(job) ? 'muted' : 'open-state'}>{isClosed(job) ? t('status.closed') : t('status.open')}</span></td><td><ChevronRight size={17} /></td></tr>)}
+    </tbody></table>{!filtered.length && <Empty title={t('review.noReviews')} body={query ? t('review.tryDifferentFilter') : t('review.createHead')} />}</div>
   </section>
 }
 
 export function App() {
+  const { t } = useI18n()
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null)
   const [jobs, setJobs] = useState<ReviewJob[]>([])
   const [selected, setSelected] = useState<ReviewJob | null>(null)
@@ -364,7 +386,7 @@ export function App() {
     try {
       const raw = await request<unknown>('/api/setup/roborev', signal ? { signal } : {})
       const next = normalizeSetupState(raw)
-      if (!next) throw new APIError('The RoboRev setup response was malformed.')
+      if (!next) throw new APIError(t('error.setupMalformed'))
       if (generation !== setupGeneration.current) return null
       setSetupState(next)
       setSetupError('')
@@ -382,7 +404,7 @@ export function App() {
     setAgentsLoading(true)
     try {
       const next = normalizeAgentsResponse(await request<unknown>('/api/agents'))
-      if (!next) throw new APIError('The configured-agent response was malformed.')
+      if (!next) throw new APIError(t('error.agentsMalformed'))
       // Scope is authoritative even when this response lost the request
       // ordering race. A superseded response from another repository must
       // never be treated as a harmless same-repository refresh.
@@ -408,7 +430,7 @@ export function App() {
     setRuntimeControlLoading(true)
     try {
       const next = normalizeRuntimeControl(await request<unknown>('/api/runtime-control'))
-      if (!next) throw new APIError('The runtime-control response was malformed.')
+      if (!next) throw new APIError(t('error.runtimeMalformed'))
       if (generation === runtimeControlGeneration.current) {
         setRuntimeControl(next)
         setRuntimeControlError(next.error || '')
@@ -428,7 +450,7 @@ export function App() {
     try {
       const configuration = await request<PanelConfiguration>(`/api/repos/panels?repo=${encodeURIComponent(repoPath)}`)
       if (generation !== panelGeneration.current) return
-      if (!validPanelConfiguration(configuration, identity)) throw new APIError('The panel configuration response was malformed.')
+      if (!validPanelConfiguration(configuration, identity)) throw new APIError(t('error.panelConfigurationMalformed'))
       setPanelConfiguration(configuration)
       setPanelError(configuration.error || '')
     } catch (error) {
@@ -463,15 +485,15 @@ export function App() {
     try {
       const raw = await request<unknown>(`/api/panel-refines?repo=${encodeURIComponent(repoPath)}`)
       if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray((raw as Record<string, unknown>).runs)) {
-        if (generation === panelRefineGeneration.current) setPanelRefineError('The Panel Refine response was malformed.')
+        if (generation === panelRefineGeneration.current) setPanelRefineError(t('error.panelRefineMalformed'))
         return { run: null, ok: false }
       }
       const envelope = raw as { runs: unknown[] }
       const payload = normalizePanelRefineResponse(envelope)
-      if (envelope.runs.length > 0 && payload.runs.length === 0) throw new APIError('The Panel Refine response contained no valid runs.')
+      if (envelope.runs.length > 0 && payload.runs.length === 0) throw new APIError(t('error.panelRefineNoValidRuns'))
       if (generation !== panelRefineGeneration.current) return { run: null, ok: false }
       const next = payload.run && payload.run.repositoryIdentity === identity ? payload.run : null
-      if (payload.run && !next) throw new APIError('The Panel Refine response belonged to a different repository.')
+      if (payload.run && !next) throw new APIError(t('error.panelRefineWrongRepository'))
       setPanelRefineRun(next)
       setPanelRefineOptions(payload.options)
       setPanelRefineError('')
@@ -646,12 +668,12 @@ export function App() {
     setBusy(true)
     try {
       await request(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
-      toast('success', path.includes('comment-close') ? 'Comment saved and review closed.' : 'RoboRev state updated.')
+      toast('success', path.includes('comment-close') ? t('review.commentClosed') : t('review.stateUpdated'))
       const data = await loadBootstrap()
       await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
     } catch (error) {
       const apiError = error as APIError
-      toast('error', apiError.phase === 'close' ? `Partial success: ${apiError.message}` : apiError.message)
+      toast('error', apiError.phase === 'close' ? t('review.partialSuccess', { error: apiError.message }) : apiError.message)
       throw error
     } finally { setBusy(false) }
   }, [loadBootstrap, loadReviews, toast])
@@ -683,7 +705,7 @@ export function App() {
       if (latest && !latest.operationActive) return latest
       await new Promise(resolve => setTimeout(resolve, 1000))
     }
-    throw new APIError('The RoboRev daemon operation did not reach a terminal state before the timeout.')
+    throw new APIError(t('error.daemonOperationTimeout'))
   }, [loadRuntimeControl])
   const runDaemonAction: DaemonAction = useCallback(async action => {
     setBusy(true)
@@ -691,7 +713,7 @@ export function App() {
       await request(`/api/daemon/${action}`, { method: 'POST' })
       await pollRuntimeOperation()
       await refreshRuntimeSurfaces()
-      toast('success', action === 'start' ? 'RoboRev daemon started.' : action === 'stop' ? 'RoboRev daemon stopped.' : 'RoboRev daemon restarted.')
+      toast('success', action === 'start' ? t('setup.daemonStartedToast') : action === 'stop' ? t('setup.daemonStoppedToast') : t('setup.daemonRestartedToast'))
     } catch (error) {
       // A 202 transition can temporarily make bootstrap/review reads
       // unavailable. The operation itself is the authoritative result; only
@@ -706,7 +728,7 @@ export function App() {
       await request(`/api/runtime-control/queue/${action}`, { method: 'POST' })
       await pollRuntimeOperation()
       await Promise.allSettled([loadRuntimeControl(), loadReviews(bootstrap?.selectedRepository, bootstrap?.selectedRepositoryIdentity)])
-      toast('success', action === 'pause' ? 'Review queue paused.' : 'Review queue resumed.')
+      toast('success', action === 'pause' ? `${t('setup.queuePaused')}.` : `${t('setup.resumeQueue')}.`)
     } catch (error) {
       toast('error', (error as Error).message)
       throw error
@@ -725,7 +747,7 @@ export function App() {
       // the repository identity/epoch is unchanged; the newest same-scope
       // GET owns the cards and completion still gets surfaced.
       const reloadOutcome = await loadAgents(expectedIdentity)
-      if (expectedIdentity === currentRepositoryIdentity.current && startRepositoryEpoch === agentsRepositoryEpoch.current && (reloadOutcome === 'applied' || reloadOutcome === 'superseded-applied')) toast('success', `Agent check completed for ${agent}.`)
+      if (expectedIdentity === currentRepositoryIdentity.current && startRepositoryEpoch === agentsRepositoryEpoch.current && (reloadOutcome === 'applied' || reloadOutcome === 'superseded-applied')) toast('success', t('review.agentCheckCompleted', { agent }))
     } catch (error) {
       if (expectedIdentity !== currentRepositoryIdentity.current || startRepositoryEpoch !== agentsRepositoryEpoch.current) return
       toast('error', (error as Error).message)
@@ -739,7 +761,7 @@ export function App() {
   const selectedPanelInfo = panelConfiguration?.panels.find(panel => panel.name === selectedPanel)
   const panelSelectionValue = selectedPanelInfo?.valid ? selectedPanel : ''
   const panelReady = Boolean(repo && !panelLoading && !panelError && panelConfiguration?.repositoryIdentity === repo.identity && !panelConfiguration.selectionRequired && selectedPanelInfo?.valid)
-  const panelMode = selectedPanelInfo ? panelLabel(selectedPanelInfo) : panelLoading ? 'Loading review panels…' : panelError ? 'Panel unavailable' : 'Select a review panel'
+  const panelMode = selectedPanelInfo ? panelLabel(selectedPanelInfo, t) : panelLoading ? t('panel.loading') : panelError ? t('panel.unavailable') : t('review.selectPanel')
   const selectPanel = async (panel: string) => {
     if (!repo) return
     const generation = ++panelGeneration.current
@@ -766,7 +788,7 @@ export function App() {
       const result = await request<ReviewEnqueueResponse>('/api/reviews', { method: 'POST', body: JSON.stringify({ repoPath: repo.path, panel: selectedPanel }) })
       if (generation !== reviewActionGeneration.current) return
       const target = result?.target
-      if (!target?.identity || !target.path || !target.headShort) throw new APIError('Review was enqueued, but its pinned target metadata was missing.')
+      if (!target?.identity || !target.path || !target.headShort) throw new APIError(t('error.reviewTargetMissing'))
       setBootstrap(current => {
         if (!current) return current
         const exists = current.repositories.some(item => item.identity === target.identity)
@@ -777,7 +799,7 @@ export function App() {
           repositories: exists ? current.repositories.map(item => item.identity === target.identity ? target : item) : [...current.repositories, target],
         }
       })
-      toast('success', `New HEAD review enqueued for ${target.headShort}.`)
+      toast('success', t('review.newHeadQueued', { head: target.headShort }))
       await loadReviews(target.path, target.identity)
     } catch (error) {
       if (generation === reviewActionGeneration.current) toast('error', (error as Error).message)
@@ -791,7 +813,7 @@ export function App() {
     setBusy(true)
     try {
       await request('/api/panel-refines', { method: 'POST', body: JSON.stringify(body) })
-      toast('success', 'Panel Refine started.')
+      toast('success', t('panel.started'))
       setPanelRefineReloadEpoch(epoch => epoch + 1)
     } catch (error) {
       toast('error', (error as Error).message)
@@ -802,7 +824,7 @@ export function App() {
     setBusy(true)
     try {
       await request(`/api/panel-refines/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
-      toast('success', 'Panel Refine cancellation requested.')
+      toast('success', t('panel.cancelRequested'))
       setPanelRefineReloadEpoch(epoch => epoch + 1)
     } catch (error) {
       toast('error', (error as Error).message)
@@ -862,16 +884,16 @@ export function App() {
       setCSRF(data.csrfToken)
       setBootstrap(data)
       const restored = data.repositories.find(item => item.identity === data.selectedRepositoryIdentity)
-      if (!restored) throw new APIError('The selected repository metadata was missing from bootstrap.')
+      if (!restored) throw new APIError(t('error.bootstrapRepositoryMissing'))
       setPanelLoadEpoch(epoch => epoch + 1)
       setAgentsReloadEpoch(epoch => epoch + 1)
       if (selectError) toast('error', selectError.message)
-      else toast('success', 'RoboRev state updated.')
+      else toast('success', t('review.stateUpdated'))
       await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
     } catch (error) {
       if (generation !== repoSwitchGeneration.current) return
       toast('error', selectError?.message ?? (error as Error).message)
-      setPanelError(`Repository state could not be restored: ${(error as Error).message}`)
+      setPanelError(t('error.repositoryRestoreFailed', { error: (error as Error).message }))
       setPanelLoading(false)
     } finally {
       if (generation === repoSwitchGeneration.current) setRepoSwitching(false)
@@ -883,17 +905,17 @@ export function App() {
   const setupOperationActive = setupIsActive(setupState)
   const panelOutputStatusAvailable = bootstrap?.roborev?.capabilities?.jobOutputStatusApi === true
   const panelRefineAvailable = Boolean(bootstrap?.roborev?.installed && daemonRunning && bootstrap.roborev.capabilities.panelReview && bootstrap.roborev.capabilities.fixCommand && panelOutputStatusAvailable)
-  const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? 'RoboRev is not installed.' : !daemonRunning ? 'The RoboRev daemon is not running.' : !bootstrap.roborev.capabilities.panelReview ? 'This RoboRev version does not support panel review.' : !bootstrap.roborev.capabilities.fixCommand ? 'This RoboRev version does not support the typed fix command.' : !panelOutputStatusAvailable ? 'This RoboRev version does not support the bounded panel status contract.' : ''
+  const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? t('panel.unavailableNotInstalled') : !daemonRunning ? t('panel.unavailableDaemonOffline') : !bootstrap.roborev.capabilities.panelReview ? t('panel.versionNoPanel') : !bootstrap.roborev.capabilities.fixCommand ? t('panel.versionNoFix') : !panelOutputStatusAvailable ? t('panel.versionNoStatus') : ''
   const reviewsReady = !canPollReviews || !selectedRepositoryIdentity || loadedReviewIdentity === selectedRepositoryIdentity
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
   return <div className="shell">
-    <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>Dashboard</span></div></div><nav>{navigation.map(([label, Icon]) => <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{label}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>Soon</small>}</button>)}</nav><div className="sidebar-foot"><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? 'Daemon online' : 'Daemon offline'}</strong><span>{bootstrap?.roborev?.version || 'Setup required'}</span></div></div></aside>
-    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>Repository</span><select aria-label="Current repository" value={selectedRepositoryIdentity} disabled={repoSwitching || setupOperationActive} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />Dirty</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>Review mode</span><select aria-label="Review panel" value={panelSelectionValue} disabled={busy || setupOperationActive || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">Select a review panel</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{runningCount} running</span><button className="button primary review-head" disabled={busy || setupOperationActive || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />Review HEAD</button></header>
+    <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>{t('brand.dashboard')}</span></div></div><nav>{navigation.map(([label, Icon]) => { const key = navigationLabelKeys[label]; return <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{t(key)}{!['Overview', 'Reviews', 'Repositories', 'Agents & Setup'].includes(label) && <small>{t('nav.soon')}</small>}</button> })}</nav><div className="sidebar-foot"><LanguageSelector /><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? t('status.daemonOnline') : t('status.daemonOffline')}</strong><span>{bootstrap?.roborev?.version || t('status.setupRequired')}</span></div></div></aside>
+    <main className="main"><header className="topbar"><button className="icon-button mobile-menu" aria-label={t('nav.openMenu')} onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>{t('repo.repository')}</span><select aria-label={t('repo.currentAria')} value={selectedRepositoryIdentity} disabled={repoSwitching || setupOperationActive} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />{t('status.dirty')}</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>{t('review.mode')}</span><select aria-label={t('review.panelAria')} value={panelSelectionValue} disabled={busy || setupOperationActive || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">{t('review.selectPanel')}</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel, t)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{t('review.runningCount', { count: runningCount })}</span><button className="button primary review-head" disabled={busy || setupOperationActive || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />{t('review.reviewHead')}</button></header>
       {!loading && bootstrap && setupState && activeNav !== 'Agents & Setup' && <SetupBanner state={setupState} busy={busy || setupOperationActive} onInstall={() => { setSetupConfirming(true); return Promise.resolve() }} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} />}
-      {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? 'RoboRev is not installed' : !reviewSupported ? 'RoboRev upgrade required' : 'RoboRev daemon is stopped'}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? 'This version does not expose the safe metadata and enqueue contracts required by the Dashboard.' : bootstrap.roborev?.installed ? 'Start the daemon to enqueue and view reviews.' : 'Configure a RoboRev binary to continue.')}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => runDaemonAction('start')}>Start daemon</button>}</section>}
-      {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Panel configuration unavailable</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>Retry panel discovery</button>}</section>}
-      {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>Background refresh issue</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} state={setupState} busy={busy || setupOperationActive || repoSwitching} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={loadedAgentsIdentity === selectedRepositoryIdentity ? agents : null} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { if (selectedRepositoryIdentity) await loadAgents(selectedRepositoryIdentity) }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">Checkpoint roadmap</span><h1>{activeNav}</h1><p>This typed workflow is tracked in ROBoreV-COVERAGE.md and will be added without a generic shell endpoint.</p></section>}
+      {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? t('setup.notInstalled') : !reviewSupported ? t('setup.upgradeRequired') : t('setup.daemonStopped')}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? t('setup.metadataContractUnavailable') : bootstrap.roborev?.installed ? t('setup.startDaemonHint') : t('setup.configureBinaryHint'))}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => runDaemonAction('start')}>{t('setup.daemonStart')}</button>}</section>}
+      {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>{t('panel.configurationUnavailable')}</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>{t('panel.retryDiscovery')}</button>}</section>}
+      {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>{t('error.backgroundRefresh')}</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <><PanelRefine repoPath={repo?.path ?? ''} panelConfiguration={panelConfiguration} options={panelRefineOptions} run={panelRefineRun} available={panelRefineAvailable} disabledReason={panelRefineDisabledReason} loading={panelRefineLoading} error={panelRefineError} busy={busy || setupOperationActive || repoSwitching} onStart={startPanelRefine} onCancel={cancelPanelRefine} onOpenReview={openPanelRefineReview} /><ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} state={setupState} busy={busy || setupOperationActive || repoSwitching} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={loadedAgentsIdentity === selectedRepositoryIdentity ? agents : null} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { if (selectedRepositoryIdentity) await loadAgents(selectedRepositoryIdentity) }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">{t('roadmap.title')}</span><h1>{navigationLabel(activeNav, t)}</h1><p>{t('roadmap.body')}</p></section>}
     </main>
     {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || setupOperationActive || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !setupOperationActive && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} />}
     {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}
@@ -902,6 +924,7 @@ export function App() {
 }
 
 function Repositories({ bootstrap, mutate, busy }: { bootstrap: Bootstrap | null; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean }) {
+  const { t } = useI18n()
   const [path, setPath] = useState('')
-  return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">Registered targets</span><h1>Repositories</h1><p>Only canonical Git roots registered here can be mutation targets.</p></div></header><div className="repo-cards">{bootstrap?.repositories.map(repo => <article key={repo.identity}><div className="repo-icon"><GitBranch /></div><div><h3>{repo.name}</h3><code>{repo.path}</code><p>{repo.branch} · {repo.headShort} {repo.dirty ? '· dirty' : '· clean'}</p></div></article>)}</div><form className="add-repo" onSubmit={event => { event.preventDefault(); mutate('/api/repos', { repoPath: path }).then(() => setPath('')) }}><label htmlFor="repo-path">Add local Git repository</label><div><input id="repo-path" value={path} onChange={event => setPath(event.target.value)} placeholder="E:\Dev\GitHub\project" /><button className="button primary" disabled={busy || !path.trim()}><Plus size={16} />Register</button></div></form></section>
+  return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">{t('repo.registeredTargets')}</span><h1>{t('nav.repositories')}</h1><p>{t('repo.onlyCanonical')}</p></div></header><div className="repo-cards">{bootstrap?.repositories.map(repo => <article key={repo.identity}><div className="repo-icon"><GitBranch /></div><div><h3>{repo.name}</h3><code>{repo.path}</code><p>{repo.branch} · {repo.headShort} {repo.dirty ? `· ${t('status.dirty').toLowerCase()}` : `· ${t('status.clean').toLowerCase()}`}</p></div></article>)}</div><form className="add-repo" onSubmit={event => { event.preventDefault(); mutate('/api/repos', { repoPath: path }).then(() => setPath('')) }}><label htmlFor="repo-path">{t('repo.addLocal')}</label><div><input id="repo-path" value={path} onChange={event => setPath(event.target.value)} placeholder={t('repo.pathPlaceholder')} /><button className="button primary" disabled={busy || !path.trim()}><Plus size={16} />{t('repo.register')}</button></div></form></section>
 }

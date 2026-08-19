@@ -27,6 +27,7 @@
 - Agent Status + Runtime Control checkpoint는 exact v0.64.0 command descriptor와 safe global/local config merge로 zero-quota detection을 제공하고, 격리된 bounded Cursor identity probe로 Grok collision을 fail closed하며, 명시적으로 확인한 canonical agent 하나에만 quota-consuming `check-agents` smoke check를 허용한다. Queue는 official daemon status/pause/unpause API를 사용한다. Stop/Restart는 backend exact argv preview, transport-aware health verification, process-scoped lifecycle과 global runtime-control gate로 Setup/Panel Refine/mutation과 충돌을 막는다. 다른 RoboRev 버전은 agent/runtime contract를 실행하지 않는다.
 - Agent health check는 selected-repository 전용 read lease로 repository selection commit과 quota dispatch를 선형화하고, service의 single discovery에서 configured/detected eligibility를 재검증한다. Frontend의 repository epoch는 실제 identity 변경만 추적하고 GET generation은 same-repository latest-wins만 담당하므로 concurrent refresh와 failed repository switch 뒤에도 올바른 scope의 Agent cards와 completion 상태를 복원한다.
 - 자동 backend/frontend test와 production build에서는 fake HTTP/filesystem/process만 사용했으며 실제 RoboRev, GitHub release download, daemon 또는 LLM을 실행하지 않았다. 완성된 **Install & Start**의 실제 clean-machine E2E는 이 노트북의 missing-RoboRev 상태를 보존한 채 사용자 수동 검증을 기다린다.
+- Frontend ko/en localization checkpoint를 구현했다. `web/src/i18n.tsx`가 typed English/Korean catalog, safe `roborev-dashboard-language` storage/browser fallback, stable `t`/`format` callbacks와 `<html lang>`을 제공하며 App/Setup/Panel Refine chrome, empty/loading/error/action 안내와 sidebar/modal language selector를 번역한다. locale 전환은 repo/panel/review/detail/tab/modal/setup/progress/refine/agent/runtime/form 상태를 보존하고 fetch/mutation을 시작하지 않는다. RoboRev, Git/SHA/API/CLI/CSRF/URL/JSON, names/branches/IDs/paths/versions, argv/preview와 backend raw error는 technical source-of-truth로 유지한다. 단위·통합 frontend tests와 Vite build는 통과했으며 RoboRev는 아직 설치하지 않았다.
 
 ## 결정
 
@@ -45,6 +46,7 @@
 
 1. clean-machine Windows에서 최신 Dashboard exe를 실행하고 Setup confirmation의 repository/version/target/size/full SHA와 no-init/no-agent/no-security-change 범위를 검토한 뒤 사용자가 직접 **Install & Start** 실행
 2. 설치, runtime rebind, daemon online, repository panel 복원, Review HEAD와 Panel Refine 활성화를 같은 session에서 확인
-3. 별도 checkpoint로 v0.65+ compatibility adapter를 검증한 뒤에만 update policy 검토; 자동 downgrade 금지 유지
-4. Agent Status + Runtime Control 실제 E2E는 사용자 검증 대기: agent detection 확인, 선택한 agent 하나만 Run check, Pause/Resume, Restart, 마지막 Stop/Start 순서
-5. 이후 hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행
+3. 같은 clean-machine session에서 sidebar와 열린 install/daemon/agent-check/Fix Prompt/Panel Refine modal의 한국어↔English 전환, technical preview 보존, network/mutation 부재와 mobile wrapping을 수동 확인
+4. 별도 checkpoint로 v0.65+ compatibility adapter를 검증한 뒤에만 update policy 검토; 자동 downgrade 금지 유지
+5. Agent Status + Runtime Control 실제 E2E는 사용자 검증 대기: agent detection 확인, 선택한 agent 하나만 Run check, Pause/Resume, Restart, 마지막 Stop/Start 순서
+6. 이후 hooks/config와 analyze/run 같은 agentic workflow 및 stream relay 진행

@@ -1,0 +1,83 @@
+import { act, cleanup, render, screen } from '@testing-library/react'
+import { useRef } from 'react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { I18nProvider, LANGUAGE_STORAGE_KEY, resolveLocale, useI18n } from './i18n'
+
+function Harness() {
+  const { locale, setLocale, t, format } = useI18n()
+  const firstT = useRef(t)
+  const firstFormat = useRef(format)
+  return <div>
+    <output data-testid="locale">{locale}</output>
+    <output data-testid="label">{t('nav.overview')}</output>
+    <output data-testid="formatted">{format('review.runningCount', { count: 2 })}</output>
+    <output data-testid="stable-t">{String(firstT.current === t)}</output>
+    <output data-testid="stable-format">{String(firstFormat.current === format)}</output>
+    <button onClick={() => setLocale('ko')}>한국어</button>
+    <button onClick={() => setLocale('en')}>English</button>
+  </div>
+}
+
+function renderHarness() {
+  return render(<I18nProvider><Harness /></I18nProvider>)
+}
+
+describe('frontend locale provider', () => {
+  const originalLanguage = navigator.language
+  let storageDescriptor: PropertyDescriptor | undefined
+
+  beforeEach(() => {
+    window.localStorage.clear()
+    storageDescriptor = Object.getOwnPropertyDescriptor(window, 'localStorage')
+    Object.defineProperty(window.navigator, 'language', { configurable: true, value: originalLanguage })
+    document.documentElement.lang = ''
+  })
+
+  afterEach(() => {
+    cleanup()
+    if (storageDescriptor) Object.defineProperty(window, 'localStorage', storageDescriptor)
+    Object.defineProperty(window.navigator, 'language', { configurable: true, value: originalLanguage })
+  })
+
+  it('resolves stored language before browser language and defaults to English', () => {
+    Object.defineProperty(window.navigator, 'language', { configurable: true, value: 'ko-KR' })
+    expect(resolveLocale()).toBe('ko')
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
+    expect(resolveLocale()).toBe('en')
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'invalid')
+    Object.defineProperty(window.navigator, 'language', { configurable: true, value: 'fr-FR' })
+    expect(resolveLocale()).toBe('en')
+  })
+
+  it('survives denied localStorage access without changing the locale contract', () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: () => { throw new Error('storage denied') },
+        setItem: () => { throw new Error('storage denied') },
+      },
+    })
+    Object.defineProperty(window.navigator, 'language', { configurable: true, value: 'ko-KR' })
+    expect(resolveLocale()).toBe('ko')
+    renderHarness()
+    expect(screen.getByTestId('locale')).toHaveTextContent('ko')
+    act(() => screen.getByRole('button', { name: 'English' }).click())
+    expect(screen.getByTestId('locale')).toHaveTextContent('en')
+  })
+
+  it('switches presentation in place, updates html lang, and keeps formatter identities stable', () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
+    renderHarness()
+    expect(screen.getByTestId('label')).toHaveTextContent('Overview')
+    expect(screen.getByTestId('formatted')).toHaveTextContent('2 running')
+    expect(document.documentElement.lang).toBe('en')
+    act(() => screen.getByRole('button', { name: '한국어' }).click())
+    expect(screen.getByTestId('locale')).toHaveTextContent('ko')
+    expect(screen.getByTestId('label')).toHaveTextContent('개요')
+    expect(screen.getByTestId('formatted')).toHaveTextContent('2개 실행 중')
+    expect(screen.getByTestId('stable-t')).toHaveTextContent('true')
+    expect(screen.getByTestId('stable-format')).toHaveTextContent('true')
+    expect(document.documentElement.lang).toBe('ko')
+    expect(window.localStorage.getItem(LANGUAGE_STORAGE_KEY)).toBe('ko')
+  })
+})

@@ -27,6 +27,12 @@ Set-Location roborev-dashboard
 
 자동 테스트는 실제 RoboRev나 LLM을 호출하지 않는다.
 
+## 언어 전환
+
+Dashboard UI는 한국어와 English를 지원한다. 사이드바 하단의 native language selector에서 언어를 바꿀 수 있으며, 선택은 `roborev-dashboard-language`에 안전하게 저장되고 다음 실행에서 복원된다. 저장소, panel, review, modal, setup 진행 상태와 입력 내용은 언어 전환으로 재설정되지 않고 네트워크 요청이나 mutation도 발생하지 않는다. 열린 Install, daemon, agent check, Fix Prompt, Panel Refine 확인 화면에서도 헤더의 compact selector로 즉시 전환할 수 있다.
+
+번역 대상은 Dashboard chrome과 안내 문구이며 RoboRev, Git/SHA/API/CLI/CSRF/URL/JSON, 경로·버전·이름·ID와 backend 원문 오류 같은 technical/source-of-truth 값은 그대로 표시한다. 한국어가 긴 상태나 모바일 폭에서 줄바꿈되도록 최소한의 responsive CSS만 적용한다.
+
 ## 릴리스 실행 요구사항
 
 배포된 `roborev-dashboard.exe`에는 frontend assets가 embed되어 있으므로 Go, Node.js, npm 같은 개발 도구가 필요 없다. Git은 runtime에 필요하다. RoboRev가 없으면 Dashboard의 **Agents & Setup**에서 지원되는 pinned release와 설치 위치, 정확한 SHA-256을 확인한 뒤 **Install RoboRev**를 선택할 수 있다. 사용자가 확인 모달에서 **Install & Start**를 승인하기 전에는 다운로드나 설치를 시작하지 않는다.
@@ -54,6 +60,8 @@ Dashboard runtime installer는 현재 Windows amd64에서 RoboRev v0.64.0만 설
 ```
 
 Dashboard는 선택한 repository의 global/local RoboRev panel을 발견한다. panel이 하나면 자동 선택하고 여러 개면 사용자가 선택할 때까지 `Review HEAD`를 실행하지 않는다. `Single agent · no panel`은 RoboRev v0.64.0의 명시적 `none` bypass다.
+
+현재 clean-machine checkpoint는 RoboRev가 설치되지 않은 상태를 보존한다. 다음 수동 E2E에서 Setup 화면의 pinned v0.64.0 확인 범위와 Install & Start를 검토한 뒤에만 RoboRev를 설치하고, daemon online·panel 복원·Review HEAD·Panel Refine을 확인한다.
 
 **Agents & Setup**은 effective `[review.subagents]` alias와 underlying RoboRev agent를 구분해 표시하고, exact v0.64.0 command descriptor와 safe executable lookup으로 quota를 사용하지 않는 `Detected` 상태를 제공한다. Cursor의 `agent` command는 격리된 임시 working directory와 credential/preload 변수가 제거된 환경에서 bounded version-only identity probe를 실행해 Grok alias와 혼동하지 않도록 fail closed한다. `Health`는 자동 실행되지 않으며, 사용자가 특정 canonical agent의 **Run check**를 확인한 경우에만 작은 실제 RoboRev smoke request를 보내므로 subscription/API quota를 사용할 수 있다. 다른 RoboRev 버전에서는 discovery와 check를 실행하지 않는다.
 
