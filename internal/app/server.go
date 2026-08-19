@@ -89,7 +89,13 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	}
 	var events *streamrelay.Manager
 	if source, ok := service.(streamrelay.Source); ok {
-		events = streamrelay.NewManager(source)
+		events = streamrelay.NewManager(source, func(ctx context.Context, identity string) (string, error) {
+			repo, err := registry.InspectIdentity(ctx, identity)
+			if err != nil {
+				return "", err
+			}
+			return repo.Path, nil
+		})
 	}
 	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
@@ -207,6 +213,9 @@ func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 // The repository path is never accepted from the browser: identity lookup and
 // a fresh canonical-root inspection are centralized in Registry.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeSameOrigin(w, r) {
+		return
+	}
 	query := r.URL.Query()
 	identities, hasIdentity := query["repositoryIdentity"]
 	if len(query) != 1 || !hasIdentity || len(identities) != 1 {
@@ -356,16 +365,40 @@ func (s *Server) setupMutation(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) authorizeMutation(w http.ResponseWriter, r *http.Request) bool {
+	if !s.authorizeSameOrigin(w, r) {
+		return false
+	}
 	if r.Header.Get("X-CSRF-Token") != s.csrfToken {
 		writeError(w, http.StatusForbidden, "invalid CSRF token", "csrf")
 		return false
 	}
-	if origin := r.Header.Get("Origin"); origin != "" {
-		parsed, err := url.Parse(origin)
-		if err != nil || !strings.EqualFold(parsed.Host, r.Host) {
-			writeError(w, http.StatusForbidden, "cross-origin mutation rejected", "origin")
-			return false
-		}
+	return true
+}
+
+// authorizeSameOrigin is shared by mutations and read-only SSE. An absent
+// Origin is allowed for same-origin localhost clients and non-browser callers;
+// an explicit Origin must be a fully formed origin matching the request's
+// scheme and host. SSE deliberately does not require a CSRF token.
+func (s *Server) authorizeSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || strings.EqualFold(origin, "null") || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected", "origin")
+		return false
+	}
+	expectedScheme := "http"
+	if r.TLS != nil {
+		expectedScheme = "https"
+	}
+	if r.URL != nil && r.URL.Scheme != "" {
+		expectedScheme = strings.ToLower(r.URL.Scheme)
+	}
+	if !strings.EqualFold(parsed.Scheme, expectedScheme) || !strings.EqualFold(parsed.Host, r.Host) {
+		writeError(w, http.StatusForbidden, "cross-origin request rejected", "origin")
+		return false
 	}
 	return true
 }

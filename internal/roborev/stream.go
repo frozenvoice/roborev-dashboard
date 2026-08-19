@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
 var (
@@ -41,19 +42,26 @@ func (c *Client) OpenStream(ctx context.Context, repoPath string) (proc.Stream, 
 		return nil, ErrStreamUnsupported
 	}
 	installation := c.Installation(ctx)
-	if !installation.Installed || !installation.Capabilities.StreamEvents || installation.Version != "v0.64.0" {
+	cliVersion := strings.TrimSpace(installation.Version)
+	if !installation.Installed || !installation.Capabilities.StreamEvents || !roborevcompat.IsSupportedVersion(cliVersion) {
 		return nil, fmt.Errorf("%w: %s", ErrStreamUnsupported, installation.Version)
 	}
-	running, healthErr := c.DaemonHealth(ctx)
+	health, healthErr := c.healthStatus(ctx)
 	if healthErr != nil {
-		if errors.Is(healthErr, ErrDaemonUnhealthy) {
-			return nil, ErrStreamUnhealthy
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if isUnreachableHealthError(healthErr) {
+			return nil, ErrStreamOffline
 		}
 		return nil, healthErr
 	}
-	if !running {
-		// Crucially, do not invoke daemon start or stream when offline.
-		return nil, ErrStreamOffline
+	if !health.Healthy {
+		return nil, ErrStreamUnhealthy
+	}
+	daemonVersion := strings.TrimSpace(health.Version)
+	if !roborevcompat.IsSupportedVersion(daemonVersion) || daemonVersion != cliVersion {
+		return nil, fmt.Errorf("%w: daemon=%s cli=%s", ErrStreamUnsupported, daemonVersion, cliVersion)
 	}
 	binaryNow, _, generationNow := c.snapshot()
 	if generationNow != generation || binaryNow != binary {

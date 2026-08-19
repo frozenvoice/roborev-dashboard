@@ -3,6 +3,7 @@ package roborev
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -105,6 +106,43 @@ func TestOpenStreamUnsupportedAndOfflineNeverSpawns(t *testing.T) {
 	}
 	if streamRunner.calls != 0 {
 		t.Fatal("offline daemon spawned stream")
+	}
+}
+
+func TestOpenStreamRequiresExactMatchingSupportedDaemonVersion(t *testing.T) {
+	cases := []struct {
+		name          string
+		cliVersion    string
+		daemonVersion string
+		healthy       bool
+		want          error
+	}{
+		{name: "daemon mismatch", cliVersion: "v0.64.0", daemonVersion: "v0.65.0", healthy: true, want: ErrStreamUnsupported},
+		{name: "daemon empty", cliVersion: "v0.64.0", daemonVersion: "", healthy: true, want: ErrStreamUnsupported},
+		{name: "daemon malformed", cliVersion: "v0.64.0", daemonVersion: "64", healthy: true, want: ErrStreamUnsupported},
+		{name: "daemon unhealthy", cliVersion: "v0.64.0", daemonVersion: "v0.64.0", healthy: false, want: ErrStreamUnhealthy},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprintf(w, `{"healthy":%t,"version":%q}`, testCase.healthy, testCase.daemonVersion)
+			}))
+			defer server.Close()
+			runner := &streamGateRunner{version: testCase.cliVersion}
+			streams := &captureStreamRunner{stream: noopStream{}}
+			client, err := NewClient(`C:\trusted\roborev.exe`, runner, server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.StreamRunner = streams
+			_, err = client.OpenStream(context.Background(), `C:\repo`)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("error=%v, want %v", err, testCase.want)
+			}
+			if streams.calls != 0 {
+				t.Fatalf("stream calls=%d, want zero", streams.calls)
+			}
+		})
 	}
 }
 

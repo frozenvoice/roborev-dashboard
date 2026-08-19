@@ -30,7 +30,7 @@
 | `comment --job <id> --message ... --commenter ...` | comment | typed CLI | B | 예 | 설치된 help로 확인; argument array, multiline 지원 |
 | `close <id>` | close | typed CLI | B | 예 | Comment & Close 순서/부분 실패 보장 |
 | `close <id> --reopen` | reopen | typed CLI | B | 예 | 독립 `reopen` command 없음 |
-| `stream --repo` | live JSONL events | bounded JSONL CLI + sanitized SSE relay | B | 예 | exact v0.64.0 only; daemon already-online/healthy preflight; repository별 source 1개와 0..N subscribers; stream은 lossy refresh/invalidation hint이고 `/api/reviews` authoritative API가 actual state이며 4초 polling은 fallback/safety net |
+| `stream --repo` | live JSONL events | bounded JSONL CLI + sanitized SSE relay | B | 예 | exact v0.64.0 only; daemon already-online/healthy preflight; repository identity별 source 1개와 0..N subscribers; bounded JSONL/SSE sanitization, fresh identity authorization과 shutdown cleanup; stream은 lossy refresh/invalidation hint이고 `/api/reviews` authoritative API가 actual state이며 4초 polling은 fallback/safety net |
 | `pause`, `unpause` | queue control | daemon `POST /api/queue/pause`, `/api/queue/unpause` | B | 예 | daemon online에서만 실행; running job은 계속되고 새 queued job만 시작하지 않음 |
 | `daemon start` | 설치 직후/기존 설치 daemon 시작 | typed CLI + bounded health retry | B | 예 | health precheck; 시작 실패 시 설치 보존, 재다운로드 없는 retry |
 | `daemon stop/restart` | global lifecycle | typed CLI + process-scoped bounded health verification | B | 예 | backend exact argv preview; request disconnect와 분리; shutdown cancellation; transport 연결 불가만 offline으로 인정; restart는 stopped daemon도 start하는 upstream semantics 유지 |
