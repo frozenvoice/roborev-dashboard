@@ -167,10 +167,29 @@ func (r *Registry) Resolve(path string) (string, error) {
 }
 
 func (r *Registry) Select(path string) error {
+	return r.SelectContext(context.Background(), path)
+}
+
+// SelectContext selects a registered repository while honoring cancellation
+// before the request reaches the acceptance boundary.  Once the final check
+// below passes, persistence and the in-memory selection update are accepted as
+// one synchronous mutation.
+func (r *Registry) SelectContext(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	r.selectionMu.Lock()
 	defer r.selectionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// This is the selection acceptance boundary: cancellation before it has
+	// zero side effects; cancellation after it may complete this mutation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	resolved, ok := r.paths[registryKey(path)]
 	if !ok {
 		return errors.New("repository is not registered")

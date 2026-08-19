@@ -912,7 +912,11 @@ func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	if err := s.Registry.Select(body.RepoPath); err != nil {
+	if err := s.Registry.SelectContext(r.Context(), body.RepoPath); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusRequestTimeout, err.Error(), "repository")
+			return
+		}
 		writeError(w, http.StatusForbidden, err.Error(), "repository")
 		return
 	}

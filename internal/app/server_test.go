@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -171,6 +172,57 @@ func TestMutationRequiresCSRF(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", recorder.Code)
+	}
+}
+
+func TestSelectRepositoryMapsCanceledQueuedSelectionToRequestTimeout(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(&fakeService{}, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestContext, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "/api/repos/select", strings.NewReader(`{"repoPath":"E:\\repo-b"}`)).WithContext(requestContext)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		response <- recorder
+	}()
+	waitForPendingSelectionWriter(t, registry)
+	cancel()
+	lease.Release()
+	select {
+	case recorder := <-response:
+		if recorder.Code != http.StatusRequestTimeout {
+			t.Fatalf("canceled selection response=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["phase"] != "repository" {
+			t.Fatalf("canceled selection phase=%v, want repository", body["phase"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled selection handler did not return")
+	}
+	if got := registry.Selected(); got != `E:\repo-a` {
+		t.Fatalf("selected repository changed after canceled handler: %q", got)
 	}
 }
 

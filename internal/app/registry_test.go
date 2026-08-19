@@ -275,6 +275,118 @@ func TestRegistryOrdinaryReadsAreNotBlockedByPendingSelectionWriter(t *testing.T
 	}
 }
 
+func waitForPendingSelectionWriter(t *testing.T, registry *Registry) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if !registry.selectionMu.TryRLock() {
+			return
+		}
+		registry.selectionMu.RUnlock()
+		runtime.Gosched()
+	}
+	t.Fatal("selection writer did not become pending")
+}
+
+func TestRegistrySelectContextCancellationDoesNotCommitQueuedSelection(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.json")
+	registry := NewRegistry(fakeInspector{}, configFile)
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Select(`E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	selected := make(chan error, 1)
+	go func() { selected <- registry.SelectContext(ctx, `E:\repo-b`) }()
+	waitForPendingSelectionWriter(t, registry)
+	cancel()
+	lease.Release()
+	select {
+	case err := <-selected:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("SelectContext error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled selection did not return")
+	}
+	if got := registry.Selected(); got != `E:\repo-a` {
+		t.Fatalf("selected repository changed after cancellation: %q", got)
+	}
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg registryConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LastSelected != `E:\repo-a` {
+		t.Fatalf("persisted selection changed after cancellation: %q", cfg.LastSelected)
+	}
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatalf("subsequent selection failed after canceled request: %v", err)
+	}
+}
+
+func TestRegistrySelectContextCommitsAfterQueuedLeaseRelease(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := registry.acquireSelected(gitx.RepositoryKey(`E:\repo-a`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := make(chan error, 1)
+	go func() { selected <- registry.SelectContext(context.Background(), `E:\repo-b`) }()
+	waitForPendingSelectionWriter(t, registry)
+	lease.Release()
+	select {
+	case err := <-selected:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("selection did not return after lease release")
+	}
+	if got := registry.Selected(); got != `E:\repo-b` {
+		t.Fatalf("selected repository = %q, want repo-b", got)
+	}
+}
+
+func TestRegistrySelectContextAlreadyCanceledHasNoSideEffects(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo-a`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := registry.SelectContext(ctx, `E:\repo-b`); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SelectContext error = %v, want context.Canceled", err)
+	}
+	if got := registry.Selected(); got != `E:\repo-a` {
+		t.Fatalf("already-canceled selection changed selected repository: %q", got)
+	}
+	if err := registry.Select(`E:\repo-b`); err != nil {
+		t.Fatalf("normal selection failed after already-canceled request: %v", err)
+	}
+}
+
 func writeRegistryConfig(t *testing.T, recent []string, selected string) string {
 	t.Helper()
 	configFile := filepath.Join(t.TempDir(), "config.json")

@@ -7,7 +7,8 @@ import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonActi
 
 type Toast = { id: number; kind: 'success' | 'error'; message: string }
 type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
-type AgentsLoadOutcome = 'applied' | 'superseded' | 'rejected' | 'failed'
+type AgentsLoadOutcome = 'applied' | 'superseded-applied' | 'superseded' | 'rejected' | 'failed'
+type AppliedAgentsRequest = { generation: number; identity: string; repositoryEpoch: number }
 
 const navigation = [
   ['Overview', LayoutDashboard], ['Reviews', ListChecks], ['Fix & Refine', ShieldCheck],
@@ -305,6 +306,7 @@ export function App() {
   // refresh cannot make an in-flight health check look stale.
   const agentsRequestGeneration = useRef(0)
   const agentsRepositoryEpoch = useRef(0)
+  const lastAppliedAgentsRequest = useRef<AppliedAgentsRequest | null>(null)
   const previousAgentsRepositoryIdentity = useRef<string | null>(null)
   const runtimeControlGeneration = useRef(0)
   const currentRepositoryIdentity = useRef('')
@@ -376,6 +378,7 @@ export function App() {
   }, [])
   const loadAgents = useCallback(async (expectedIdentity: string = currentRepositoryIdentity.current): Promise<AgentsLoadOutcome> => {
     const generation = ++agentsRequestGeneration.current
+    const requestRepositoryEpoch = agentsRepositoryEpoch.current
     setAgentsLoading(true)
     try {
       const next = normalizeAgentsResponse(await request<unknown>('/api/agents'))
@@ -384,10 +387,14 @@ export function App() {
       // ordering race. A superseded response from another repository must
       // never be treated as a harmless same-repository refresh.
       if (!expectedIdentity || expectedIdentity !== currentRepositoryIdentity.current || next.repositoryIdentity !== expectedIdentity) return 'rejected'
-      if (generation !== agentsRequestGeneration.current) return 'superseded'
+      if (generation !== agentsRequestGeneration.current) {
+        const applied = lastAppliedAgentsRequest.current
+        return applied && applied.generation > generation && applied.generation === agentsRequestGeneration.current && applied.identity === expectedIdentity && applied.repositoryEpoch === requestRepositoryEpoch ? 'superseded-applied' : 'superseded'
+      }
       setAgents(next)
       setLoadedAgentsIdentity(expectedIdentity)
       setAgentsError('')
+      lastAppliedAgentsRequest.current = { generation, identity: expectedIdentity, repositoryEpoch: requestRepositoryEpoch }
       return 'applied'
     } catch (error) {
       if (generation === agentsRequestGeneration.current && expectedIdentity === currentRepositoryIdentity.current) setAgentsError((error as Error).message)
@@ -718,7 +725,7 @@ export function App() {
       // the repository identity/epoch is unchanged; the newest same-scope
       // GET owns the cards and completion still gets surfaced.
       const reloadOutcome = await loadAgents(expectedIdentity)
-      if (expectedIdentity === currentRepositoryIdentity.current && startRepositoryEpoch === agentsRepositoryEpoch.current && (reloadOutcome === 'applied' || reloadOutcome === 'superseded')) toast('success', `Agent check completed for ${agent}.`)
+      if (expectedIdentity === currentRepositoryIdentity.current && startRepositoryEpoch === agentsRepositoryEpoch.current && (reloadOutcome === 'applied' || reloadOutcome === 'superseded-applied')) toast('success', `Agent check completed for ${agent}.`)
     } catch (error) {
       if (expectedIdentity !== currentRepositoryIdentity.current || startRepositoryEpoch !== agentsRepositoryEpoch.current) return
       toast('error', (error as Error).message)

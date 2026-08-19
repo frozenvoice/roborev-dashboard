@@ -1315,6 +1315,108 @@ describe('App review workflow', () => {
     expect(within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByText('Passed')).toBeInTheDocument()
   })
 
+  it('proves a superseded health reload only after a newer same-repository response applies', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const initialRefresh = deferred<Response>()
+    const olderReload = deferred<Response>()
+    const newerReload = deferred<Response>()
+    const checkedAgents = { ...setupAgents, configured: [{ ...setupAgents.configured[0], health: 'passed' }] }
+    let agentCalls = 0
+    let runtimeCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') {
+        runtimeCalls += 1
+        return response(runtimeCalls === 1 ? { ...setupRuntime, operationActive: true, daemonOperation: 'starting' } : setupRuntime)
+      }
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
+      if (path === '/api/agents') {
+        agentCalls += 1
+        if (agentCalls === 1) return response(setupAgents)
+        if (agentCalls === 2) return initialRefresh.promise
+        if (agentCalls === 3) return olderReload.promise
+        return newerReload.promise
+      }
+      if (path === '/api/agents/check' && init?.method === 'POST') return response({ success: true })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await screen.findByText('Claude Code')
+    const refresh = within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByRole('button', { name: 'Refresh' })
+    await userEvent.click(refresh)
+    await waitFor(() => expect(agentCalls).toBe(2))
+    await userEvent.click(screen.getByRole('button', { name: 'Run check' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    await waitFor(() => expect(agentCalls).toBe(3))
+    // The background refresh is a same-scope request while the ordinary
+    // manual refresh and post-check request remain in flight.
+    await waitFor(() => expect(agentCalls).toBe(4))
+    initialRefresh.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    newerReload.resolve(new Response(JSON.stringify(checkedAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByText('Passed')).toBeInTheDocument())
+    olderReload.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Agent check completed for claude-code.')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByText('Passed')).toBeInTheDocument()
+  })
+
+  it('does not treat a superseded reload as successful when the newer response is rejected', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const initialRefresh = deferred<Response>()
+    const olderReload = deferred<Response>()
+    const checkedAgents = { ...setupAgents, configured: [{ ...setupAgents.configured[0], health: 'passed' }] }
+    let agentCalls = 0
+    let runtimeCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path === '/api/setup/roborev') return response(setupReady)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path === '/api/runtime-control') {
+        runtimeCalls += 1
+        return response(runtimeCalls < 3 ? { ...setupRuntime, operationActive: true, daemonOperation: 'starting' } : setupRuntime)
+      }
+      if (path === '/api/runtime') return response(bootstrap.roborev)
+      if (path === '/api/agents') {
+        agentCalls += 1
+        if (agentCalls === 1) return response(setupAgents)
+        if (agentCalls === 2) return initialRefresh.promise
+        if (agentCalls === 3) return olderReload.promise
+        if (agentCalls === 4) return response(setupAgents)
+        return response(setupAgentsB)
+      }
+      if (path === '/api/agents/check' && init?.method === 'POST') return response({ success: true })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
+    await screen.findByText('Claude Code')
+    const refresh = within(screen.getByRole('region', { name: 'Configured Review Agents' })).getByRole('button', { name: 'Refresh' })
+    await userEvent.click(refresh)
+    await waitFor(() => expect(agentCalls).toBe(2))
+    await userEvent.click(screen.getByRole('button', { name: 'Run check' }))
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Run check' }))
+    await waitFor(() => expect(agentCalls).toBe(3))
+    // The ordinary manual refresh is still in flight while the post-check
+    // request runs. Background polling then creates g4/g5 without switching
+    // repositories or clearing the stale A cards.
+    initialRefresh.resolve(new Response(JSON.stringify(setupAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(agentCalls).toBe(4))
+    await waitFor(() => expect(agentCalls).toBe(5))
+    olderReload.resolve(new Response(JSON.stringify(checkedAgents), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Agent check completed for claude-code.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Passed')).not.toBeInTheDocument()
+    expect(screen.getByText('Claude Code')).toBeInTheDocument()
+    expect(screen.getByText('Not checked')).toBeInTheDocument()
+  })
+
   it('does not let a background same-repository reload suppress health completion', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const backgroundAgents = deferred<Response>()
