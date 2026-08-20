@@ -88,6 +88,10 @@ func (c *Client) CheckDaemonHealth(ctx context.Context) (bool, error) {
 }
 
 type daemonHealthResponse struct {
+	// Schema is emitted by RoboRev v0.64.0's generated OpenAPI response as
+	// optional JSON-Schema metadata. Keep it typed and continue rejecting any
+	// other unknown field below.
+	Schema       *string                 `json:"$schema,omitempty"`
 	Healthy      bool                    `json:"healthy"`
 	Uptime       string                  `json:"uptime"`
 	Version      string                  `json:"version"`

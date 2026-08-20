@@ -298,6 +298,7 @@ func TestDaemonHealthContextCancellationIsNotOffline(t *testing.T) {
 }
 
 func TestDaemonHealthDistinguishesUnreachableFromReachableInvalidResponses(t *testing.T) {
+	const realV064HealthPayload = `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"uptime":"1h2m3s","version":"v0.64.0","components":[{"name":"database","healthy":true},{"name":"workers","healthy":true}],"recent_errors":null,"error_count_24h":0}`
 	tests := []struct {
 		name       string
 		status     int
@@ -307,9 +308,13 @@ func TestDaemonHealthDistinguishesUnreachableFromReachableInvalidResponses(t *te
 	}{
 		{name: "server error is reachable", status: http.StatusInternalServerError, body: `server error`, wantOnline: true, wantErr: true},
 		{name: "malformed JSON is reachable", status: http.StatusOK, body: `{`, wantOnline: true, wantErr: true},
+		{name: "trailing JSON is rejected", status: http.StatusOK, body: `{"healthy":true}{}`, wantOnline: true, wantErr: true},
 		{name: "unknown field is rejected", status: http.StatusOK, body: `{"healthy":true,"unknown":true}`, wantOnline: true, wantErr: true},
+		{name: "schema must be a string", status: http.StatusOK, body: `{"$schema":true,"healthy":true}`, wantOnline: true, wantErr: true},
 		{name: "oversized body is rejected", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), wantOnline: true, wantErr: true},
 		{name: "healthy response is online", status: http.StatusOK, body: `{"healthy":true}`, wantOnline: true, wantErr: false},
+		{name: "real v0.64.0 shape with schema is online", status: http.StatusOK, body: realV064HealthPayload, wantOnline: true, wantErr: false},
+		{name: "unhealthy response is online", status: http.StatusOK, body: `{"healthy":false}`, wantOnline: true, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -338,5 +343,20 @@ func TestDaemonHealthDistinguishesUnreachableFromReachableInvalidResponses(t *te
 	online, healthErr := client.DaemonHealth(context.Background())
 	if online || healthErr != nil {
 		t.Fatalf("closed server health = online:%v err:%v", online, healthErr)
+	}
+}
+
+func TestDaemonHealthReportsUnhealthyDaemonSeparately(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":false,"uptime":"1h2m3s","version":"v0.64.0","components":[{"name":"database","healthy":true},{"name":"workers","healthy":true}],"recent_errors":null,"error_count_24h":0}`))
+	}))
+	defer srv.Close()
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	online, healthErr := client.DaemonHealth(context.Background())
+	if !online || !errors.Is(healthErr, ErrDaemonUnhealthy) {
+		t.Fatalf("health = online:%v err:%v, want reachable unhealthy daemon", online, healthErr)
 	}
 }

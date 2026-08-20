@@ -57,7 +57,7 @@ func TestStreamArgsExactContract(t *testing.T) {
 
 func TestOpenStreamCapabilityAndHealthyDaemonGate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"healthy":true,"version":"v0.64.0"}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"uptime":"1h2m3s","version":"v0.64.0","components":[{"name":"database","healthy":true},{"name":"workers","healthy":true}],"recent_errors":null,"error_count_24h":0}`))
 	}))
 	defer server.Close()
 	commands := &streamGateRunner{}

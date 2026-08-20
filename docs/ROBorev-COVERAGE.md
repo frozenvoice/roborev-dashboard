@@ -1,6 +1,6 @@
 # RoboRev v0.64.0 Coverage
 
-조사일: 2026-08-18. v0.64.0을 실행할 수 있었던 이전 Windows 환경의 command help/contract test와 공식 `kenn-io/roborev` v0.64.0 source 및 GitHub release metadata를 교차 확인했다. 현재 clean-machine 검증 환경에는 RoboRev가 없으며 자동 테스트는 실제 RoboRev를 호출하지 않는다. Dashboard는 런타임에 version/capability를 다시 감지한다.
+조사일: 2026-08-20. 실제 Windows RoboRev v0.64.0 command/health response와 공식 `kenn-io/roborev` v0.64.0 source 및 GitHub release metadata를 교차 확인했다. 자동 테스트는 실제 RoboRev를 호출하지 않고 deterministic fixture를 사용하며, Dashboard는 런타임에 version/capability를 다시 감지한다.
 
 상태: **B** = Checkpoint B vertical slice, **P** = planned, **N** = local UI action 부적합/문서화만.
 
@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | pinned v0.64.0 GitHub release asset | missing RoboRev runtime 설치 | bounded HTTPS + SHA-256 + safe ZIP + no-replace publish | B | 예 | Windows amd64, explicit confirmation, immutable manifest; URL/version/hash/target을 browser가 선택하지 않음 |
 | `version --json` | 설치/version 검증과 runtime rebind | JSON CLI | B | 예 | exact `name=roborev`, canonical v0.64.0 확인 뒤에만 generation binding 교체 |
-| `/api/health` | daemon health | version-gated daemon API | B | 예 | 작은 health payload만 polling |
+| `/api/health` | daemon health | version-gated daemon API | B | 예 | bounded typed payload만 polling; 실제 optional string `$schema`를 허용하고 그 외 unknown field는 거부 |
 | `status --json` | full daemon/queue diagnostics | JSON CLI | P | 아니요 | v0.64.0은 recent job prompt를 포함하므로 polling 금지 |
 | `/api/jobs?repo=...&omit_prompt=true` | review 목록/filter | version-gated daemon API | B | 예 | active prompt도 adapter가 strip하는 4초 polling |
 | `/api/jobs?id=...&omit_prompt=true` | job owning-repo authorization | version-gated daemon API | B | 예 | upstream v0.64 source와 query-sensitive oversized fixture로 검증 |
@@ -68,6 +68,7 @@
 - Dashboard의 recommended policy는 전체 Review/Panel/Panel Refine 계약이 검증된 exact v0.64.0이다. Windows amd64 ZIP의 official asset name, 16,325,029-byte compressed size, SHA-256 `157b008086a2ad1c107fe4aa70f172275400dd508c4c9761db2d604f9e56e056`, root `roborev.exe`와 user-level target을 source manifest에 pin한다. remote metadata가 다른 digest를 제시해도 자동 신뢰하지 않는다.
 - 이미 발견된 supported binary는 재설치하지 않는다. explicit override와 newer/unknown/broken/blocked binary는 보존하며 자동 downgrade/replace하지 않는다. 설치는 PATH, `roborev init`, hook, agent, credential과 Windows 보안 설정을 변경하지 않는다.
 - setup은 same-origin/CSRF/Host 보호를 받는 typed strict-empty API다. download/hash/archive/publish/probe/rebind/daemon-health를 bounded 단계로 수행하며 integrity와 unsafe archive 오류는 fail closed한다. Application Control은 exact Windows policy error만 `blocked`로 분류하고 우회하지 않는다.
+- 실제 v0.64.0 health payload는 `"$schema":"http://127.0.0.1:7373/HealthStatus.json"`, `healthy:true`, `uptime`, `version:"v0.64.0"`, `database`/`workers` components, `recent_errors:null`, `error_count_24h:0` shape로 확인했다. deterministic fixture가 이 shape를 고정하며 malformed/trailing/oversized/unhealthy/unknown-field와 Stream Relay daemon-version mismatch를 계속 fail closed한다.
 - `review`는 `--json`을 제공하지 않는다. upstream `/api/enqueue` response는 single job 또는 panel synthesis와 `member_job_ids`를 반환한다.
 - 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
 - `list --json`은 prompt와 diff를 포함한다. v0.64 daemon도 `omit_prompt=true`에서 queued/running prompt를 유지하므로 Dashboard adapter가 status와 무관하게 heavy fields를 제거한다.

@@ -11,9 +11,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 )
+
+type appRuntimeProcessRunner struct {
+	mu       sync.Mutex
+	commands []process.Command
+}
+
+func (r *appRuntimeProcessRunner) Run(_ context.Context, command process.Command) (process.Result, error) {
+	r.mu.Lock()
+	r.commands = append(r.commands, command)
+	r.mu.Unlock()
+	if len(command.Args) == 2 && command.Args[0] == "version" && command.Args[1] == "--json" {
+		return process.Result{Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
+	}
+	return process.Result{}, nil
+}
+
+func (r *appRuntimeProcessRunner) snapshot() []process.Command {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]process.Command(nil), r.commands...)
+}
 
 type appRuntimeAdapter struct {
 	mu             sync.Mutex
@@ -264,6 +286,69 @@ func TestDaemonRestartCompletesAfterRequestAndReportsReady(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("restart did not reach terminal ready state")
+}
+
+func TestDaemonStartWithV064HealthSchemaReachesReadyAndQueueKnown(t *testing.T) {
+	const realV064HealthPayload = `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"uptime":"1h2m3s","version":"v0.64.0","components":[{"name":"database","healthy":true},{"name":"workers","healthy":true}],"recent_errors":null,"error_count_24h":0}`
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(realV064HealthPayload))
+		case "/api/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"queue_paused":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer daemon.Close()
+
+	runner := &appRuntimeProcessRunner{}
+	client, err := roborev.NewClient("roborev", runner, daemon.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(client, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := server.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/daemon/start", nil)
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("daemon start = %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		statusRequest := httptest.NewRequest(http.MethodGet, "/api/runtime-control", nil)
+		statusRecorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(statusRecorder, statusRequest)
+		var state runtimeControlDTO
+		if statusRecorder.Code == http.StatusOK && json.Unmarshal(statusRecorder.Body.Bytes(), &state) == nil &&
+			!state.OperationActive && state.DaemonRunning && state.QueueState == "processing" && state.Error == "" {
+			for _, command := range runner.snapshot() {
+				if len(command.Args) == 2 && command.Args[0] == "daemon" && command.Args[1] == "start" {
+					return
+				}
+			}
+			t.Fatal("daemon start did not reach the fake process runner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("daemon start did not reach terminal ready state with known processing queue")
 }
 
 type unsupportedRuntimeService struct {
