@@ -34,11 +34,19 @@ type Server struct {
 	Setup       *setup.Manager
 	Agents      *agentstatus.Service
 	Runtime     *runtimecontrol.Manager
-	Events      *streamrelay.Manager
+	Events      EventRelay
 	Gate        *operation.Gate
 	AllowedHost string
 	csrfToken   string
 	mux         *http.ServeMux
+}
+
+// EventRelay is the narrow HTTP-facing surface of the stream manager. The
+// server must not depend on manager internals; tests can also use a counting
+// relay to prove authorization happens before subscription.
+type EventRelay interface {
+	Subscribe(context.Context, string) (<-chan streamrelay.Event, func(), error)
+	Shutdown(context.Context) error
 }
 
 type RepositoryDTO struct {
@@ -87,7 +95,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if err != nil {
 		return nil, err
 	}
-	var events *streamrelay.Manager
+	var events EventRelay
 	if source, ok := service.(streamrelay.Source); ok {
 		events = streamrelay.NewManager(source, func(ctx context.Context, identity string) (string, error) {
 			repo, err := registry.InspectIdentity(ctx, identity)
@@ -213,7 +221,7 @@ func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 // The repository path is never accepted from the browser: identity lookup and
 // a fresh canonical-root inspection are centralized in Registry.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeSameOrigin(w, r) {
+	if !s.authorizeEventStream(w, r) {
 		return
 	}
 	query := r.URL.Query()
@@ -232,7 +240,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "streaming responses are unsupported", "stream")
 		return
 	}
-	repo, err := s.Registry.InspectIdentity(r.Context(), identity)
+	_, err := s.Registry.InspectIdentity(r.Context(), identity)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
 		return
@@ -241,7 +249,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "live updates are unavailable", "stream")
 		return
 	}
-	updates, unsubscribe, err := s.Events.Subscribe(r.Context(), identity, repo.Path)
+	updates, unsubscribe, err := s.Events.Subscribe(r.Context(), identity)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "live updates are unavailable", "stream")
 		return
@@ -375,18 +383,55 @@ func (s *Server) authorizeMutation(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
-// authorizeSameOrigin is shared by mutations and read-only SSE. An absent
-// Origin is allowed for same-origin localhost clients and non-browser callers;
-// an explicit Origin must be a fully formed origin matching the request's
-// scheme and host. SSE deliberately does not require a CSRF token.
+// authorizeSameOrigin protects mutations. Its absent-Origin compatibility is
+// intentional for local/non-browser clients; SSE uses the stricter
+// authorizeEventStream policy below.
 func (s *Server) authorizeSameOrigin(w http.ResponseWriter, r *http.Request) bool {
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	if origin == "" {
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
 		return true
 	}
-	parsed, err := url.Parse(origin)
-	if err != nil || strings.EqualFold(origin, "null") || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if len(origins) != 1 || !s.sameOrigin(r, origins[0]) {
 		writeError(w, http.StatusForbidden, "cross-origin request rejected", "origin")
+		return false
+	}
+	return true
+}
+
+// authorizeEventStream is deliberately stricter than mutation authorization:
+// subscribing can start a long-lived RoboRev process. An explicit Origin must
+// be the exact request origin. When browsers omit Origin, only the native
+// same-origin EventSource Fetch Metadata contract is accepted. Every metadata
+// header is required exactly once with its exact value, so missing, duplicate,
+// malformed, cross-site, and navigation requests fail closed before query or
+// registry/stream side effects.
+func (s *Server) authorizeEventStream(w http.ResponseWriter, r *http.Request) bool {
+	origins := r.Header.Values("Origin")
+	if len(origins) > 0 {
+		if len(origins) != 1 || !s.sameOrigin(r, origins[0]) {
+			writeError(w, http.StatusForbidden, "cross-origin request rejected", "origin")
+			return false
+		}
+		return true
+	}
+	if !exactHeaderValue(r.Header, "Sec-Fetch-Site", "same-origin") ||
+		!exactHeaderValue(r.Header, "Sec-Fetch-Mode", "cors") ||
+		!exactHeaderValue(r.Header, "Sec-Fetch-Dest", "empty") {
+		writeError(w, http.StatusForbidden, "same-origin stream request required", "origin")
+		return false
+	}
+	return true
+}
+
+func exactHeaderValue(header http.Header, name, expected string) bool {
+	values := header.Values(name)
+	return len(values) == 1 && values[0] == expected
+}
+
+func (s *Server) sameOrigin(r *http.Request, origin string) bool {
+	origin = strings.TrimSpace(origin)
+	parsed, err := url.Parse(origin)
+	if err != nil || strings.EqualFold(origin, "null") || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return false
 	}
 	expectedScheme := "http"
@@ -397,7 +442,6 @@ func (s *Server) authorizeSameOrigin(w http.ResponseWriter, r *http.Request) boo
 		expectedScheme = strings.ToLower(r.URL.Scheme)
 	}
 	if !strings.EqualFold(parsed.Scheme, expectedScheme) || !strings.EqualFold(parsed.Host, r.Host) {
-		writeError(w, http.StatusForbidden, "cross-origin request rejected", "origin")
 		return false
 	}
 	return true

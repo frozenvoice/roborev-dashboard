@@ -54,7 +54,6 @@ type startAttempt struct {
 	success bool
 	err     error
 	closed  bool
-	waiters int
 }
 
 type stopWork struct {
@@ -85,7 +84,6 @@ type Manager struct {
 type sourceState struct {
 	manager  *Manager
 	identity string
-	fallback string
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -113,9 +111,8 @@ type idleTimer interface {
 
 type idleAfterFunc func(time.Duration, func()) idleTimer
 
-// NewManager preserves the original constructor while allowing the server to
-// inject centralized fresh identity authorization. A nil authorizer is
-// deliberately fail-closed; callers cannot safely use a stale fallback path.
+// NewManager allows the server to inject centralized fresh identity
+// authorization. A nil authorizer is deliberately fail-closed.
 func NewManager(source Source, authorizers ...AuthorizeRepository) *Manager {
 	var authorize AuthorizeRepository
 	if len(authorizers) > 0 {
@@ -141,15 +138,16 @@ func newManagerWithFinishHook(source Source, authorize AuthorizeRepository, afte
 
 // Subscribe waits for a shared initial startup result before returning. A
 // request canceled while startup is pending leaves only its own provisional
-// waiter; when all provisional waiters leave, the shared startup is canceled.
-// Once ready, the source context is independent of any browser context.
-func (m *Manager) Subscribe(ctx context.Context, identity, repoPath string) (<-chan Event, func(), error) {
+// subscriber; when all provisional subscribers leave, the shared startup is
+// canceled. Once ready, the source context is independent of any browser
+// context. The repository path is intentionally resolved only by authorize.
+func (m *Manager) Subscribe(ctx context.Context, identity string) (<-chan Event, func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	identity = strings.TrimSpace(identity)
-	if identity == "" || strings.TrimSpace(repoPath) == "" {
-		return nil, func() {}, errors.New("repository identity and path are required")
+	if identity == "" {
+		return nil, func() {}, errors.New("repository identity is required")
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -167,7 +165,6 @@ func (m *Manager) Subscribe(ctx context.Context, identity, repoPath string) (<-c
 			s = &sourceState{
 				manager:       m,
 				identity:      identity,
-				fallback:      repoPath,
 				ctx:           sourceCtx,
 				cancel:        cancel,
 				status:        statusStarting,
@@ -191,7 +188,6 @@ func (m *Manager) Subscribe(ctx context.Context, identity, repoPath string) (<-c
 				m.mu.Unlock()
 				return nil, func() {}, ErrUnavailable
 			}
-			attempt.waiters++
 			s.pending++
 			m.mu.Unlock()
 			if start {
@@ -238,7 +234,7 @@ func (m *Manager) waitForStartup(ctx context.Context, s *sourceState, attempt *s
 func (m *Manager) finishStartupWait(ctx context.Context, s *sourceState, attempt *startAttempt) (<-chan Event, func(), error) {
 	var work stopWork
 	m.mu.Lock()
-	decrementAttemptLocked(s, attempt)
+	decrementPendingLocked(s)
 	current := m.sources[s.identity] == s
 	if ctx.Err() == nil && attempt.success && current && s.status != statusStopping && s.ctx.Err() == nil {
 		ch, unsubscribe := m.addSubscriberLocked(s)
@@ -266,7 +262,7 @@ func (m *Manager) finishStartupWait(ctx context.Context, s *sourceState, attempt
 func (m *Manager) cancelStartupWait(s *sourceState, attempt *startAttempt, waitErr error) (<-chan Event, func(), error) {
 	var work stopWork
 	m.mu.Lock()
-	decrementAttemptLocked(s, attempt)
+	decrementPendingLocked(s)
 	if m.sources[s.identity] == s && s.pending == 0 && len(s.subs) == 0 {
 		switch s.status {
 		case statusReady:
@@ -280,10 +276,7 @@ func (m *Manager) cancelStartupWait(s *sourceState, attempt *startAttempt, waitE
 	return nil, func() {}, waitErr
 }
 
-func decrementAttemptLocked(s *sourceState, attempt *startAttempt) {
-	if attempt.waiters > 0 {
-		attempt.waiters--
-	}
+func decrementPendingLocked(s *sourceState) {
 	if s.pending > 0 {
 		s.pending--
 	}
@@ -304,7 +297,7 @@ func (m *Manager) startSource(s *sourceState, attempt *startAttempt) {
 		close(s.lifecycleDone)
 		m.wg.Done()
 	}()
-	path, err := m.authorizePath(s.ctx, s.identity, s.fallback)
+	path, err := m.authorizePath(s.ctx, s.identity)
 	var stream proc.Stream
 	if err == nil {
 		stream, err = m.source.OpenStream(s.ctx, path)
@@ -342,7 +335,7 @@ func (m *Manager) startSource(s *sourceState, attempt *startAttempt) {
 	m.runSource(s, owned)
 }
 
-func (m *Manager) authorizePath(ctx context.Context, identity, _ string) (string, error) {
+func (m *Manager) authorizePath(ctx context.Context, identity string) (string, error) {
 	if m.authorize == nil {
 		// A stale path must never be reused for a long-lived source. Production
 		// managers receive the registry authorizer; a nil authorizer is only a
@@ -390,7 +383,7 @@ func (m *Manager) runSource(s *sourceState, stream proc.Stream) {
 			}
 			m.mu.Unlock()
 
-			path, authErr := m.authorizePath(s.ctx, s.identity, s.fallback)
+			path, authErr := m.authorizePath(s.ctx, s.identity)
 			var next proc.Stream
 			if authErr == nil {
 				next, authErr = m.source.OpenStream(s.ctx, path)

@@ -98,11 +98,11 @@ func (f *fakeStream) emit(line string) { f.lines <- []byte(line) }
 func TestManagerSanitizesAndSharesSource(t *testing.T) {
 	source := &fakeSource{}
 	m := NewManager(source, passthroughAuthorize)
-	first, unsubFirst, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	first, unsubFirst, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, unsubSecond, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	second, unsubSecond, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +142,11 @@ func TestManagerSanitizesAndSharesSource(t *testing.T) {
 func TestManagerCoalescesSubscriberBurstAndIsolatesIdentity(t *testing.T) {
 	source := &fakeSource{}
 	m := NewManager(source, passthroughAuthorize)
-	a, unsubA, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	a, unsubA, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, unsubB, err := m.Subscribe(context.Background(), "repo-b", `C:\repo-b`)
+	b, unsubB, err := m.Subscribe(context.Background(), "repo-b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestManagerCoalescesSubscriberBurstAndIsolatesIdentity(t *testing.T) {
 func TestManagerUnavailableDoesNotExposeSourceError(t *testing.T) {
 	source := &fakeSource{err: errors.New("stderr secret prompt diff")}
 	m := NewManager(source, passthroughAuthorize)
-	_, _, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, _, err := m.Subscribe(context.Background(), "repo-a")
 	if err == nil {
 		t.Fatal("expected unavailable source")
 	}
@@ -197,7 +197,7 @@ func TestManagerUnavailableDoesNotExposeSourceError(t *testing.T) {
 func TestManagerWithoutAuthorizerFailsClosedBeforeSourceStart(t *testing.T) {
 	source := &fakeSource{}
 	m := NewManager(source)
-	_, _, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, _, err := m.Subscribe(context.Background(), "repo-a")
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("error=%v, want unavailable", err)
 	}
@@ -215,7 +215,7 @@ func TestManagerWithoutAuthorizerFailsClosedBeforeSourceStart(t *testing.T) {
 func TestManagerRestartsAfterSourceExitWhileSubscribersRemain(t *testing.T) {
 	source := &fakeSource{}
 	m := NewManager(source, passthroughAuthorize)
-	updates, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	updates, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,13 +257,13 @@ func TestManagerRestartsAfterSourceExitWhileSubscribersRemain(t *testing.T) {
 func TestManagerIdleGraceReusesSourceThenCleansIt(t *testing.T) {
 	source := &fakeSource{}
 	m := NewManager(source, passthroughAuthorize)
-	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	unsubscribe()
 	time.Sleep(100 * time.Millisecond)
-	_, unsubscribeAgain, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribeAgain, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestManagerIdleGraceReusesSourceThenCleansIt(t *testing.T) {
 	}
 	unsubscribeAgain()
 	time.Sleep(idleGrace + 150*time.Millisecond)
-	_, unsubscribeAfterGrace, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribeAfterGrace, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestManagerShutdownTimeoutCanBeFollowedBySuccessfulWait(t *testing.T) {
 	stream.deferClose = true
 	source := &fakeSource{factory: func() *fakeStream { return stream }}
 	m := NewManager(source, passthroughAuthorize)
-	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestManagerConcurrentSubscribersShareInitialStartup(t *testing.T) {
 	}
 	results := make(chan result, 2)
 	go func() {
-		ch, un, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+		ch, un, err := m.Subscribe(context.Background(), "repo-a")
 		results <- result{ch: ch, un: un, err: err}
 	}()
 	select {
@@ -340,7 +340,7 @@ func TestManagerConcurrentSubscribersShareInitialStartup(t *testing.T) {
 		t.Fatal("initial source did not start")
 	}
 	go func() {
-		ch, un, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+		ch, un, err := m.Subscribe(context.Background(), "repo-a")
 		results <- result{ch: ch, un: un, err: err}
 	}()
 	select {
@@ -375,7 +375,7 @@ func TestManagerSharesInitialStartupFailure(t *testing.T) {
 	results := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			_, _, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+			_, _, err := m.Subscribe(context.Background(), "repo-a")
 			results <- err
 		}()
 	}
@@ -417,7 +417,7 @@ func TestManagerCanceledInitialWaiterCancelsSharedStartup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := m.Subscribe(ctx, "repo-a", `C:\stale`)
+		_, _, err := m.Subscribe(ctx, "repo-a")
 		result <- err
 	}()
 	select {
@@ -457,7 +457,7 @@ func TestManagerReauthorizesBeforeRestartAndDoesNotUseStalePath(t *testing.T) {
 		}
 		return "", errors.New("repository revoked")
 	})
-	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\stale`)
+	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestManagerCanceledReadyWaiterSchedulesIdleGrace(t *testing.T) {
 	timers := &manualIdleTimers{}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := newManager(&fakeSource{}, passthroughAuthorize, timers.after)
-	attempt := &startAttempt{done: make(chan struct{}), success: true, waiters: 1}
+	attempt := &startAttempt{done: make(chan struct{}), success: true}
 	s := &sourceState{
 		manager:       m,
 		identity:      "repo-a",
@@ -563,12 +563,12 @@ func TestManagerQueuedIdleTimerCannotStopReusedSource(t *testing.T) {
 	timers := &manualIdleTimers{}
 	source := &fakeSource{}
 	m := newManager(source, passthroughAuthorize, timers.after)
-	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	unsubscribe()
-	_, unsubscribeAgain, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribeAgain, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func TestManagerQueuedIdleTimerCannotStopReusedSource(t *testing.T) {
 		t.Fatalf("idle timers=%d, want two generations", timers.count())
 	}
 	timers.fire(0)
-	third, unsubscribeThird, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	third, unsubscribeThird, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestManagerIdleStopWaitsBeforeStartingReplacement(t *testing.T) {
 		return newFakeStream()
 	}}
 	m := newManager(source, passthroughAuthorize, timers.after)
-	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+	_, unsubscribe, err := m.Subscribe(context.Background(), "repo-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +636,7 @@ func TestManagerIdleStopWaitsBeforeStartingReplacement(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, un, subscribeErr := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+		_, un, subscribeErr := m.Subscribe(context.Background(), "repo-a")
 		if subscribeErr == nil {
 			un()
 		}
@@ -700,7 +700,7 @@ func TestManagerSuccessfulWaiterSurvivesImmediateRestartGeneration(t *testing.T)
 	}
 	result := make(chan subscribeResult, 1)
 	go func() {
-		updates, un, err := m.Subscribe(context.Background(), "repo-a", `C:\repo-a`)
+		updates, un, err := m.Subscribe(context.Background(), "repo-a")
 		result <- subscribeResult{updates: updates, un: un, err: err}
 	}()
 	select {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/streamrelay"
 )
 
 type eventService struct {
@@ -67,6 +68,14 @@ func (s *eventTestStream) Close() error {
 	return nil
 }
 
+func nativeEventSourceRequest(method, target string) *http.Request {
+	request := httptest.NewRequest(method, target, nil)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "cors")
+	request.Header.Set("Sec-Fetch-Dest", "empty")
+	return request
+}
+
 func newEventTestServer(t *testing.T) (*Server, *eventService) {
 	t.Helper()
 	registry := NewRegistry(fakeInspector{}, "")
@@ -87,7 +96,7 @@ func TestEventsShutdownClosesActiveSSEPromptly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity), nil)
+	request := nativeEventSourceRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity))
 	requestContext, cancel := context.WithCancel(request.Context())
 	request = request.WithContext(requestContext)
 	response := httptest.NewRecorder()
@@ -110,6 +119,9 @@ func TestEventsShutdownClosesActiveSSEPromptly(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("active SSE did not close during shutdown")
 	}
+	if got := response.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("native EventSource content type=%q, want text/event-stream", got)
+	}
 	select {
 	case <-shutdownDone:
 	case <-time.After(time.Second):
@@ -124,7 +136,7 @@ func TestEventsRejectsUnexpectedQueryShape(t *testing.T) {
 		"/api/events?repositoryIdentity=repo&repositoryIdentity=repo",
 		"/api/events?repositoryIdentity=repo&unexpected=x",
 	} {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request := nativeEventSourceRequest(http.MethodGet, path)
 		response := httptest.NewRecorder()
 		server.Handler().ServeHTTP(response, request)
 		if response.Code != http.StatusBadRequest {
@@ -154,6 +166,29 @@ func (i *countingEventInspector) Calls() int {
 	return i.calls
 }
 
+type countingEventRelay struct {
+	delegate EventRelay
+	mu       sync.Mutex
+	calls    int
+}
+
+func (r *countingEventRelay) Subscribe(ctx context.Context, identity string) (<-chan streamrelay.Event, func(), error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return r.delegate.Subscribe(ctx, identity)
+}
+
+func (r *countingEventRelay) Shutdown(ctx context.Context) error {
+	return r.delegate.Shutdown(ctx)
+}
+
+func (r *countingEventRelay) Calls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
 func TestEventsRejectsForeignOrMalformedOriginBeforeRegistryOrSubscribe(t *testing.T) {
 	inspector := &countingEventInspector{}
 	registry := NewRegistry(inspector, "")
@@ -166,11 +201,13 @@ func TestEventsRejectsForeignOrMalformedOriginBeforeRegistryOrSubscribe(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	relay := &countingEventRelay{delegate: server.Events}
+	server.Events = relay
 	identity, err := registry.Identity(`E:\repo`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, origin := range []string{"http://evil.test", "null", "not-an-origin"} {
+	for _, origin := range []string{"http://evil.test", "null", "not-an-origin", ""} {
 		request := httptest.NewRequest(http.MethodGet, "/api/events?unexpected=x&repositoryIdentity="+url.QueryEscape(identity), nil)
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
@@ -179,11 +216,37 @@ func TestEventsRejectsForeignOrMalformedOriginBeforeRegistryOrSubscribe(t *testi
 			t.Fatalf("origin=%q status=%d body=%s", origin, response.Code, response.Body.String())
 		}
 	}
+	for _, headers := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "empty"},
+		{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"},
+		{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "empty"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity), nil)
+		for name, value := range headers {
+			request.Header.Set(name, value)
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("fetch metadata=%v status=%d body=%s", headers, response.Code, response.Body.String())
+		}
+	}
 	if inspector.Calls() != baseline {
 		t.Fatalf("registry inspection calls=%d, baseline=%d", inspector.Calls(), baseline)
 	}
 	if service.calls() != 0 {
 		t.Fatalf("stream open calls=%d, want zero", service.calls())
+	}
+	if relay.Calls() != 0 {
+		t.Fatalf("stream subscribe calls=%d, want zero", relay.Calls())
+	}
+	duplicate := httptest.NewRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity), nil)
+	duplicate.Header.Add("Origin", "http://evil.test")
+	duplicate.Header.Add("Origin", "http://evil.test")
+	duplicateResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(duplicateResponse, duplicate)
+	if duplicateResponse.Code != http.StatusForbidden {
+		t.Fatalf("duplicate origin status=%d body=%s", duplicateResponse.Code, duplicateResponse.Body.String())
 	}
 	if err := server.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
@@ -221,7 +284,7 @@ func TestEventsAllowsSameOriginWithoutCSRFAndRejectsUnauthorizedIdentity(t *test
 		t.Fatal(err)
 	}
 
-	unauthorized := httptest.NewRequest(http.MethodGet, "/api/events?repositoryIdentity=not-registered", nil)
+	unauthorized := nativeEventSourceRequest(http.MethodGet, "/api/events?repositoryIdentity=not-registered")
 	unauthorizedResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(unauthorizedResponse, unauthorized)
 	if unauthorizedResponse.Code != http.StatusForbidden {
@@ -245,7 +308,7 @@ func TestEventsUnavailableWhenServiceHasNoStreamSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity), nil)
+	request := nativeEventSourceRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
