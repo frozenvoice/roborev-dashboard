@@ -42,7 +42,14 @@ func newEndpointRefineManager(t *testing.T, server *Server, service refine.Revie
 		RoboRev:      service,
 		Binary:       "roborev",
 		PollInterval: time.Millisecond,
-		Wait:         func(context.Context, time.Duration) error { return nil },
+		Wait: func(ctx context.Context, _ time.Duration) error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				return nil
+			}
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

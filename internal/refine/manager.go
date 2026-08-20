@@ -614,6 +614,9 @@ func (m *Manager) verifyReviewTarget(ctx context.Context, id, targetHead string)
 func (m *Manager) poll(ctx context.Context, request roborev.ReviewRequest, receipt roborev.PanelEnqueueResponse) (string, error) {
 	statusErrors := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		prefix, err := m.service.JobOutputStatus(ctx, receipt.ID)
 		if err != nil {
 			if errors.Is(err, roborev.ErrMalformedJobOutputStatus) || errors.Is(err, roborev.ErrUnsupportedJobOutputStatus) {

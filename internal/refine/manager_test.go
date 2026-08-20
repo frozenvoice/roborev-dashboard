@@ -129,6 +129,8 @@ type fakeReviewService struct {
 	fixReturned        chan struct{}
 	fixRelease         chan struct{}
 	statusHook         func()
+	statusEntered      chan int64
+	statusEnteredSeen  map[int64]bool
 	receipts           map[int64]roborev.PanelEnqueueResponse
 	registry           RepositoryRegistry
 }
@@ -233,15 +235,31 @@ func (s *fakeReviewService) SynthesisStatus(context.Context, int64) (roborev.Syn
 	}
 	return roborev.SynthesisStatus{JobMetadata: roborev.JobMetadata{ID: receipt.ID, RepoPath: receipt.RepoPath, GitRef: receipt.GitRef, Branch: receipt.Branch, PanelName: receipt.PanelName, PanelRunUUID: receipt.PanelRunUUID, PanelRole: receipt.PanelRole, JobType: receipt.JobType, Status: "done", Verdict: verdict}}, nil
 }
-func (s *fakeReviewService) JobOutputStatus(context.Context, int64) (roborev.JobOutputStatus, error) {
+func (s *fakeReviewService) JobOutputStatus(ctx context.Context, id int64) (roborev.JobOutputStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return roborev.JobOutputStatus{}, err
+	}
 	s.mu.Lock()
-	count := s.reviewCount
 	statusError := s.statusError
 	pending := s.statusPending
-	receipt := s.receipts[int64(count)]
+	receipt := s.receipts[id]
 	hook := s.statusHook
 	s.statusHook = nil
+	statusEntered := s.statusEntered
+	entered := statusEntered != nil && !s.statusEnteredSeen[id]
+	if entered {
+		if s.statusEnteredSeen == nil {
+			s.statusEnteredSeen = make(map[int64]bool)
+		}
+		s.statusEnteredSeen[id] = true
+	}
 	s.mu.Unlock()
+	if entered {
+		select {
+		case statusEntered <- id:
+		default:
+		}
+	}
 	if hook != nil {
 		hook()
 	}
@@ -311,7 +329,18 @@ func (s *fakeReviewService) Fix(ctx context.Context, request roborev.FixRequest)
 	})
 	return nil
 }
-func (s *fakeReviewService) Cancel(context.Context, int64) error { s.cancelCount++; return nil }
+func (s *fakeReviewService) Cancel(context.Context, int64) error {
+	s.mu.Lock()
+	s.cancelCount++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *fakeReviewService) cancelCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelCount
+}
 
 func (s *fakeReviewService) updateRepository(path string, fn func(*gitx.Repository)) {
 	switch registry := s.registry.(type) {
@@ -338,6 +367,15 @@ func newTestManager(t *testing.T, service *fakeReviewService) (*Manager, *fakeRe
 		t.Fatal(err)
 	}
 	return manager, registry
+}
+
+func immediateWait(ctx context.Context, _ time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
 
 func waitRun(t *testing.T, manager *Manager, id string) *PanelRefineRun {
@@ -430,6 +468,38 @@ func (s *blockingReviewService) JobOutputStatus(ctx context.Context, _ int64) (r
 	return roborev.JobOutputStatus{}, ctx.Err()
 }
 
+type cancellationIgnoringStatusService struct {
+	*fakeReviewService
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (s *cancellationIgnoringStatusService) JobOutputStatus(_ context.Context, id int64) (roborev.JobOutputStatus, error) {
+	s.mu.Lock()
+	s.calls++
+	calls := s.calls
+	s.mu.Unlock()
+	if calls == 1 {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	s.fakeReviewService.mu.Lock()
+	receipt := s.fakeReviewService.receipts[id]
+	s.fakeReviewService.mu.Unlock()
+	return roborev.JobOutputStatus{JobID: receipt.ID, Status: "queued"}, nil
+}
+
+func (s *cancellationIgnoringStatusService) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
 func TestManagerCancelSignalsWorkerAndCleansReceipt(t *testing.T) {
 	service := &blockingReviewService{fakeReviewService: &fakeReviewService{verdicts: []string{"P"}}, started: make(chan struct{}, 1)}
 	manager, _ := newTestManager(t, service.fakeReviewService)
@@ -449,8 +519,48 @@ func TestManagerCancelSignalsWorkerAndCleansReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := waitRun(t, manager, run.ID)
-	if result.Phase != PhaseCancelled || result.CancelState == nil || service.cancelCount != 1 || len(result.Iterations) != 1 || result.Iterations[0].ReviewJobID != 1 || result.Iterations[0].PanelRunUUID == "" || result.Iterations[0].Error == "" {
-		t.Fatalf("unexpected cancellation result: %#v, cancels=%d", result, service.cancelCount)
+	cancelCalls := service.cancelCalls()
+	if result.Phase != PhaseCancelled || result.CancelState == nil || cancelCalls != 1 || len(result.Iterations) != 1 || result.Iterations[0].ReviewJobID != 1 || result.Iterations[0].PanelRunUUID == "" || result.Iterations[0].Error == "" {
+		t.Fatalf("unexpected cancellation result: %#v, cancels=%d", result, cancelCalls)
+	}
+}
+
+func TestManagerPollGuardStopsAfterCancellationIgnoringStatusService(t *testing.T) {
+	service := &cancellationIgnoringStatusService{
+		fakeReviewService: &fakeReviewService{verdicts: []string{"P"}},
+		entered:           make(chan struct{}, 1),
+		release:           make(chan struct{}),
+	}
+	manager, _ := newTestManager(t, service.fakeReviewService)
+	manager.service = service
+	manager.wait = func(context.Context, time.Duration) error { return nil }
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(service.release) }) }
+	defer release()
+	run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-service.entered:
+	case <-time.After(time.Second):
+		t.Fatal("status polling did not start")
+	}
+	if err := manager.Cancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown did not complete after cancellation: %v", err)
+	}
+	result, ok := manager.Get(run.ID)
+	if !ok || result.Phase != PhaseCancelled {
+		t.Fatalf("canceled run was not terminalized: ok=%v result=%#v", ok, result)
+	}
+	if calls := service.callCount(); calls != 1 {
+		t.Fatalf("cancellation-ignoring status service calls=%d, want 1", calls)
 	}
 }
 
@@ -608,7 +718,7 @@ func TestManagerRejectsFixWithoutCommitOrWithDirtyResult(t *testing.T) {
 func TestManagerBoundsStatusPollingErrors(t *testing.T) {
 	service := &fakeReviewService{verdicts: []string{"P"}, statusError: true}
 	manager, _ := newTestManager(t, service)
-	manager.wait = func(context.Context, time.Duration) error { return nil }
+	manager.wait = immediateWait
 	defer manager.Shutdown(context.Background())
 	run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
 	if err != nil {
@@ -639,7 +749,7 @@ func TestManagerMapsMalformedStatusAndTerminalMetadataToMalformedStop(t *testing
 			}
 			manager, _ := newTestManager(t, base)
 			manager.service = service
-			manager.wait = func(context.Context, time.Duration) error { return nil }
+			manager.wait = immediateWait
 			defer manager.Shutdown(context.Background())
 			run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
 			if err != nil {
@@ -659,7 +769,7 @@ func TestManagerUsesBoundedOutputStatusAndFetchesTerminalMetadataOnce(t *testing
 	service.metadata = roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
 	manager, _ := newTestManager(t, base)
 	manager.service = service
-	manager.wait = func(context.Context, time.Duration) error { return nil }
+	manager.wait = immediateWait
 	defer manager.Shutdown(context.Background())
 	run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
 	if err != nil {
@@ -718,7 +828,7 @@ func TestManagerRetriesGenericStatusTransportButNotPermanentContractErrors(t *te
 			service.metadata = roborev.JobMetadata{ID: 1, RepoPath: `C:\repo`, GitRef: "head", Branch: "main", PanelName: "cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}
 			manager, _ := newTestManager(t, base)
 			manager.service = service
-			manager.wait = func(context.Context, time.Duration) error { return nil }
+			manager.wait = immediateWait
 			defer manager.Shutdown(context.Background())
 			run, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
 			if err != nil {
@@ -881,9 +991,9 @@ func TestManagerAllowsDifferentRepositoryIdentitiesIndependently(t *testing.T) {
 		`C:\one`: {Path: `C:\one`, Branch: "main", Head: "one-head"},
 		`C:\two`: {Path: `C:\two`, Branch: "main", Head: "two-head"},
 	}}
-	service := &fakeReviewService{statusPending: true}
+	service := &fakeReviewService{statusPending: true, statusEntered: make(chan int64, 2)}
 	service.registry = registry
-	manager, err := NewManager(Dependencies{Registry: registry, Panels: fakePanels{}, RoboRev: service, Binary: `C:\roborev.exe`, PollInterval: time.Millisecond, Wait: func(context.Context, time.Duration) error { return nil }})
+	manager, err := NewManager(Dependencies{Registry: registry, Panels: fakePanels{}, RoboRev: service, Binary: `C:\roborev.exe`, PollInterval: time.Millisecond, Wait: immediateWait})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,10 +1009,29 @@ func TestManagerAllowsDifferentRepositoryIdentitiesIndependently(t *testing.T) {
 	if first.RepositoryIdentity == second.RepositoryIdentity {
 		t.Fatalf("different repositories shared identity: %#v %#v", first, second)
 	}
-	_ = manager.Cancel(first.ID)
-	_ = manager.Cancel(second.ID)
-	_ = waitRun(t, manager, first.ID)
-	_ = waitRun(t, manager, second.ID)
+	seen := make(map[int64]bool)
+	for i := 0; i < 2; i++ {
+		select {
+		case id := <-service.statusEntered:
+			seen[id] = true
+		case <-time.After(time.Second):
+			t.Fatal("both repository runs did not enter polling")
+		}
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("polling did not enter for both repository receipts: seen=%v", seen)
+	}
+	if err := manager.Cancel(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Cancel(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	firstResult := waitRun(t, manager, first.ID)
+	secondResult := waitRun(t, manager, second.ID)
+	if firstResult.Phase != PhaseCancelled || secondResult.Phase != PhaseCancelled {
+		t.Fatalf("independent repository cancellation = first=%s second=%s", firstResult.Phase, secondResult.Phase)
+	}
 }
 
 func TestManagerRejectsPanelDisappearanceBeforeNextEnqueue(t *testing.T) {
