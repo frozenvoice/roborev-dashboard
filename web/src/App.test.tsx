@@ -22,6 +22,15 @@ function refineRun(overrides: Record<string, unknown> = {}) {
 function refineEnvelope(runs: unknown[] = [refineRun()], options = refineOptions) { return { runs, options } }
 
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
+function memberListPath(runUUID: string, parentJobId = 42, repositoryIdentity = 'repo-1') {
+  return `/api/panels/${encodeURIComponent(runUUID)}/members?parentJobId=${parentJobId}&repositoryIdentity=${encodeURIComponent(repositoryIdentity)}`
+}
+function memberDetailPath(runUUID: string, memberId: number, parentJobId = 42, repositoryIdentity = 'repo-1') {
+  return `/api/panels/${encodeURIComponent(runUUID)}/members/${memberId}?parentJobId=${parentJobId}&repositoryIdentity=${encodeURIComponent(repositoryIdentity)}`
+}
+function memberShow(member: { id: number; panel_run_uuid: string; panel_role: string }, output: string) {
+  return { job_id: member.id, job: { id: member.id, repo_path: 'E:\\repo', panel_name: 'dashboard_cross', panel_run_uuid: member.panel_run_uuid, panel_role: member.panel_role }, review: { output } }
+}
 function panelConfiguration(repositoryIdentity = 'repo-1', panels: PanelInfo[] = [defaultPanel], selectedPanel = defaultPanel.name, selectionRequired = false, error?: string) {
   return { repositoryIdentity, panels, selectedPanel, selectionRequired, ...(error ? { error } : {}) }
 }
@@ -107,9 +116,9 @@ describe('App review workflow', () => {
       if (path.startsWith('/api/reviews?')) return response(jobs)
       if (path === '/api/reviews/42') return response(jobs[0])
       if (path.includes('/api/panels/')) return response({ jobs: [
-        { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
-        { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
-        { id: 45, panel_role: 'member', panel_member_index: 2, status: 'running', agent: 'grok' },
+        { id: 43, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
+        { id: 44, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
+        { id: 45, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 2, status: 'running', agent: 'grok' },
       ] })
       return response({ success: true })
     }))
@@ -135,8 +144,8 @@ describe('App review workflow', () => {
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response([parent])
       if (path === '/api/reviews/42') return response(parent)
-      if (path === '/api/panels/panel-running-1/members') return response({ jobs: members })
-      if (path === '/api/reviews/43') { memberDetailCalls.push(path); return response({ ...members[0], output: '# Member output\nLazy-loaded member Markdown.' }) }
+      if (path.startsWith('/api/panels/panel-running-1/members?')) return response({ jobs: members })
+      if (path === memberDetailPath('panel-running-1', 43)) { memberDetailCalls.push(path); return response(memberShow(members[0], '# Member output\nLazy-loaded member Markdown.')) }
       return response({ success: true })
     }))
     render(<App />)
@@ -151,7 +160,7 @@ describe('App review workflow', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Security reviewer/ }))
     expect(await screen.findByText('Lazy-loaded member Markdown.')).toBeInTheDocument()
-    expect(memberDetailCalls).toEqual(['/api/reviews/43'])
+    expect(memberDetailCalls).toEqual([memberDetailPath('panel-running-1', 43)])
     expect(screen.getByRole('button', { name: 'Back to panel synthesis' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Rerun same target/ })).not.toBeInTheDocument()
@@ -169,8 +178,8 @@ describe('App review workflow', () => {
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response([parent])
       if (path === '/api/reviews/42') return response(parent)
-      if (path === '/api/panels/panel-running-2/members') return response({ jobs: [memberPollCalls++ === 0 ? runningMember : terminalMember] })
-      if (path === '/api/reviews/43') return response({ ...(memberDetailCalls++ === 0 ? runningMember : terminalMember), output: memberDetailCalls === 1 ? 'Running member output' : 'Terminal member output' })
+      if (path.startsWith('/api/panels/panel-running-2/members?')) return response({ jobs: [memberPollCalls++ === 0 ? runningMember : terminalMember] })
+      if (path === memberDetailPath('panel-running-2', 43)) { const member = memberDetailCalls++ === 0 ? runningMember : terminalMember; return response(memberShow(member, memberDetailCalls === 1 ? 'Running member output' : 'Terminal member output')) }
       return response({ success: true })
     }))
     render(<App />)
@@ -195,8 +204,8 @@ describe('App review workflow', () => {
       if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response([parent])
       if (path === '/api/reviews/42') return response(parent)
-      if (path === '/api/panels/panel-running-3/members') return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
-      if (path === '/api/reviews/43') return pendingDetail.promise
+      if (path.startsWith('/api/panels/panel-running-3/members?')) return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
+      if (path === memberDetailPath('panel-running-3', 43)) return pendingDetail.promise
       return response({ success: true })
     }))
     render(<App />)
@@ -219,19 +228,61 @@ describe('App review workflow', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/reviews/42') return response(parent)
-      if (path === '/api/panels/panel-running-switch/members') return response({ jobs: [firstMember, secondMember] })
-      if (path === '/api/reviews/43') return firstDetail.promise
-      if (path === '/api/reviews/44') return secondDetail.promise
+      if (path.startsWith('/api/panels/panel-running-switch/members?')) return response({ jobs: [firstMember, secondMember] })
+      if (path === memberDetailPath('panel-running-switch', 43)) return firstDetail.promise
+      if (path === memberDetailPath('panel-running-switch', 44)) return secondDetail.promise
       return response({ success: true })
     }))
     const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
     render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
     await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
     await userEvent.click(await screen.findByRole('button', { name: /UX reviewer/ }))
-    firstDetail.resolve(new Response(JSON.stringify({ ...firstMember, output: 'Stale member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
-    secondDetail.resolve(new Response(JSON.stringify({ ...secondMember, output: 'Fresh member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    firstDetail.resolve(new Response(JSON.stringify(memberShow(firstMember, 'Stale member output')), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    secondDetail.resolve(new Response(JSON.stringify(memberShow(secondMember, 'Fresh member output')), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     expect(await screen.findByText('Fresh member output')).toBeInTheDocument()
     expect(screen.queryByText('Stale member output')).not.toBeInTheDocument()
+  })
+
+  it('shows an inline error for a member detail identity mismatch without replacing it', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-detail-mismatch' }
+    const member = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'done', verdict: 'P', agent: 'codex' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === memberListPath('panel-detail-mismatch')) return response({ jobs: [member] })
+      if (path === memberDetailPath('panel-detail-mismatch', 43)) return response(memberShow({ ...member, id: 44 }, 'Wrong member output'))
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Panel member detail job identity mismatch')
+    expect(screen.queryByText('Wrong member output')).not.toBeInTheDocument()
+    expect(screen.queryByText('Review detail refresh failed')).not.toBeInTheDocument()
+  })
+
+  it('keeps only positive exact member jobs from the scoped panel response', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-member-contract' }
+    const validMember = { id: 46, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 3, panel_member_name: 'Valid member', status: 'done', verdict: 'P', agent: 'codex' }
+    const invalidMembers = [
+      { id: 0, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_name: 'Zero member' },
+      { id: 47, panel_role: 'synthesis', panel_run_uuid: parent.panel_run_uuid, panel_member_name: 'Synthesis row' },
+      { id: 48, panel_role: 'member', panel_member_name: 'Missing run member' },
+      { id: 49, panel_role: 'member', panel_run_uuid: 'other-run', panel_member_name: 'Wrong run member' },
+    ]
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === memberListPath('panel-member-contract')) return response({ jobs: [...invalidMembers, validMember] })
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByText('Valid member')).toBeInTheDocument()
+    expect(screen.queryByText('Zero member')).not.toBeInTheDocument()
+    expect(screen.queryByText('Synthesis row')).not.toBeInTheDocument()
+    expect(screen.queryByText('Missing run member')).not.toBeInTheDocument()
+    expect(screen.queryByText('Wrong run member')).not.toBeInTheDocument()
   })
 
   it('clears member tree and detail when repository identity changes', async () => {
@@ -242,8 +293,8 @@ describe('App review workflow', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/reviews/42') return response(parent)
-      if (path === '/api/panels/panel-running-repo-switch/members') return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
-      if (path === '/api/reviews/43') return pendingDetail.promise
+      if (path.startsWith('/api/panels/panel-running-repo-switch/members?')) return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
+      if (path === memberDetailPath('panel-running-repo-switch', 43)) return pendingDetail.promise
       return response({ success: true })
     }))
     const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
@@ -257,6 +308,74 @@ describe('App review workflow', () => {
     expect(screen.queryByText('Stale repository member output')).not.toBeInTheDocument()
   })
 
+  it('keeps the member skeleton when parent detail resolves before the member list', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-deferred-a' }
+    const parentDetail = deferred<Response>()
+    const memberList = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return parentDetail.promise
+      if (path === memberListPath('panel-deferred-a')) return memberList.promise
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByLabelText('Loading…')).toBeInTheDocument()
+    parentDetail.resolve(new Response(JSON.stringify({ ...parent, output: 'Parent resolved first' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(document.querySelector('.member-list-loading')).toBeInTheDocument()
+    expect(screen.queryByText('0 / 0')).not.toBeInTheDocument()
+    expect(screen.queryByText('No member jobs')).not.toBeInTheDocument()
+    const member = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Resolved member', status: 'done', verdict: 'P', agent: 'codex' }
+    memberList.resolve(new Response(JSON.stringify({ jobs: [member] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Resolved member')).toBeInTheDocument()
+    expect(screen.getByText('1 / 1')).toBeInTheDocument()
+    expect(document.querySelector('.member-list-loading')).not.toBeInTheDocument()
+  })
+
+  it('shows parent output immediately when leaving a pending member list for Review', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-deferred-b' }
+    const memberList = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response({ ...parent, output: 'Parent review output' })
+      if (path === memberListPath('panel-deferred-b')) return memberList.promise
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByLabelText('Loading…')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }))
+    expect(await screen.findByText('Parent review output')).toBeInTheDocument()
+    expect(document.querySelector('.member-list-loading')).not.toBeInTheDocument()
+  })
+
+  it('drops old member loading and results when repository identity switches', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-deferred-c' }
+    const firstMembers = deferred<Response>()
+    const secondMembers = deferred<Response>()
+    const staleMember = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Old repository member', status: 'done', verdict: 'P', agent: 'codex' }
+    let listCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === memberListPath('panel-deferred-c', 42, 'repo-1')) return firstMembers.promise
+      if (path === memberListPath('panel-deferred-c', 42, 'repo-2')) { listCalls++; return secondMembers.promise }
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByLabelText('Loading…')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} repoIdentity="repo-2" /></I18nProvider>)
+    await waitFor(() => expect(listCalls).toBe(1))
+    firstMembers.resolve(new Response(JSON.stringify({ jobs: [staleMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Old repository member')).not.toBeInTheDocument()
+    secondMembers.resolve(new Response(JSON.stringify({ jobs: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.queryByLabelText('Loading…')).not.toBeInTheDocument())
+    expect(screen.queryByText('Old repository member')).not.toBeInTheDocument()
+  })
+
   it('copies and opens a finding member fix prompt across a routine member refresh', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
@@ -265,9 +384,9 @@ describe('App review workflow', () => {
     let promptCalls = 0
     let memberCalls = 0
     const members = { jobs: [
-      { id: 43, panel_role: 'member', panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
-      { id: 44, panel_role: 'member', panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
-      { id: 45, panel_role: 'member', panel_member_index: 2, status: 'running', agent: 'grok' },
+      { id: 43, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' },
+      { id: 44, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 1, status: 'done', verdict: 'P', agent: 'claude-code' },
+      { id: 45, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, panel_member_index: 2, status: 'running', agent: 'grok' },
     ] }
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -318,8 +437,8 @@ describe('App review workflow', () => {
       if (path.includes('/api/panels/')) {
         memberCalls++
         return response({ jobs: memberCalls === 1
-          ? [{ id: 43, panel_role: 'member', status: 'done', verdict: 'F', agent: 'codex' }, { id: 45, panel_role: 'member', status: 'running', agent: 'grok' }]
-          : [{ id: 45, panel_role: 'member', status: 'running', agent: 'grok' }] })
+          ? [{ id: 43, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, status: 'done', verdict: 'F', agent: 'codex' }, { id: 45, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, status: 'running', agent: 'grok' }]
+          : [{ id: 45, panel_role: 'member', panel_run_uuid: jobs[0].panel_run_uuid, status: 'running', agent: 'grok' }] })
       }
       if (path.startsWith('/api/reviews/43/fix-prompt?')) return prompt.promise
       return response({ success: true })

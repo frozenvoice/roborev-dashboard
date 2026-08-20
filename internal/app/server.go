@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -173,6 +175,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/reviews/{id}/log", s.showLog)
 	s.mux.HandleFunc("GET /api/reviews/{id}/fix-prompt", s.showFixPrompt)
 	s.mux.HandleFunc("GET /api/panels/{run}/members", s.panelMembers)
+	s.mux.HandleFunc("GET /api/panels/{run}/members/{id}", s.panelMember)
 	s.mux.HandleFunc("GET /api/repos/panels", s.repositoryPanels)
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
@@ -640,26 +643,282 @@ func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {
 	}{Text: result.Text, JobID: id, Stale: result.Stale})
 }
 
+type panelMembersRequest struct {
+	run            string
+	parentJobID    int64
+	repositoryPath string
+}
+
+type panelMemberShow struct {
+	JobID int64 `json:"job_id"`
+	Job   struct {
+		ID           int64  `json:"id"`
+		RepoPath     string `json:"repo_path"`
+		PanelRunUUID string `json:"panel_run_uuid"`
+		PanelRole    string `json:"panel_role"`
+	} `json:"job"`
+}
+
 func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
-	raw, err := s.RoboRev.PanelMembers(r.Context(), r.PathValue("run"))
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+	_, _, _, raw, ok := s.loadPanelMembers(w, r)
+	if !ok {
 		return
-	}
-	var response struct {
-		Jobs []roborev.JobMetadata `json:"jobs"`
-	}
-	if json.Unmarshal(raw, &response) != nil || len(response.Jobs) == 0 {
-		writeError(w, http.StatusNotFound, "panel run not found", "panel-members")
-		return
-	}
-	for _, job := range response.Jobs {
-		if !s.Registry.Contains(job.RepoPath) {
-			writeError(w, http.StatusForbidden, "panel belongs to an unregistered repository", "repository")
-			return
-		}
 	}
 	writeRawJSON(w, http.StatusOK, raw)
+}
+
+func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
+	if !ok {
+		return
+	}
+	request, _, jobs, _, ok := s.loadPanelMembers(w, r)
+	if !ok {
+		return
+	}
+	var member roborev.JobMetadata
+	found := false
+	for _, job := range jobs {
+		if job.ID == id {
+			member = job
+			found = true
+			break
+		}
+	}
+	if !found || member.PanelRole != "member" {
+		writeError(w, http.StatusNotFound, "panel member not found", "panel-members")
+		return
+	}
+	raw, err := s.RoboRev.Show(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "panel-member-detail")
+		return
+	}
+	if err := validatePanelMemberShow(raw, request, member); err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, errPanelDetailMalformed) {
+			status = http.StatusBadGateway
+		}
+		writeError(w, status, err.Error(), "panel-member-detail")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, raw)
+}
+
+func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panelMembersRequest, roborev.JobMetadata, []roborev.JobMetadata, json.RawMessage, bool) {
+	request, ok := s.panelMembersRequest(w, r)
+	if !ok {
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	parent, err := s.RoboRev.JobMetadata(r.Context(), request.parentJobID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "panel parent job not found", "panel-members")
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	if !s.Registry.Contains(parent.RepoPath) {
+		if strings.TrimSpace(parent.RepoPath) == "" {
+			writeError(w, http.StatusBadGateway, "malformed panel parent metadata: repository path is required", "panel-members")
+			return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+		}
+		writeError(w, http.StatusForbidden, errPanelForeignRepository.Error(), "repository")
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	if err := validatePanelParent(parent, request); err != nil {
+		writeError(w, http.StatusConflict, err.Error(), "panel-members")
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	raw, err := s.RoboRev.PanelMembers(r.Context(), request.run)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	jobs, err := decodePanelMemberList(raw)
+	if err != nil {
+		if errors.Is(err, errPanelRunNotFound) {
+			writeError(w, http.StatusNotFound, "panel run not found", "panel-members")
+		} else {
+			writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+		}
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	if err := s.validatePanelMemberList(jobs, request, parent); err != nil {
+		status := http.StatusConflict
+		switch {
+		case errors.Is(err, errPanelForeignRepository):
+			status = http.StatusForbidden
+		case errors.Is(err, errPanelMalformed):
+			status = http.StatusBadGateway
+		}
+		writeError(w, status, err.Error(), "panel-members")
+		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+	}
+	return request, parent, jobs, raw, true
+}
+
+var (
+	errPanelRunNotFound       = errors.New("panel run not found")
+	errPanelForeignRepository = errors.New("panel belongs to an unregistered repository")
+	errPanelMalformed         = errors.New("malformed panel members response")
+	errPanelDetailMalformed   = errors.New("malformed panel member detail response")
+)
+
+func (s *Server) panelMembersRequest(w http.ResponseWriter, r *http.Request) (panelMembersRequest, bool) {
+	values := r.URL.Query()
+	if len(values) != 2 || len(values["parentJobId"]) != 1 || len(values["repositoryIdentity"]) != 1 || strings.TrimSpace(values.Get("parentJobId")) == "" || strings.TrimSpace(values.Get("repositoryIdentity")) == "" {
+		writeError(w, http.StatusBadRequest, "parentJobId and repositoryIdentity are required", "request")
+		return panelMembersRequest{}, false
+	}
+	parentJobID, err := strconv.ParseInt(values.Get("parentJobId"), 10, 64)
+	if err != nil || parentJobID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid parent job ID", "request")
+		return panelMembersRequest{}, false
+	}
+	run := strings.TrimSpace(r.PathValue("run"))
+	if !validPanelRunUUID(run) {
+		writeError(w, http.StatusBadRequest, "invalid panel run UUID", "request")
+		return panelMembersRequest{}, false
+	}
+	repositoryID := strings.TrimSpace(values.Get("repositoryIdentity"))
+	repositoryPath, err := s.Registry.ResolveIdentity(repositoryID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return panelMembersRequest{}, false
+	}
+	return panelMembersRequest{run: run, parentJobID: parentJobID, repositoryPath: repositoryPath}, true
+}
+
+func validPanelRunUUID(run string) bool {
+	if len(run) != 36 {
+		return false
+	}
+	for index, char := range run {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func validatePanelParent(parent roborev.JobMetadata, request panelMembersRequest) error {
+	if parent.ID <= 0 || parent.ID != request.parentJobID {
+		return errors.New("panel parent job identity does not match request")
+	}
+	if parent.PanelRole != "synthesis" {
+		return errors.New("panel parent job is not the synthesis job")
+	}
+	if parent.JobType != "synthesis" {
+		return errors.New("panel parent job has an invalid synthesis type")
+	}
+	if strings.TrimSpace(parent.PanelName) == "" || parent.PanelRunUUID != request.run {
+		return errors.New("panel parent identity does not match run")
+	}
+	if !gitx.SameRepositoryPath(parent.RepoPath, request.repositoryPath) {
+		return errors.New("panel parent repository does not match identity")
+	}
+	return nil
+}
+
+func decodePanelMemberList(raw json.RawMessage) ([]roborev.JobMetadata, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var response struct {
+		Jobs json.RawMessage `json:"jobs"`
+	}
+	if err := decoder.Decode(&response); err != nil {
+		return nil, fmt.Errorf("%w: %v", errPanelMalformed, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("%w: trailing JSON", errPanelMalformed)
+	}
+	if len(response.Jobs) == 0 || bytes.Equal(bytes.TrimSpace(response.Jobs), []byte("null")) {
+		return nil, fmt.Errorf("%w: jobs is required", errPanelMalformed)
+	}
+	var jobs []roborev.JobMetadata
+	if err := json.Unmarshal(response.Jobs, &jobs); err != nil {
+		return nil, fmt.Errorf("%w: jobs: %v", errPanelMalformed, err)
+	}
+	if len(jobs) == 0 {
+		return nil, errPanelRunNotFound
+	}
+	return jobs, nil
+}
+
+func (s *Server) validatePanelMemberList(jobs []roborev.JobMetadata, request panelMembersRequest, parent roborev.JobMetadata) error {
+	seen := make(map[int64]struct{}, len(jobs))
+	parentCount := 0
+	for _, job := range jobs {
+		if job.ID <= 0 {
+			return errors.New("panel member job ID must be positive")
+		}
+		if _, ok := seen[job.ID]; ok {
+			return errors.New("panel members response contains duplicate job IDs")
+		}
+		seen[job.ID] = struct{}{}
+		if strings.TrimSpace(job.RepoPath) == "" || strings.TrimSpace(job.PanelName) == "" || strings.TrimSpace(job.PanelRunUUID) == "" || strings.TrimSpace(job.PanelRole) == "" {
+			return errors.New("panel member identity fields do not match the requested panel")
+		}
+		if job.PanelRole != "synthesis" && job.PanelRole != "member" {
+			return errors.New("panel member has an unsupported panel role")
+		}
+		if !gitx.SameRepositoryPath(job.RepoPath, request.repositoryPath) {
+			if !s.Registry.Contains(job.RepoPath) {
+				return errPanelForeignRepository
+			}
+			return errors.New("panel member repository does not match identity")
+		}
+		if !panelIdentityMatches(job, parent, request.run) {
+			return errors.New("panel member identity does not match parent panel")
+		}
+		if job.PanelRole == "synthesis" {
+			if job.JobType != "synthesis" {
+				return errors.New("panel synthesis job has an invalid synthesis type")
+			}
+			parentCount++
+			if job.ID != parent.ID {
+				return errors.New("panel synthesis job does not match parent job")
+			}
+		}
+	}
+	if parentCount != 1 {
+		return errors.New("panel members response must contain exactly one synthesis job")
+	}
+	return nil
+}
+
+func panelIdentityMatches(job, parent roborev.JobMetadata, run string) bool {
+	return job.PanelRunUUID == run && job.PanelName == parent.PanelName
+}
+
+func validatePanelMemberShow(raw json.RawMessage, request panelMembersRequest, member roborev.JobMetadata) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var response panelMemberShow
+	if err := decoder.Decode(&response); err != nil {
+		return fmt.Errorf("%w: %v", errPanelDetailMalformed, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("%w: trailing JSON", errPanelDetailMalformed)
+	}
+	job := response.Job
+	if response.JobID <= 0 || job.ID <= 0 || strings.TrimSpace(job.RepoPath) == "" || strings.TrimSpace(job.PanelRunUUID) == "" || strings.TrimSpace(job.PanelRole) == "" {
+		return fmt.Errorf("%w: job identity fields are required", errPanelDetailMalformed)
+	}
+	if response.JobID != job.ID || job.ID != member.ID {
+		return errors.New("panel member detail job identity does not match request")
+	}
+	if job.PanelRole != "member" || job.PanelRole != member.PanelRole || job.PanelRunUUID != request.run || job.PanelRunUUID != member.PanelRunUUID {
+		return errors.New("panel member detail panel identity does not match request")
+	}
+	if !gitx.SameRepositoryPath(job.RepoPath, request.repositoryPath) || !gitx.SameRepositoryPath(job.RepoPath, member.RepoPath) {
+		return errors.New("panel member detail repository does not match identity")
+	}
+	return nil
 }
 
 func (s *Server) authorizeJob(w http.ResponseWriter, r *http.Request, id int64) bool {

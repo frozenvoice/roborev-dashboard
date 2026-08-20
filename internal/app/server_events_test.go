@@ -99,13 +99,18 @@ func TestEventsShutdownClosesActiveSSEPromptly(t *testing.T) {
 	request := nativeEventSourceRequest(http.MethodGet, "/api/events?repositoryIdentity="+url.QueryEscape(identity))
 	requestContext, cancel := context.WithCancel(request.Context())
 	request = request.WithContext(requestContext)
-	response := httptest.NewRecorder()
+	response := &flushNotifyingRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: make(chan struct{})}
 	done := make(chan struct{})
 	go func() { server.Handler().ServeHTTP(response, request); close(done) }()
 	select {
 	case <-service.started:
 	case <-time.After(time.Second):
 		t.Fatal("stream did not start")
+	}
+	select {
+	case <-response.flushed:
+	case <-time.After(time.Second):
+		t.Fatal("SSE response did not become active")
 	}
 	shutdownDone := make(chan struct{})
 	go func() {
