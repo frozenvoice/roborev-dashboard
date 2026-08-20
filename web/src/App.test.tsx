@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { App, CommentBox } from './App'
+import { App, CommentBox, ReviewDetail } from './App'
 import type { PanelInfo } from './api'
 import { I18nProvider, LANGUAGE_STORAGE_KEY } from './i18n'
 
@@ -120,6 +120,141 @@ describe('App review workflow', () => {
     expect(screen.getByText('grok')).toBeInTheDocument()
     expect(screen.getByText('codex').closest('article')).toHaveTextContent('Finding')
     expect(screen.getByText('claude-code').closest('article')).toHaveTextContent('Pass')
+  })
+
+  it('shows a running panel tree with member metadata and lazy member output detail', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-running-1' }
+    const members = [
+      { id: 43, panel_role: 'member', panel_run_uuid: 'panel-running-1', panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'done', verdict: 'P', agent: 'codex', model: 'o3', duration_ms: 1250 },
+      { id: 44, panel_role: 'member', panel_run_uuid: 'panel-running-1', panel_member_index: 1, panel_member_name: 'UX reviewer', status: 'done', verdict: 'F', agent: 'claude-code', model: 'sonnet', duration_ms: 2500 },
+      { id: 45, panel_role: 'member', panel_run_uuid: 'panel-running-1', panel_member_index: 2, panel_member_name: 'Quality reviewer', status: 'running', agent: 'grok', model: 'fast' },
+    ]
+    const memberDetailCalls: string[] = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([parent])
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === '/api/panels/panel-running-1/members') return response({ jobs: members })
+      if (path === '/api/reviews/43') { memberDetailCalls.push(path); return response({ ...members[0], output: '# Member output\nLazy-loaded member Markdown.' }) }
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('button', { name: 'Panel members' })).toHaveClass('active')
+    expect(await screen.findByText('Security reviewer')).toBeInTheDocument()
+    expect(screen.getByText('2 / 3')).toBeInTheDocument()
+    expect(screen.getByText('grok')).toBeInTheDocument()
+    expect(screen.getByText('fast')).toBeInTheDocument()
+    expect(screen.getAllByText('Running').length).toBeGreaterThan(0)
+    expect(memberDetailCalls).toHaveLength(0)
+
+    await userEvent.click(screen.getByRole('button', { name: /Security reviewer/ }))
+    expect(await screen.findByText('Lazy-loaded member Markdown.')).toBeInTheDocument()
+    expect(memberDetailCalls).toEqual(['/api/reviews/43'])
+    expect(screen.getByRole('button', { name: 'Back to panel synthesis' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Rerun same target/ })).not.toBeInTheDocument()
+  })
+
+  it('refetches selected member detail when polling observes terminal completion', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-running-2' }
+    const runningMember = { id: 43, panel_role: 'member', panel_run_uuid: 'panel-running-2', panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'running', agent: 'codex', model: 'o3' }
+    const terminalMember = { ...runningMember, status: 'done', verdict: 'P', duration_ms: 2100 }
+    let memberPollCalls = 0
+    let memberDetailCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([parent])
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === '/api/panels/panel-running-2/members') return response({ jobs: [memberPollCalls++ === 0 ? runningMember : terminalMember] })
+      if (path === '/api/reviews/43') return response({ ...(memberDetailCalls++ === 0 ? runningMember : terminalMember), output: memberDetailCalls === 1 ? 'Running member output' : 'Terminal member output' })
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    expect(await screen.findByText('Running member output')).toBeInTheDocument()
+    expect(memberDetailCalls).toBe(1)
+    await vi.advanceTimersByTimeAsync(4100)
+    expect(await screen.findByText('Terminal member output')).toBeInTheDocument()
+    expect(memberDetailCalls).toBe(2)
+    expect(screen.getByText('2.1s')).toBeInTheDocument()
+  })
+
+  it('clears a selected member detail when the member disappears from the current panel run', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-running-3' }
+    const member = { id: 43, panel_role: 'member', panel_run_uuid: 'panel-running-3', panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'running', agent: 'codex', model: 'o3' }
+    const pendingDetail = deferred<Response>()
+    let memberPollCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([parent])
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === '/api/panels/panel-running-3/members') return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
+      if (path === '/api/reviews/43') return pendingDetail.promise
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    expect(await screen.findByRole('button', { name: 'Back to panel synthesis' })).toBeInTheDocument()
+    await vi.advanceTimersByTimeAsync(4100)
+    expect(screen.queryByRole('button', { name: 'Back to panel synthesis' })).not.toBeInTheDocument()
+    pendingDetail.resolve(new Response(JSON.stringify({ ...member, output: 'Stale member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Stale member output')).not.toBeInTheDocument()
+  })
+
+  it('ignores late member detail responses after a rapid member switch', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-running-switch' }
+    const firstMember = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'running', agent: 'codex', model: 'o3' }
+    const secondMember = { id: 44, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 1, panel_member_name: 'UX reviewer', status: 'running', agent: 'claude-code', model: 'sonnet' }
+    const firstDetail = deferred<Response>()
+    const secondDetail = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === '/api/panels/panel-running-switch/members') return response({ jobs: [firstMember, secondMember] })
+      if (path === '/api/reviews/43') return firstDetail.promise
+      if (path === '/api/reviews/44') return secondDetail.promise
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    await userEvent.click(await screen.findByRole('button', { name: /UX reviewer/ }))
+    firstDetail.resolve(new Response(JSON.stringify({ ...firstMember, output: 'Stale member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    secondDetail.resolve(new Response(JSON.stringify({ ...secondMember, output: 'Fresh member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Fresh member output')).toBeInTheDocument()
+    expect(screen.queryByText('Stale member output')).not.toBeInTheDocument()
+  })
+
+  it('clears member tree and detail when repository identity changes', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-running-repo-switch' }
+    const member = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'running', agent: 'codex', model: 'o3' }
+    const pendingDetail = deferred<Response>()
+    let memberPollCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === '/api/panels/panel-running-repo-switch/members') return response({ jobs: memberPollCalls++ === 0 ? [member] : [] })
+      if (path === '/api/reviews/43') return pendingDetail.promise
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    expect(screen.getByRole('button', { name: 'Back to panel synthesis' })).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} repoIdentity="repo-2" /></I18nProvider>)
+    expect(screen.queryByRole('button', { name: 'Back to panel synthesis' })).not.toBeInTheDocument()
+    pendingDetail.resolve(new Response(JSON.stringify({ ...member, output: 'Stale repository member output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Stale repository member output')).not.toBeInTheDocument()
   })
 
   it('copies and opens a finding member fix prompt across a routine member refresh', async () => {

@@ -88,16 +88,31 @@ func (c *Client) CheckDaemonHealth(ctx context.Context) (bool, error) {
 }
 
 type daemonHealthResponse struct {
-	// Schema is emitted by RoboRev v0.64.0's generated OpenAPI response as
-	// optional JSON-Schema metadata. Keep it typed and continue rejecting any
-	// other unknown field below.
-	Schema       *string                 `json:"$schema,omitempty"`
+	// Schema is emitted by RoboRev v0.64.0's generated OpenAPI response. A
+	// pointer lets the decoder distinguish both a missing field and JSON null;
+	// both are rejected after decoding below.
+	Schema       *daemonHealthSchema     `json:"$schema"`
 	Healthy      bool                    `json:"healthy"`
 	Uptime       string                  `json:"uptime"`
 	Version      string                  `json:"version"`
 	Components   []daemonHealthComponent `json:"components"`
 	RecentErrors []daemonHealthError     `json:"recent_errors"`
 	ErrorCount   int                     `json:"error_count_24h"`
+}
+
+// daemonHealthSchema is deliberately a string wrapper so a present schema
+// must be a JSON string. The pointer on daemonHealthResponse handles the
+// required/presence part of the contract; encoding/json leaves it nil for
+// both an omitted and a null field.
+type daemonHealthSchema string
+
+func (s *daemonHealthSchema) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return errors.New(`RoboRev daemon health "$schema" must be a string`)
+	}
+	*s = daemonHealthSchema(value)
+	return nil
 }
 
 type daemonHealthComponent struct {
@@ -147,6 +162,9 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 			return daemonHealthResponse{}, errors.New("malformed RoboRev daemon health: trailing JSON")
 		}
 		return daemonHealthResponse{}, fmt.Errorf("malformed RoboRev daemon health: %w", err)
+	}
+	if health.Schema == nil {
+		return daemonHealthResponse{}, errors.New(`malformed RoboRev daemon health: "$schema" is required and must be a non-null string`)
 	}
 	return health, nil
 }

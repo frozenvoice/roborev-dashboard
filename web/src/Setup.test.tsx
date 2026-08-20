@@ -27,6 +27,20 @@ describe('RoboRev setup', () => {
   const runningRuntime: RuntimeControlState = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
   const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', repositoryIdentity: 'repo-1', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
 
+  it('wires setup theme surfaces and controls to their selectors in rendered DOM', async () => {
+    const activeState = { ...readySetup, operationActive: true, phase: 'checking' as const, status: 'checking' as const, downloadedBytes: 512, totalBytes: 1024 }
+    const { rerender } = render(<Setup state={activeState} agents={configuredAgents} runtimeControl={runningRuntime} onDaemonAction={vi.fn().mockResolvedValue(undefined)} />)
+    expect(document.querySelector('.setup-runtime')).toBeInTheDocument()
+    expect(document.querySelector('.configured-agents')).toBeInTheDocument()
+    expect(document.querySelector('.setup-facts')).toBeInTheDocument()
+    expect(document.querySelector('.setup-safety')).toBeInTheDocument()
+    expect(document.querySelector('.setup-progress-track')).toBeInTheDocument()
+
+    rerender(<Setup state={readySetup} agents={configuredAgents} runtimeControl={runningRuntime} onDaemonAction={vi.fn().mockResolvedValue(undefined)} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Stop daemon' }))
+    expect(document.querySelector('.runtime-command-preview')).toBeInTheDocument()
+  })
+
   it('does not health-check on render and checks only the confirmed canonical agent', async () => {
     const onCheck = vi.fn().mockResolvedValue(undefined)
     render(<Setup state={readySetup} agents={configuredAgents} onCheckAgent={onCheck} />)

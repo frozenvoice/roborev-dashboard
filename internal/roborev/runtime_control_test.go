@@ -308,13 +308,18 @@ func TestDaemonHealthDistinguishesUnreachableFromReachableInvalidResponses(t *te
 	}{
 		{name: "server error is reachable", status: http.StatusInternalServerError, body: `server error`, wantOnline: true, wantErr: true},
 		{name: "malformed JSON is reachable", status: http.StatusOK, body: `{`, wantOnline: true, wantErr: true},
-		{name: "trailing JSON is rejected", status: http.StatusOK, body: `{"healthy":true}{}`, wantOnline: true, wantErr: true},
-		{name: "unknown field is rejected", status: http.StatusOK, body: `{"healthy":true,"unknown":true}`, wantOnline: true, wantErr: true},
-		{name: "schema must be a string", status: http.StatusOK, body: `{"$schema":true,"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "trailing JSON is rejected", status: http.StatusOK, body: `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}{}`, wantOnline: true, wantErr: true},
+		{name: "unknown field is rejected", status: http.StatusOK, body: `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"unknown":true}`, wantOnline: true, wantErr: true},
+		{name: "schema missing", status: http.StatusOK, body: `{"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "schema null", status: http.StatusOK, body: `{"$schema":null,"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "schema number", status: http.StatusOK, body: `{"$schema":7,"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "schema boolean", status: http.StatusOK, body: `{"$schema":true,"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "schema object", status: http.StatusOK, body: `{"$schema":{},"healthy":true}`, wantOnline: true, wantErr: true},
+		{name: "schema array", status: http.StatusOK, body: `{"$schema":[],"healthy":true}`, wantOnline: true, wantErr: true},
 		{name: "oversized body is rejected", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), wantOnline: true, wantErr: true},
-		{name: "healthy response is online", status: http.StatusOK, body: `{"healthy":true}`, wantOnline: true, wantErr: false},
+		{name: "healthy response is online", status: http.StatusOK, body: `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`, wantOnline: true, wantErr: false},
 		{name: "real v0.64.0 shape with schema is online", status: http.StatusOK, body: realV064HealthPayload, wantOnline: true, wantErr: false},
-		{name: "unhealthy response is online", status: http.StatusOK, body: `{"healthy":false}`, wantOnline: true, wantErr: true},
+		{name: "unhealthy response is online", status: http.StatusOK, body: `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":false}`, wantOnline: true, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

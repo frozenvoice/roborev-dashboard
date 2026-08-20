@@ -172,7 +172,7 @@ func TestSetupInstallReturnsAcceptedStateAndStatusEndpoint(t *testing.T) {
 func TestSetupInstallHTTPResponseDoesNotCancelAcceptedOperation(t *testing.T) {
 	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 	}))
 	defer health.Close()
 	registry := NewRegistry(fakeInspector{}, "")
@@ -316,7 +316,7 @@ func TestSetupRetryEndpointStartsHealthyExistingDaemonWithoutDownload(t *testing
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 	}))
 	defer health.Close()
 	binary := filepath.Join(t.TempDir(), "roborev.exe")
@@ -385,7 +385,7 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 	}))
 	defer health.Close()
 	binary := filepath.Join(t.TempDir(), "roborev.exe")

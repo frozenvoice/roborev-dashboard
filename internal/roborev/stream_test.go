@@ -125,7 +125,7 @@ func TestOpenStreamRequiresExactMatchingSupportedDaemonVersion(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = fmt.Fprintf(w, `{"healthy":%t,"version":%q}`, testCase.healthy, testCase.daemonVersion)
+				_, _ = fmt.Fprintf(w, `{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":%t,"uptime":"1h2m3s","version":%q,"components":[],"recent_errors":null,"error_count_24h":0}`, testCase.healthy, testCase.daemonVersion)
 			}))
 			defer server.Close()
 			runner := &streamGateRunner{version: testCase.cliVersion}

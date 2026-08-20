@@ -3,7 +3,7 @@ agent = "codex"
 review_type = "default"
 reasoning = "thorough"
 timeout = "12m"
-instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
+instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
 [review.subagents.claude]
 agent = "claude-code"
@@ -11,7 +11,7 @@ model = "sonnet"
 reasoning = "standard"
 review_type = "default"
 timeout = "12m"
-instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
+instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
 [review.subagents.grok_fast]
 agent = "grok"
@@ -19,7 +19,7 @@ model = "grok-4.6"
 reasoning = "fast"
 review_type = "default"
 timeout = "12m"
-instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
+instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
 [review.subagents.grok]
 agent = "grok"
@@ -27,7 +27,7 @@ model = "grok-4.6"
 reasoning = "thorough"
 review_type = "default"
 timeout = "12m"
-instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence."
+instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
 [review.panels.dashboard_cross]
 members = ["gpt", "claude", "grok_fast"]

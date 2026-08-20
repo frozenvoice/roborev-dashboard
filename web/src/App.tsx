@@ -118,7 +118,12 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const [lazyError, setLazyError] = useState<Record<string, string>>({})
   const [detailError, setDetailError] = useState('')
   const [memberJobs, setMemberJobs] = useState<ReviewJob[]>([])
+  const [memberJobsLoaded, setMemberJobsLoaded] = useState(false)
   const [memberError, setMemberError] = useState('')
+  const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null)
+  const [memberDetail, setMemberDetail] = useState<ReviewJob | null>(null)
+  const [memberDetailError, setMemberDetailError] = useState('')
+  const [memberDetailLoading, setMemberDetailLoading] = useState(false)
   const [loading, setLoading] = useState(false)
   const [fixPrompt, setFixPrompt] = useState<FixPromptResponse | null>(null)
   const [fixPromptText, setFixPromptText] = useState('')
@@ -126,18 +131,79 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const previousStatus = useRef(job.status)
   const detailGeneration = useRef(0)
   const lazyGeneration = useRef<Record<string, number>>({})
+  const memberDetailGeneration = useRef(0)
+  const memberPollGeneration = useRef(0)
+  const selectedMemberIdRef = useRef<number | null>(null)
+  const memberSnapshot = useRef<Map<number, string>>(new Map())
+  const memberPanelRunRef = useRef(job.panel_run_uuid)
+  const memberRepositoryIdentity = useRef(repoIdentity)
   const fixPromptGeneration = useRef(0)
   const fixPromptTarget = useRef<{ jobId: number; member: boolean } | null>(null)
   const id = idOf(job)
-  const members = useMemo(() => memberJobs.length ? memberJobs : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [id, job.member_job_ids, jobs, memberJobs])
+  const members = useMemo(() => memberJobsLoaded ? memberJobs : canLoadMembers ? [] : jobs.filter(candidate => candidate.parent_job_id === id || (job.member_job_ids ?? []).includes(idOf(candidate))), [canLoadMembers, id, job.member_job_ids, jobs, memberJobs, memberJobsLoaded])
+  const terminalMemberCount = members.filter(member => !isRunning(member)).length
+  const memberProgress = members.length ? Math.round((terminalMemberCount / members.length) * 100) : 0
+  const setSelectedMember = (value: number | null) => { selectedMemberIdRef.current = value; setSelectedMemberId(value) }
+  const loadMemberDetail = useCallback(async (member: ReviewJob, select = true) => {
+    const memberId = idOf(member)
+    if (!Number.isFinite(memberId) || !repoIdentity || (member.panel_run_uuid && job.panel_run_uuid && member.panel_run_uuid !== job.panel_run_uuid)) return
+    const generation = ++memberDetailGeneration.current
+    memberRepositoryIdentity.current = repoIdentity
+    if (select) setSelectedMember(memberId)
+    setMemberDetail(null)
+    setMemberDetailError('')
+    setMemberDetailLoading(true)
+    try {
+      const value = await request<ReviewJob>(`/api/reviews/${memberId}`)
+      if (generation !== memberDetailGeneration.current || memberRepositoryIdentity.current !== repoIdentity) return
+      setMemberDetail({ ...value, id: memberId, job_id: memberId })
+    } catch (error) {
+      if (generation === memberDetailGeneration.current && memberRepositoryIdentity.current === repoIdentity) setMemberDetailError((error as Error).message)
+    } finally {
+      if (generation === memberDetailGeneration.current && memberRepositoryIdentity.current === repoIdentity) setMemberDetailLoading(false)
+    }
+  }, [job.panel_run_uuid, repoIdentity])
 
   useEffect(() => {
     const generation = ++detailGeneration.current
     lazyGeneration.current = { prompt: (lazyGeneration.current.prompt ?? 0) + 1, log: (lazyGeneration.current.log ?? 0) + 1 }
-    setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setMemberJobs([]); setMemberError(''); setTab('review'); setLoading(true)
+    memberDetailGeneration.current++
+    memberRepositoryIdentity.current = repoIdentity
+    memberSnapshot.current = new Map()
+    selectedMemberIdRef.current = null
+    setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setMemberJobs([]); setMemberJobsLoaded(false); setMemberError(''); setSelectedMemberId(null); setMemberDetail(null); setMemberDetailError(''); setMemberDetailLoading(false); setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review'); setLoading(true)
     request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setLoading(false) })
     return () => { detailGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
   }, [id])
+  useEffect(() => {
+    memberRepositoryIdentity.current = repoIdentity
+    memberDetailGeneration.current++
+    memberPollGeneration.current++
+    selectedMemberIdRef.current = null
+    memberSnapshot.current = new Map()
+    setSelectedMemberId(null)
+    setMemberJobs([])
+    setMemberError('')
+    setMemberDetail(null)
+    setMemberDetailError('')
+    setMemberDetailLoading(false)
+  }, [repoIdentity])
+  useEffect(() => {
+    if (memberPanelRunRef.current === job.panel_run_uuid) return
+    memberPanelRunRef.current = job.panel_run_uuid
+    memberPollGeneration.current++
+    memberDetailGeneration.current++
+    selectedMemberIdRef.current = null
+    memberSnapshot.current = new Map()
+    setSelectedMemberId(null)
+    setMemberJobs([])
+    setMemberJobsLoaded(false)
+    setMemberError('')
+    setMemberDetail(null)
+    setMemberDetailError('')
+    setMemberDetailLoading(false)
+    setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review')
+  }, [canLoadMembers, job.panel_run_uuid, job.status])
   useEffect(() => {
     const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
     previousStatus.current = job.status
@@ -165,19 +231,37 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let first = true
+    const generation = ++memberPollGeneration.current
+    const panelRunUUID = job.panel_run_uuid
+    const identity = repoIdentity
     const loadMembers = async () => {
       if (first) setLoading(true)
       try {
-        const value = await request<unknown>(`/api/panels/${encodeURIComponent(job.panel_run_uuid!)}/members`)
-        if (cancelled) return
-        const next = jobsFromPayload(value).filter(member => member.panel_role === 'member').sort((a, b) => (a.panel_member_index ?? 0) - (b.panel_member_index ?? 0))
+        const value = await request<unknown>(`/api/panels/${encodeURIComponent(panelRunUUID)}/members`)
+        if (cancelled || generation !== memberPollGeneration.current || identity !== memberRepositoryIdentity.current) return
+        const next = jobsFromPayload(value).filter(member => member.panel_role === 'member' && (!member.panel_run_uuid || member.panel_run_uuid === panelRunUUID)).sort((a, b) => (a.panel_member_index ?? 0) - (b.panel_member_index ?? 0))
         const activeTarget = fixPromptTarget.current
         if (activeTarget?.member && !next.some(member => idOf(member) === activeTarget.jobId && isFinding(member))) {
           fixPromptGeneration.current++
           fixPromptTarget.current = null
           setFixPromptLoading(false)
         }
+        const selectedId = selectedMemberIdRef.current
+        const selectedMember = selectedId === null ? undefined : next.find(member => idOf(member) === selectedId)
+        if (selectedId !== null && !selectedMember) {
+          memberDetailGeneration.current++
+          selectedMemberIdRef.current = null
+          setSelectedMemberId(null)
+          setMemberDetail(null)
+          setMemberDetailError('')
+          setMemberDetailLoading(false)
+        } else if (selectedMember && selectedMemberIdRef.current === selectedId) {
+          const previousStatus = memberSnapshot.current.get(selectedId!)
+          if (previousStatus && ['queued', 'running'].includes(previousStatus) && !isRunning(selectedMember)) void loadMemberDetail(selectedMember, false)
+        }
+        memberSnapshot.current = new Map(next.map(member => [idOf(member), String(member.status || '').toLowerCase()]))
         setMemberJobs(next)
+        setMemberJobsLoaded(true)
         setMemberError('')
         if (isRunning(job) || next.some(isRunning)) timer = setTimeout(loadMembers, 4000)
       } catch (error) {
@@ -190,8 +274,8 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       }
     }
     loadMembers()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [job.panel_run_uuid, job.status, tab])
+    return () => { cancelled = true; if (timer) clearTimeout(timer); memberPollGeneration.current++ }
+  }, [job.panel_run_uuid, job.status, repoIdentity, tab, loadMemberDetail])
   useEffect(() => {
     fixPromptGeneration.current++
     fixPromptTarget.current = null
@@ -203,6 +287,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
 
   const current = detail ? { ...detail, ...job, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
   const text = outputOf(current)
+  const memberText = outputOf(memberDetail)
   const terminal = !isRunning(current)
   const finding = terminal && isFinding(current)
   const openFixPrompt = (value: FixPromptResponse) => { setFixPrompt(value); setFixPromptText(value.text) }
@@ -241,6 +326,14 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       toast('error', t('review.clipboardUnavailable'))
     }
   }
+  const returnToMembers = () => {
+    memberDetailGeneration.current++
+    setSelectedMember(null)
+    setMemberDetail(null)
+    setMemberDetailError('')
+    setMemberDetailLoading(false)
+    setTab('review')
+  }
   return <><aside className="detail-panel" aria-label={t('review.detailAria')}>
     <header className="detail-header"><div><span className="eyebrow">{t('review.title', { id })}</span><h2>{current.commit_subject || current.subject || current.git_ref || current.commit_sha || t('review.detail')}</h2></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('review.closeDetail')} onClick={close}><X /></button></div></header>
     <div className="detail-summary"><StatusPill job={current} /><span><Bot size={14} />{current.panel_name || current.agent || t('common.default')}</span><span><Clock3 size={14} />{elapsed(current)}</span></div>
@@ -251,7 +344,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       {loading && <div className="skeleton tall" />}
       {!loading && detailError && <p role="alert" className="hint">{t('review.detailRefreshFailed', { error: detailError })}</p>}
       {!loading && tab === 'review' && <><div className="text-toolbar"><CopyButton value={text} /><span>{new Intl.NumberFormat(locale === 'ko' ? 'ko-KR' : 'en-US').format(text.length)} {t('common.chars')}</span></div>{text ? <Markdown>{text}</Markdown> : <Empty title={t('review.noOutput')} body={t('review.runningUpdates')} />}</>}
-      {!loading && tab === 'members' && <div className="member-list">{memberError && <p role="alert" className="hint">{t('review.membersRefreshFailed', { error: memberError })}</p>}{members.length ? members.map(member => <article key={idOf(member)}><StatusPill job={member} /><strong>{member.agent || t('review.memberFallback', { id: idOf(member) })}</strong><span>{member.model || t('common.defaultModel')}</span><span>{elapsed(member)}</span>{isFinding(member) && <div className="member-actions"><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true, idOf(member))}><Clipboard size={14} />{t('review.copyFixPrompt')}</button><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false, idOf(member))}><Code2 size={14} />{t('review.openFixPrompt')}</button></div>}</article>) : !memberError && <Empty title={t('review.noMemberJobs')} body={t('review.noMemberJobsBody')} />}</div>}
+      {!loading && tab === 'members' && <div className="member-list member-tree" role="tree" aria-label={t('review.panelMembers')}>{memberError && <p role="alert" className="hint">{t('review.membersRefreshFailed', { error: memberError })}</p>}<div className="member-progress" aria-label={t('review.memberProgress', { terminal: terminalMemberCount, total: members.length })}><div className="member-progress-heading"><strong>{t('review.panelMembers')}</strong><span>{terminalMemberCount} / {members.length}</span></div><div className="member-progress-track"><div className="member-progress-value" style={{ width: String(memberProgress) + '%' }} /></div></div>{members.length ? members.map(member => <article key={idOf(member)} className={selectedMemberId === idOf(member) ? 'member-item selected' : 'member-item'} role="treeitem" aria-expanded={selectedMemberId === idOf(member)}><button type="button" className="member-row" onClick={() => void loadMemberDetail(member)}><span className="member-row-primary"><StatusPill job={member} /><strong>#{idOf(member)}</strong><span>{member.panel_member_name || t('review.memberFallback', { id: idOf(member) })}</span></span><span className="member-row-facts"><span data-member-field="agent"><b>{t('review.memberAgent')}</b>{member.agent || t('common.default')}</span><span data-member-field="model"><b>{t('review.memberModel')}</b>{member.model || t('common.defaultModel')}</span><span data-member-field="status"><b>{t('review.memberStatus')}</b><em data-status={member.status || 'queued'}>{statusLabel(String(member.status || 'queued').toLowerCase(), t)}</em></span><span data-member-field="verdict"><b>{t('review.memberVerdict')}</b><em data-verdict={member.verdict || ''}>{member.verdict ? statusLabel(String(member.verdict).toLowerCase(), t) : '—'}</em></span><span data-member-field="duration"><b>{t('review.memberDuration')}</b>{elapsed(member)}</span></span></button>{isFinding(member) && <div className="member-actions"><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(true, idOf(member))}><Clipboard size={14} />{t('review.copyFixPrompt')}</button><button className="button ghost compact" disabled={fixPromptLoading} onClick={() => loadFixPrompt(false, idOf(member))}><Code2 size={14} />{t('review.openFixPrompt')}</button></div>}</article>) : !memberError && <Empty title={t('review.noMemberJobs')} body={t('review.noMemberJobsBody')} />}{selectedMemberId !== null && <section className="member-detail" aria-label={t('review.memberDetail')}><button type="button" className="button ghost compact member-parent-return" onClick={returnToMembers}>{t('review.returnToSynthesis')}</button>{memberDetailLoading && <div className="skeleton tall" />}{!memberDetailLoading && memberDetailError && <p role="alert" className="hint">{t('review.detailRefreshFailed', { error: memberDetailError })}</p>}{!memberDetailLoading && !memberDetailError && memberDetail && <><header className="member-detail-header"><strong>#{idOf(memberDetail)} · {memberDetail.panel_member_name || memberDetail.agent || t('review.memberFallback', { id: idOf(memberDetail) })}</strong><span>{memberDetail.model || t('common.defaultModel')}</span></header><div className="text-toolbar"><CopyButton value={memberText} /><span>{new Intl.NumberFormat(locale === 'ko' ? 'ko-KR' : 'en-US').format(memberText.length)} {t('common.chars')}</span></div>{memberText ? <Markdown>{memberText}</Markdown> : <Empty title={t('review.noOutput')} body={t('review.runningUpdates')} />}</>}</section>}</div>}
       {!loading && (tab === 'log' || tab === 'prompt') && <>{lazyError[tab] && <p role="alert" className="hint">{t('review.tabLoadFailed', { tab: tabLabel(tab, t), error: lazyError[tab] })} <button className="button ghost compact" onClick={() => setLazyLoaded(old => ({ ...old, [tab]: false }))}>{t('common.retry')}</button></p>}<div className="text-toolbar"><CopyButton value={lazy[tab] || ''} /></div><pre className="long-text">{lazy[tab] || t('review.noContent', { tab: tabLabel(tab, t) })}</pre></>}
       {tab === 'comments' && <CommentBox jobId={id} mutate={mutate} busy={busy} />}
       {tab === 'metadata' && <><div className="text-toolbar"><CopyButton value={JSON.stringify(current, null, 2)} /></div><pre className="long-text">{JSON.stringify(current, null, 2)}</pre></>}

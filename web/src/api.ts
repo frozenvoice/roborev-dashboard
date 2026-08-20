@@ -478,6 +478,7 @@ export type ReviewJob = {
   started_at?: string
   finished_at?: string
   panel_name?: string
+  panel_member_name?: string
   panel_run_uuid?: string
   panel_role?: string
   parent_job_id?: number

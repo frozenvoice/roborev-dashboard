@@ -55,7 +55,7 @@ func TestReviewPanelPostsPinnedTargetAndDecodesReceipt(t *testing.T) {
 	request := ReviewRequest{RepoPath: `C:\repo with spaces`, GitRef: "head-1", Branch: "feature/refine", Panel: "dashboard_cross"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/enqueue" {
@@ -81,7 +81,7 @@ func TestReviewPanelPostsPinnedTargetAndDecodesReceipt(t *testing.T) {
 func TestSynthesisStatusUsesExactIDEndpointAndExpandedMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 			return
 		}
 		if r.URL.Path == "/api/job/output" {
@@ -241,7 +241,7 @@ func TestFixUsesConfiguredExecutableDirExactArgsAndSanitizedError(t *testing.T) 
 	runner := &fixCaptureRunner{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 			return
 		}
 		http.NotFound(w, r)

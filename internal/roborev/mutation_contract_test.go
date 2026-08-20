@@ -39,7 +39,7 @@ func TestReviewPostsPinnedTargetToEnqueue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/health":
-			_, _ = w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 		case "/api/enqueue":
 			method, path = r.Method, r.URL.Path
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -82,7 +82,7 @@ func TestRerunPostsFrozenJobID(t *testing.T) {
 	var method, path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 			return
 		}
 		method, path = r.Method, r.URL.Path
@@ -134,7 +134,7 @@ func TestReviewRejectsMalformedAndNon2xxDaemonResponses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/health" {
-					_, _ = w.Write([]byte(`{"healthy":true}`))
+					_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
 					return
 				}
 				w.WriteHeader(test.status)

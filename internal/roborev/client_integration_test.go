@@ -40,7 +40,7 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/api/health":
-			_, _ = w.Write([]byte(`{"healthy":true,"version":"v0.64.0"}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 		case "/api/jobs":
 			if request.URL.Query().Get("omit_prompt") != "true" {
 				t.Error("job list did not omit prompts")
@@ -53,6 +53,9 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 					t.Error("single job lookup did not request limit=1")
 				}
 			case query.Get("panel_run") == "986d3bfa-05da-4621-aeca-66f493a19ea3":
+				if query.Get("limit") != "0" || query.Get("omit_prompt") != "true" {
+					t.Errorf("panel member lookup query = %s, want limit=0&omit_prompt=true", query.Encode())
+				}
 				job["id"] = 43
 				job["panel_role"] = "member"
 				job["panel_member_index"] = 0
@@ -110,6 +113,10 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	metadata, err := client.JobMetadata(ctx, 42)
 	if err != nil || metadata.ID != 42 {
 		t.Fatalf("metadata failed: %#v %v", metadata, err)
+	}
+	show, err := client.Show(ctx, 42)
+	if err != nil || !bytes.Contains(show, []byte(`"review"`)) {
+		t.Fatalf("show failed: %v %s", err, show)
 	}
 	members, err := client.PanelMembers(ctx, "986d3bfa-05da-4621-aeca-66f493a19ea3")
 	if err != nil || !bytes.Contains(members, []byte(`"panel_role":"member"`)) {

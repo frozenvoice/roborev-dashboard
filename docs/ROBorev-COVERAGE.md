@@ -8,7 +8,7 @@
 |---|---|---|---|---|---|
 | pinned v0.64.0 GitHub release asset | missing RoboRev runtime 설치 | bounded HTTPS + SHA-256 + safe ZIP + no-replace publish | B | 예 | Windows amd64, explicit confirmation, immutable manifest; URL/version/hash/target을 browser가 선택하지 않음 |
 | `version --json` | 설치/version 검증과 runtime rebind | JSON CLI | B | 예 | exact `name=roborev`, canonical v0.64.0 확인 뒤에만 generation binding 교체 |
-| `/api/health` | daemon health | version-gated daemon API | B | 예 | bounded typed payload만 polling; 실제 optional string `$schema`를 허용하고 그 외 unknown field는 거부 |
+| `/api/health` | daemon health | version-gated daemon API | B | 예 | bounded typed payload만 polling; required non-null string `$schema`와 known fields만 허용 |
 | `status --json` | full daemon/queue diagnostics | JSON CLI | P | 아니요 | v0.64.0은 recent job prompt를 포함하므로 polling 금지 |
 | `/api/jobs?repo=...&omit_prompt=true` | review 목록/filter | version-gated daemon API | B | 예 | active prompt도 adapter가 strip하는 4초 polling |
 | `/api/jobs?id=...&omit_prompt=true` | job owning-repo authorization | version-gated daemon API | B | 예 | upstream v0.64 source와 query-sensitive oversized fixture로 검증 |
@@ -70,7 +70,7 @@
 - setup은 same-origin/CSRF/Host 보호를 받는 typed strict-empty API다. download/hash/archive/publish/probe/rebind/daemon-health를 bounded 단계로 수행하며 integrity와 unsafe archive 오류는 fail closed한다. Application Control은 exact Windows policy error만 `blocked`로 분류하고 우회하지 않는다.
 - 실제 v0.64.0 health payload는 `"$schema":"http://127.0.0.1:7373/HealthStatus.json"`, `healthy:true`, `uptime`, `version:"v0.64.0"`, `database`/`workers` components, `recent_errors:null`, `error_count_24h:0` shape로 확인했다. deterministic fixture가 이 shape를 고정하며 malformed/trailing/oversized/unhealthy/unknown-field와 Stream Relay daemon-version mismatch를 계속 fail closed한다.
 - `review`는 `--json`을 제공하지 않는다. upstream `/api/enqueue` response는 single job 또는 panel synthesis와 `member_job_ids`를 반환한다.
-- 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`를 확인했고 HTTP fixture/UI test로 고정했다.
+- 실제 v0.64.0 `/api/jobs` payload에서 `commit_subject`, `enqueued_at`, `started_at`, `finished_at`, `verdict: "P"|"F"`, `panel_member_name`, `panel_member_index`를 확인했고 HTTP fixture/UI test로 고정했다. Panel member 목록은 `panel_run` metadata query로만 polling하며, 선택한 member의 실제 저장 output만 기존 repository-authorized `show --job-id <id> --json` detail 경로로 lazy-load한다.
 - `list --json`은 prompt와 diff를 포함한다. v0.64 daemon도 `omit_prompt=true`에서 queued/running prompt를 유지하므로 Dashboard adapter가 status와 무관하게 heavy fields를 제거한다.
 - panel parent rerun은 `/api/job/rerun`에서 원본 member의 frozen target/config와 synthesis를 새 `panel_run_uuid`로 복제한다.
 - Panel Refine은 Rerun same target/config가 아니라 매 iteration fresh HEAD의 새 panel review를 enqueue한다. iteration panel PASS 뒤 명시된 final panel을 검증하며, final panel F도 같은 fix budget으로 수정한 뒤 iteration panel부터 다시 시작한다.

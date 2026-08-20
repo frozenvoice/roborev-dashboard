@@ -47,6 +47,17 @@ func TestFixArgsUseTheV064Contract(t *testing.T) {
 	}
 }
 
+func TestShowArgsUseTheV064Contract(t *testing.T) {
+	got, err := ShowArgs(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"show", "--job", "42", "--json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestValidateReviewRequestRejectsEmptyAndControlPanel(t *testing.T) {
 	for _, panel := range []string{"", " \t", "bad\nname"} {
 		if err := ValidateReviewRequest(ReviewRequest{RepoPath: "repo", GitRef: "HEAD", Panel: panel}); err == nil {
