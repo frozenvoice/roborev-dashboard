@@ -476,11 +476,13 @@ func TestStartRejectsPreviewMismatchWithoutLaunchingFix(t *testing.T) {
 
 type gatedPreflightService struct {
 	fakeService
-	armMu    sync.Mutex
-	blocked  bool
-	fixCalls int
-	entered  chan struct{}
-	release  chan struct{}
+	armMu      sync.Mutex
+	blocked    bool
+	fixCalls   int
+	entered    chan struct{}
+	release    chan struct{}
+	cancelled  chan struct{}
+	cancelOnce sync.Once
 }
 
 func (s *gatedPreflightService) TerminalJobMetadata(ctx context.Context, id int64) (roborev.JobMetadata, error) {
@@ -493,6 +495,10 @@ func (s *gatedPreflightService) TerminalJobMetadata(ctx context.Context, id int6
 		select {
 		case <-s.release:
 		case <-ctx.Done():
+			s.cancelOnce.Do(func() { close(s.cancelled) })
+			// A canceled preflight still takes time to unwind; keep blocking
+			// until the test releases it so Shutdown's wait is observable.
+			<-s.release
 			return roborev.JobMetadata{}, ctx.Err()
 		}
 	}
@@ -506,16 +512,18 @@ func (s *gatedPreflightService) Fix(context.Context, roborev.FixRequest) error {
 	return nil
 }
 
-// The preflight of an unaccepted Start must not register work that Shutdown's
-// wait misses: once Shutdown has closed acceptance, a Start that is still in
-// validation is rejected and never launches Fix.
-func TestShutdownRejectsStartStillInPreflightAndLaunchesNoFix(t *testing.T) {
+// An accepted Start that is still inside its blocking preflight is tracked by
+// Shutdown: Shutdown stays waiting, cancels the manager-owned preflight
+// context, the Start terminates without launching Fix or leaking leases, and
+// only then does Shutdown return. Later Starts are rejected at acceptance.
+func TestShutdownWaitsForAcceptedPreflightCancelsItAndRejectsLaterStarts(t *testing.T) {
 	registry := &fakeRegistry{repo: gitx.Repository{Path: `C:\repo`, Branch: "main", Head: "old-head"}}
 	closed := false
 	service := &gatedPreflightService{
 		fakeService: fakeService{registry: registry, job: roborev.JobMetadata{ID: 42, RepoPath: registry.repo.Path, GitRef: "old-head", Branch: "main", JobType: "review", Status: "done", Verdict: "F", Closed: &closed}},
 		entered:     make(chan struct{}),
 		release:     make(chan struct{}),
+		cancelled:   make(chan struct{}),
 	}
 	manager, _ := NewManager(Dependencies{Registry: registry, RoboRev: service, Binary: `C:\tools\roborev.exe`, Gate: operation.NewGate()})
 	request := Request{RepositoryIdentity: registry.repo.Path, TargetJobID: 42, Agent: "codex"}
@@ -536,20 +544,38 @@ func TestShutdownRejectsStartStillInPreflightAndLaunchesNoFix(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Start never entered preflight validation")
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := manager.Shutdown(shutdownCtx); err != nil {
-		t.Fatalf("Shutdown with no accepted work: %v", err)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		shutdownDone <- manager.Shutdown(shutdownCtx)
+	}()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned while an accepted preflight was blocked: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-service.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel the manager-owned preflight context")
 	}
 	close(service.release)
 	select {
 	case err := <-startErr:
-		var typedErr *Error
-		if !errors.As(err, &typedErr) || typedErr.Kind != ErrorConflict || !strings.Contains(err.Error(), "shutting down") {
-			t.Fatalf("preflight Start after shutdown = %v; want shutdown conflict", err)
+		if err == nil {
+			t.Fatal("canceled preflight Start succeeded after shutdown began")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Start never returned after shutdown closed acceptance")
+		t.Fatal("Start never returned after its preflight was canceled")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the accepted Start terminated")
 	}
 	service.armMu.Lock()
 	fixCalls := service.fixCalls

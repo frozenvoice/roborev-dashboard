@@ -2,19 +2,22 @@ import { Ban, ShieldAlert, TerminalSquare } from 'lucide-react'
 import { useI18n } from './i18n'
 import { type Repository, type ReviewJob } from './api'
 
-// Verdict takes precedence over status so a finished task with findings is
-// never shown as a neutral "Done" (same precedence as App's statusOf).
+// RoboRev's `status` field is the authoritative job lifecycle. Non-terminal
+// and failure states win over any recorded verdict; only a terminal-success
+// status is interpreted through the verdict (done+F → Finding, done+P → Pass).
 function taskStatus(job: ReviewJob) {
-  const verdict = String(job.verdict || '').toLowerCase()
-  if (verdict === 'p' || verdict === 'pass' || verdict === 'passed') return 'pass'
-  if (verdict === 'f' || verdict === 'fail' || verdict === 'finding' || verdict === 'failed_review') return 'finding'
   const value = String(job.status || '').toLowerCase()
   if (value === 'queued') return 'queued'
   if (['running', 'processing', 'started'].includes(value)) return 'running'
   if (value === 'finding' || value === 'failed_review') return 'finding'
-  if (['done', 'completed', 'succeeded', 'passed', 'pass'].includes(value)) return 'done'
   if (value === 'failed' || value === 'error') return 'error'
   if (value === 'canceled' || value === 'cancelled') return 'canceled'
+  if (['done', 'completed', 'succeeded', 'passed', 'pass'].includes(value)) {
+    const verdict = String(job.verdict || '').toLowerCase()
+    if (verdict === 'f' || verdict === 'fail' || verdict === 'finding' || verdict === 'failed_review') return 'finding'
+    if (verdict === 'p' || verdict === 'pass' || verdict === 'passed') return 'pass'
+    return 'done'
+  }
   return value || 'queued'
 }
 function taskStatusLabel(value: string, t: ReturnType<typeof useI18n>['t']) {

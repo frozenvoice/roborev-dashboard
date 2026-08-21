@@ -204,6 +204,9 @@ type Manager struct {
 	historyLimit int
 	gate         *operation.Gate
 
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+
 	mu            sync.RWMutex
 	closing       bool
 	runs          map[string]*PanelRefineRun
@@ -237,7 +240,27 @@ func NewManager(deps Dependencies) (*Manager, error) {
 	if deps.Gate == nil {
 		deps.Gate = operation.NewGate()
 	}
-	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, gate: deps.Gate, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc), gateRelease: make(map[string]func()), repoRelease: make(map[string]func())}, nil
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, gate: deps.Gate, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc), gateRelease: make(map[string]func()), repoRelease: make(map[string]func()), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel}, nil
+}
+
+// mergePreflightContext derives one validation context from the caller's
+// request and the manager-owned shutdown context so Shutdown can cancel an
+// accepted Start that is still inside its preflight.
+func mergePreflightContext(parent, shutdown context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(shutdown)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-parent.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		close(stop)
+		cancel()
+	}
 }
 
 func (m *Manager) currentBinary() string {
@@ -295,7 +318,27 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	if strings.TrimSpace(request.Panel) == "" {
 		return nil, startError(StartInvalid, errors.New("panel is required"))
 	}
-	installation := m.service.Installation(parent)
+	// Acceptance into the shutdown lifecycle is linearized under the manager
+	// mutex after pure request validation and before any blocking preflight or
+	// gate acquisition: once Shutdown has set closing, no new Start lifecycle
+	// can be registered, and Shutdown waits for every accepted Start until it
+	// terminates.
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil, startError(StartConflict, errors.New("server is shutting down"))
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	tracked := true
+	defer func() {
+		if tracked {
+			m.wg.Done()
+		}
+	}()
+	preflightCtx, preflightCancel := mergePreflightContext(parent, m.shutdownCtx)
+	defer preflightCancel()
+	installation := m.service.Installation(preflightCtx)
 	if err := validateInstallation(installation); err != nil {
 		return nil, startError(StartUnavailable, err)
 	}
@@ -309,8 +352,11 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 		}
 		return nil, startError(StartForbidden, err)
 	}
-	repo, err := m.registry.Inspect(parent, path)
+	repo, err := m.registry.Inspect(preflightCtx, path)
 	if err != nil {
+		if parentErr := parent.Err(); parentErr != nil {
+			return nil, startError(StartConflict, parentErr)
+		}
 		return nil, startError(StartUnavailable, fmt.Errorf("repository state is unavailable: %w", err))
 	}
 	if repo.Dirty {
@@ -323,14 +369,14 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	if err != nil {
 		return nil, startError(StartInternal, err)
 	}
-	if err := m.validatePanel(parent, repo.Path, request.Panel); err != nil {
+	if err := m.validatePanel(preflightCtx, repo.Path, request.Panel); err != nil {
 		if errors.Is(err, ErrPanelConfigurationUnavailable) {
 			return nil, startError(StartUnavailable, err)
 		}
 		return nil, startError(StartInvalid, err)
 	}
 	if request.FinalPanel != "" {
-		if err := m.validatePanel(parent, repo.Path, request.FinalPanel); err != nil {
+		if err := m.validatePanel(preflightCtx, repo.Path, request.FinalPanel); err != nil {
 			if errors.Is(err, ErrPanelConfigurationUnavailable) {
 				return nil, startError(StartUnavailable, err)
 			}
@@ -352,9 +398,6 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	}()
 
 	m.mu.Lock()
-	// Acceptance and shutdown are linearized under the manager mutex: once
-	// Shutdown has set closing, no Start can register a run that Shutdown's
-	// wg.Wait would miss.
 	if m.closing {
 		m.mu.Unlock()
 		return nil, startError(StartConflict, errors.New("server is shutting down"))
@@ -382,9 +425,10 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	m.gateRelease[id] = gateRelease
 	m.repoRelease[id] = repoRelease
 	keepGate = true
-	m.wg.Add(1)
 	snapshot := cloneRun(run)
 	m.mu.Unlock()
+	// Ownership of the lifecycle counter moves to execute's deferred Done.
+	tracked = false
 	go m.execute(ctx, id)
 	return snapshot, nil
 }
@@ -821,8 +865,9 @@ func (m *Manager) bestEffortCancel(id int64) {
 	_ = m.service.Cancel(cleanupCtx, id)
 }
 
-// Shutdown closes new Start acceptance under the manager mutex, cancels every
-// registered run, and waits for the gate leases and refine work to finish.
+// Shutdown closes new Start acceptance under the manager mutex, cancels the
+// manager-owned preflight context and every registered run, and waits for the
+// gate leases and refine work to finish.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closing = true
@@ -831,6 +876,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		ids = append(ids, id)
 	}
 	m.mu.Unlock()
+	if m.shutdownCancel != nil {
+		m.shutdownCancel()
+	}
 	for _, id := range ids {
 		_ = m.Cancel(id)
 	}

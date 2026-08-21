@@ -48,15 +48,25 @@ describe('Tasks workspace with disabled execution', () => {
     expect(screen.queryByText('#63')).not.toBeInTheDocument()
   })
 
-  it('separates pass and finding verdicts from neutral done status', () => {
-    const { rerender } = render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 71, uuid: '550e8400-e29b-41d4-a716-446655440071', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F' }]} onOpenReview={vi.fn()} /></I18nProvider>)
-    expect(screen.getByText('Finding')).toBeInTheDocument()
-    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 72, uuid: '550e8400-e29b-41d4-a716-446655440072', job_type: 'task', git_ref: 'run', status: 'finding' }]} onOpenReview={vi.fn()} /></I18nProvider>)
-    expect(screen.getByText('Finding')).toBeInTheDocument()
-    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 73, uuid: '550e8400-e29b-41d4-a716-446655440073', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'P' }]} onOpenReview={vi.fn()} /></I18nProvider>)
-    expect(screen.getByText('Pass')).toBeInTheDocument()
-    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 74, uuid: '550e8400-e29b-41d4-a716-446655440074', job_type: 'task', git_ref: 'run', status: 'done' }]} onOpenReview={vi.fn()} /></I18nProvider>)
-    expect(screen.getByText('Done')).toBeInTheDocument()
+  it('keeps the live lifecycle authoritative and reads verdicts only on terminal success', () => {
+    // status is the source of truth: a stale or in-flight verdict must never
+    // turn queued/running/canceled/failed jobs into Finding or Pass.
+    const cases: Array<{ job: Record<string, unknown>; label: string }> = [
+      { job: { status: 'running', verdict: 'F' }, label: 'Running' },
+      { job: { status: 'running', verdict: 'P' }, label: 'Running' },
+      { job: { status: 'queued', verdict: 'F' }, label: 'Queued' },
+      { job: { status: 'canceled', verdict: 'F' }, label: 'Canceled' },
+      { job: { status: 'failed', verdict: 'P' }, label: 'Error' },
+      { job: { status: 'done', verdict: 'F' }, label: 'Finding' },
+      { job: { status: 'done', verdict: 'P' }, label: 'Pass' },
+      { job: { status: 'done' }, label: 'Done' },
+      { job: { status: 'finding' }, label: 'Finding' },
+    ]
+    for (const [index, testCase] of cases.entries()) {
+      const { unmount } = render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 90 + index, uuid: `550e8400-e29b-41d4-a716-4466554400${(90 + index).toString().padStart(2, '0')}`, job_type: 'task', git_ref: 'run', ...testCase.job }]} onOpenReview={vi.fn()} /></I18nProvider>)
+      expect(screen.getByText(testCase.label)).toBeInTheDocument()
+      unmount()
+    }
   })
 
   it('never guesses a missing agent as codex and preserves recorded agents verbatim', () => {

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1180,21 +1179,46 @@ func TestManagerStartRejectsOfflineOrMalformedInstallationSynchronously(t *testi
 	}
 }
 
-// A Start that is still in validation when Shutdown runs must not register a
-// run afterwards: acceptance closes under the manager mutex before Shutdown
-// waits, so no Panel Refine work can outlive server shutdown.
-func TestShutdownRejectsStartStillValidatingAndEnqueuesNothing(t *testing.T) {
-	service := &fakeReviewService{verdicts: []string{"P"}}
-	manager, registry := newTestManager(t, service)
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var armed int32 = 1
-	registry.inspectHook = func(int, *gitx.Repository) {
-		if !atomic.CompareAndSwapInt32(&armed, 1, 0) {
-			return
-		}
-		close(entered)
-		<-release
+// blockingInspectRegistry blocks the first Inspect and reports whether the
+// manager canceled the preflight context while it was blocked.
+type blockingInspectRegistry struct {
+	fakeRegistry
+	entered     chan struct{}
+	release     chan struct{}
+	cancelled   chan struct{}
+	cancelClose sync.Once
+	once        sync.Once
+}
+
+func (r *blockingInspectRegistry) Inspect(ctx context.Context, path string) (gitx.Repository, error) {
+	r.once.Do(func() { close(r.entered) })
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		r.cancelClose.Do(func() { close(r.cancelled) })
+		// A canceled preflight still takes time to unwind; keep blocking
+		// until the test releases it so Shutdown's wait is observable.
+		<-r.release
+		return gitx.Repository{}, ctx.Err()
+	}
+	return r.fakeRegistry.Inspect(ctx, path)
+}
+
+// An accepted Start that is still inside its blocking preflight is tracked by
+// Shutdown: Shutdown stays waiting, cancels the manager-owned preflight
+// context, the Start terminates without enqueueing any review, and only then
+// does Shutdown return. Later Starts are rejected before any validation work.
+func TestShutdownWaitsForAcceptedPreflightCancelsItAndRejectsLaterStarts(t *testing.T) {
+	registry := &blockingInspectRegistry{
+		fakeRegistry: fakeRegistry{repo: gitx.Repository{Path: `C:\repo`, Branch: "main", Head: "head"}},
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
+		cancelled:    make(chan struct{}),
+	}
+	service := &fakeReviewService{verdicts: []string{"P"}, registry: registry}
+	manager, err := NewManager(Dependencies{Registry: registry, Panels: fakePanels{}, RoboRev: service, Binary: `C:\roborev.exe`})
+	if err != nil {
+		t.Fatal(err)
 	}
 	startErr := make(chan error, 1)
 	go func() {
@@ -1202,24 +1226,42 @@ func TestShutdownRejectsStartStillValidatingAndEnqueuesNothing(t *testing.T) {
 		startErr <- err
 	}()
 	select {
-	case <-entered:
+	case <-registry.entered:
 	case <-time.After(time.Second):
 		t.Fatal("Start never entered repository validation")
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := manager.Shutdown(shutdownCtx); err != nil {
-		t.Fatalf("Shutdown with no accepted run: %v", err)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		shutdownDone <- manager.Shutdown(shutdownCtx)
+	}()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned while an accepted preflight was blocked: %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
-	close(release)
+	select {
+	case <-registry.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel the manager-owned preflight context")
+	}
+	close(registry.release)
 	select {
 	case err := <-startErr:
-		var typedErr *StartError
-		if !errors.As(err, &typedErr) || typedErr.Kind != StartConflict || !strings.Contains(err.Error(), "shutting down") {
-			t.Fatalf("validating Start after shutdown = %v; want shutdown conflict", err)
+		if err == nil {
+			t.Fatal("canceled preflight Start succeeded after shutdown began")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Start never returned after shutdown closed acceptance")
+		t.Fatal("Start never returned after its preflight was canceled")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the accepted Start terminated")
 	}
 	service.mu.Lock()
 	reviewCount := service.reviewCount
@@ -1232,6 +1274,9 @@ func TestShutdownRejectsStartStillValidatingAndEnqueuesNothing(t *testing.T) {
 		t.Fatalf("gate lease was not released after rejected Start: %v", err)
 	}
 	refineLease()
+	if _, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"}); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("Start after shutdown = %v; want shutdown conflict", err)
+	}
 }
 
 // An accepted review lease is part of the shutdown lifecycle: Shutdown stays

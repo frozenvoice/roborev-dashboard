@@ -176,6 +176,9 @@ type manager struct {
 	gate     *operation.Gate
 	history  int
 
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+
 	mu      sync.RWMutex
 	closing bool
 	items   map[string]*Operation
@@ -203,7 +206,29 @@ func NewManager(deps Dependencies) (*Manager, error) {
 	if strings.TrimSpace(deps.Binary) == "" {
 		deps.Binary = "roborev"
 	}
-	return &manager{registry: deps.Registry, service: deps.RoboRev, binary: deps.Binary, gate: deps.Gate, history: deps.HistoryLimit, items: make(map[string]*Operation), cancel: make(map[string]context.CancelFunc), global: make(map[string]func()), repo: make(map[string]func())}, nil
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	return &manager{registry: deps.Registry, service: deps.RoboRev, binary: deps.Binary, gate: deps.Gate, history: deps.HistoryLimit, items: make(map[string]*Operation), cancel: make(map[string]context.CancelFunc), global: make(map[string]func()), repo: make(map[string]func()), shutdownCtx: shutdownCtx, shutdownCancel: shutdownCancel}, nil
+}
+
+// mergePreflightContext derives one validation context from the caller's
+// request, the manager-owned shutdown context, and the inspection ceiling so
+// Shutdown can cancel an accepted Start that is still inside its preflight.
+func mergePreflightContext(parent, shutdown context.Context, ceiling time.Duration) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(shutdown)
+	timer := time.AfterFunc(ceiling, cancel)
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-parent.Done():
+			cancel()
+		case <-stop:
+		}
+	}()
+	return ctx, func() {
+		timer.Stop()
+		close(stop)
+		cancel()
+	}
 }
 
 func (m *manager) currentBinary() string {
@@ -396,6 +421,23 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 	if strings.TrimSpace(request.PreviewToken) == "" {
 		return nil, typed(ErrorInvalid, errors.New("preview token is required"))
 	}
+	// Acceptance into the shutdown lifecycle is linearized under the manager
+	// mutex before any gate lease or blocking preflight: once Shutdown has set
+	// closing, no new Start lifecycle can be registered, and every accepted
+	// Start is waited on by Shutdown until it terminates.
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil, typed(ErrorConflict, errors.New("server is shutting down"))
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	tracked := true
+	defer func() {
+		if tracked {
+			m.wg.Done()
+		}
+	}()
 	global, err := m.gate.AcquireFix()
 	if err != nil {
 		return nil, typed(ErrorConflict, err)
@@ -405,7 +447,7 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 		global()
 		return nil, typed(ErrorConflict, err)
 	}
-	validationCtx, validationCancel := context.WithTimeout(parent, inspectTimeout)
+	validationCtx, validationCancel := mergePreflightContext(parent, m.shutdownCtx, inspectTimeout)
 	preview, err := m.validate(validationCtx, request.Request)
 	validationCancel()
 	if parentErr := parent.Err(); parentErr != nil {
@@ -430,9 +472,6 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 	id := newID()
 	item := &Operation{ID: id, RepositoryIdentity: preview.RepositoryIdentity, RepositoryPath: preview.RepositoryPath, TargetJobID: preview.Target.JobID, Target: preview.Target, Agent: preview.Agent, Phase: StatusRunning, Status: StatusRunning, Command: preview.Command, StartingHead: preview.StartingHead, StartingBranch: preview.StartingBranch, StartedAt: now, UpdatedAt: now}
 	ctx, cancel := context.WithTimeout(context.Background(), fixCeiling)
-	// Registration and the shutdown acceptance check are linearized under the
-	// manager mutex: once Shutdown has set closing, no Start can register work
-	// that Shutdown's wg.Wait would miss.
 	m.mu.Lock()
 	if m.closing {
 		m.mu.Unlock()
@@ -445,9 +484,10 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 	m.cancel[id] = cancel
 	m.global[id] = global
 	m.repo[id] = repoLease
-	m.wg.Add(1)
 	snapshot := clone(item)
 	m.mu.Unlock()
+	// Ownership of the lifecycle counter moves to execute's deferred Done.
+	tracked = false
 	go m.execute(ctx, id)
 	return snapshot, nil
 }
@@ -617,8 +657,9 @@ func (m *manager) Cancel(id string) error {
 	return nil
 }
 
-// Shutdown closes new Start acceptance under the manager mutex, cancels every
-// registered operation, and waits for the gate leases and Fix work to finish.
+// Shutdown closes new Start acceptance under the manager mutex, cancels the
+// manager-owned preflight context and every registered operation, and waits
+// for the gate leases and Fix work to finish.
 func (m *manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closing = true
@@ -627,6 +668,9 @@ func (m *manager) Shutdown(ctx context.Context) error {
 		cancels = append(cancels, cancel)
 	}
 	m.mu.Unlock()
+	if m.shutdownCancel != nil {
+		m.shutdownCancel()
+	}
 	for _, cancel := range cancels {
 		cancel()
 	}
