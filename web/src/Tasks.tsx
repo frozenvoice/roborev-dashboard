@@ -1,35 +1,8 @@
 import { Ban, ShieldAlert, TerminalSquare } from 'lucide-react'
 import { useI18n } from './i18n'
 import { type Repository, type ReviewJob } from './api'
+import { jobStatus, jobStatusLabel } from './jobStatus'
 
-// RoboRev's `status` field is the authoritative job lifecycle. Non-terminal
-// and failure states win over any recorded verdict; only a terminal-success
-// status is interpreted through the verdict (done+F → Finding, done+P → Pass).
-function taskStatus(job: ReviewJob) {
-  const value = String(job.status || '').toLowerCase()
-  if (value === 'queued') return 'queued'
-  if (['running', 'processing', 'started'].includes(value)) return 'running'
-  if (value === 'finding' || value === 'failed_review') return 'finding'
-  if (value === 'failed' || value === 'error') return 'error'
-  if (value === 'canceled' || value === 'cancelled') return 'canceled'
-  if (['done', 'completed', 'succeeded', 'passed', 'pass'].includes(value)) {
-    const verdict = String(job.verdict || '').toLowerCase()
-    if (verdict === 'f' || verdict === 'fail' || verdict === 'finding' || verdict === 'failed_review') return 'finding'
-    if (verdict === 'p' || verdict === 'pass' || verdict === 'passed') return 'pass'
-    return 'done'
-  }
-  return value || 'queued'
-}
-function taskStatusLabel(value: string, t: ReturnType<typeof useI18n>['t']) {
-  if (value === 'queued') return t('status.queued')
-  if (value === 'running') return t('status.running')
-  if (value === 'done') return t('status.done')
-  if (value === 'pass') return t('status.pass')
-  if (value === 'finding') return t('status.finding')
-  if (value === 'failed' || value === 'error') return t('status.error')
-  if (value === 'canceled') return t('status.canceled')
-  return t('status.unknown')
-}
 function taskJobId(job: ReviewJob) {
   const value = job.id ?? job.job_id
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
@@ -67,7 +40,7 @@ export function Tasks({ repository, jobs, onOpenReview }: TasksProps) {
         <p className="task-safety-copy" role="note"><ShieldAlert size={15} /><strong>{t('tasks.executionDisabledBadge')}</strong> {t('tasks.executionDisabledReason')}</p>
         <p className="task-context-hint" id="task-execution-disabled-reason">{t('tasks.executionDisabledHint')}</p>
       </section>
-      <section className="task-history" aria-labelledby="tasks-history-title"><div className="task-card-heading"><div><h2 id="tasks-history-title">{t('tasks.history')}</h2><p>{t('tasks.historyDescription')}</p></div><TerminalSquare size={19} /></div>{taskJobs.length === 0 ? <div className="task-empty"><TerminalSquare size={23} /><p>{t('tasks.noHistory')}</p></div> : <div className="task-list">{taskJobs.map(job => { const id = taskJobId(job); const status = taskStatus(job); return <article className="task-row" key={`${id ?? 'task'}-${job.uuid ?? job.job_uuid ?? id}`}><div className="task-row-main"><strong>#{id ?? '—'}</strong><span className="task-row-subject">run</span><span className={`status status-${status}`}><span className="status-dot" />{taskStatusLabel(status, t)}</span></div><div className="task-row-meta"><span>run</span><span>{typeof job.agent === 'string' && job.agent.trim() ? job.agent : t('status.unknownAgent')}</span>{id && <button className="button compact" onClick={() => onOpenReview(id)}>{t('tasks.viewResult')}</button>}</div></article> })}</div>}</section>
+      <section className="task-history" aria-labelledby="tasks-history-title"><div className="task-card-heading"><div><h2 id="tasks-history-title">{t('tasks.history')}</h2><p>{t('tasks.historyDescription')}</p></div><TerminalSquare size={19} /></div>{taskJobs.length === 0 ? <div className="task-empty"><TerminalSquare size={23} /><p>{t('tasks.noHistory')}</p></div> : <div className="task-list">{taskJobs.map(job => { const id = taskJobId(job); const status = jobStatus(job); return <article className="task-row" key={`${id ?? 'task'}-${job.uuid ?? job.job_uuid ?? id}`}><div className="task-row-main"><strong>#{id ?? '—'}</strong><span className="task-row-subject">run</span><span className={`status status-${status}`}><span className="status-dot" />{jobStatusLabel(status, t)}</span></div><div className="task-row-meta"><span>run</span><span>{typeof job.agent === 'string' && job.agent.trim() ? job.agent : t('status.unknownAgent')}</span>{id && <button className="button compact" onClick={() => onOpenReview(id)}>{t('tasks.viewResult')}</button>}</div></article> })}</div>}</section>
     </div>
   </section>
 }

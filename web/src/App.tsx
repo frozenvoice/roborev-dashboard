@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useM
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
 import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeRuntimeControl, normalizeSetupState, parseReviewInvalidationEvent, reviewEventsURL, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
+import { jobStatus, jobStatusLabel } from './jobStatus'
 import { FixRefine, PanelRefineSummary, isFixTarget } from './FixRefine'
 import { Analyze } from './Analyze'
 import { Tasks } from './Tasks'
@@ -34,16 +35,9 @@ const tabLabelKeys: Record<Tab, MessageKey> = {
 }
 function tabLabel(value: Tab, t: ReturnType<typeof useI18n>['t']) { return t(tabLabelKeys[value]) }
 
-function statusOf(job: ReviewJob) { return String(job.verdict || job.review && typeof job.review === 'object' && job.review.verdict || job.status || 'queued').toLowerCase() }
+function statusOf(job: ReviewJob) { return jobStatus(job) }
 function statusLabel(value: string, t: ReturnType<typeof useI18n>['t']) {
-  if (value === 'p' || value === 'pass' || value === 'passed') return t('status.pass')
-  if (value === 'f' || value === 'fail' || value === 'finding' || value === 'failed_review') return t('status.finding')
-  if (value === 'done') return t('status.done')
-  if (value === 'running') return t('status.running')
-  if (value === 'queued') return t('status.queued')
-  if (value === 'canceled' || value === 'cancelled') return t('status.canceled')
-  if (value === 'failed' || value === 'error') return t('status.error')
-  return value || t('status.unknown')
+  return jobStatusLabel(value, t)
 }
 function outputOf(job: ReviewJob | null) {
   if (!job) return ''
@@ -110,8 +104,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error?: 
 function StatusPill({ job }: { job: ReviewJob }) {
   const { t } = useI18n()
   const status = statusOf(job)
-  const visualStatus = status === 'p' ? 'pass' : status === 'f' ? 'finding' : status
-  return <span className={`status status-${visualStatus}`}><span className="status-dot" />{statusLabel(status, t)}</span>
+  return <span className={`status status-${status}`}><span className="status-dot" />{statusLabel(status, t)}</span>
 }
 
 function CopyButton({ value }: { value: string }) {
