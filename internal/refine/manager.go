@@ -373,6 +373,9 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 		return nil, startError(StartInternal, err)
 	}
 	if err := m.validatePanel(preflightCtx, repo.Path, request.Panel); err != nil {
+		if shutdownErr := m.shutdownCanceled(parent); shutdownErr != nil {
+			return nil, startError(StartConflict, shutdownErr)
+		}
 		if errors.Is(err, ErrPanelConfigurationUnavailable) {
 			return nil, startError(StartUnavailable, err)
 		}
@@ -380,6 +383,9 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	}
 	if request.FinalPanel != "" {
 		if err := m.validatePanel(preflightCtx, repo.Path, request.FinalPanel); err != nil {
+			if shutdownErr := m.shutdownCanceled(parent); shutdownErr != nil {
+				return nil, startError(StartConflict, shutdownErr)
+			}
 			if errors.Is(err, ErrPanelConfigurationUnavailable) {
 				return nil, startError(StartUnavailable, err)
 			}
