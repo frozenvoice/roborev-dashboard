@@ -39,6 +39,26 @@ describe('Tasks workspace with disabled execution', () => {
     expect(screen.getByRole('button', { name: 'View result' })).toBeInTheDocument()
   })
 
+  it('identifies task jobs with the same predicate as the rerun boundary', () => {
+    // job_type=task without git_ref=run is still a blocked task job and must
+    // stay visible in history instead of disappearing from every screen.
+    render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 61, uuid: '550e8400-e29b-41d4-a716-446655440061', job_type: 'task', git_ref: 'main', status: 'done' }, { id: 62, uuid: '550e8400-e29b-41d4-a716-446655440062', job_type: 'review', git_ref: 'run', status: 'done' }, { id: 63, uuid: '550e8400-e29b-41d4-a716-446655440063', job_type: 'review', git_ref: 'abcdef123456', status: 'done' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('#61')).toBeInTheDocument()
+    expect(screen.getByText('#62')).toBeInTheDocument()
+    expect(screen.queryByText('#63')).not.toBeInTheDocument()
+  })
+
+  it('separates pass and finding verdicts from neutral done status', () => {
+    const { rerender } = render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 71, uuid: '550e8400-e29b-41d4-a716-446655440071', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('Finding')).toBeInTheDocument()
+    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 72, uuid: '550e8400-e29b-41d4-a716-446655440072', job_type: 'task', git_ref: 'run', status: 'finding' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('Finding')).toBeInTheDocument()
+    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 73, uuid: '550e8400-e29b-41d4-a716-446655440073', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'P' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('Pass')).toBeInTheDocument()
+    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 74, uuid: '550e8400-e29b-41d4-a716-446655440074', job_type: 'task', git_ref: 'run', status: 'done' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('Done')).toBeInTheDocument()
+  })
+
   it('never guesses a missing agent as codex and preserves recorded agents verbatim', () => {
     const { rerender } = render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 51, uuid: '550e8400-e29b-41d4-a716-446655440051', job_type: 'task', git_ref: 'run', status: 'done' }]} onOpenReview={vi.fn()} /></I18nProvider>)
     expect(screen.getByText('Unknown agent')).toBeInTheDocument()

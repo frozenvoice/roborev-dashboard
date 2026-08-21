@@ -2,13 +2,18 @@ import { Ban, ShieldAlert, TerminalSquare } from 'lucide-react'
 import { useI18n } from './i18n'
 import { type Repository, type ReviewJob } from './api'
 
+// Verdict takes precedence over status so a finished task with findings is
+// never shown as a neutral "Done" (same precedence as App's statusOf).
 function taskStatus(job: ReviewJob) {
+  const verdict = String(job.verdict || '').toLowerCase()
+  if (verdict === 'p' || verdict === 'pass' || verdict === 'passed') return 'pass'
+  if (verdict === 'f' || verdict === 'fail' || verdict === 'finding' || verdict === 'failed_review') return 'finding'
   const value = String(job.status || '').toLowerCase()
   if (value === 'queued') return 'queued'
   if (['running', 'processing', 'started'].includes(value)) return 'running'
-  if (['done', 'completed', 'succeeded', 'passed', 'pass', 'finding'].includes(value)) return 'done'
-  if (value === 'failed') return 'failed'
-  if (value === 'error') return 'error'
+  if (value === 'finding' || value === 'failed_review') return 'finding'
+  if (['done', 'completed', 'succeeded', 'passed', 'pass'].includes(value)) return 'done'
+  if (value === 'failed' || value === 'error') return 'error'
   if (value === 'canceled' || value === 'cancelled') return 'canceled'
   return value || 'queued'
 }
@@ -16,6 +21,8 @@ function taskStatusLabel(value: string, t: ReturnType<typeof useI18n>['t']) {
   if (value === 'queued') return t('status.queued')
   if (value === 'running') return t('status.running')
   if (value === 'done') return t('status.done')
+  if (value === 'pass') return t('status.pass')
+  if (value === 'finding') return t('status.finding')
   if (value === 'failed' || value === 'error') return t('status.error')
   if (value === 'canceled') return t('status.canceled')
   return t('status.unknown')
@@ -41,8 +48,11 @@ export function Tasks({ repository, jobs, onOpenReview }: TasksProps) {
   const { t } = useI18n()
   // jobs is the backend-scoped /api/reviews list for the selected repository;
   // raw repo_path strings are never re-compared in the browser because the
-  // daemon's path spelling differs from the registry's canonical form.
-  const taskJobs = jobs.filter(job => job.job_type === 'task' && job.git_ref === 'run')
+  // daemon's path spelling differs from the registry's canonical form. The
+  // task identification predicate matches the backend rerun boundary and
+  // ReviewDetail exactly (job_type OR git_ref), so a task job blocked from
+  // rerun is always visible here.
+  const taskJobs = jobs.filter(job => job.job_type === 'task' || job.git_ref === 'run')
 
   return <section className="tasks-page">
     <header className="section-heading"><div><span className="eyebrow">{t('tasks.eyebrow')}</span><h1>{t('tasks.title')}</h1><p>{t('tasks.description')}</p></div></header>
