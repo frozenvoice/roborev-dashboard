@@ -397,15 +397,3 @@ func (r *Registry) acquireSelected(expectedIdentity string) (*selectedRepository
 	r.mu.RUnlock()
 	return &selectedRepositoryLease{path: path, identity: identity, release: r.selectionMu.RUnlock}, nil
 }
-
-// AcquireSelected exposes the same selection lease used by process-scoped
-// managers without exposing the registry's internal lease representation.
-// The lease is intentionally short-lived: callers release it after command
-// dispatch, not after the resulting RoboRev job reaches a terminal state.
-func (r *Registry) AcquireSelected(expectedIdentity string) (func(), error) {
-	lease, err := r.acquireSelected(expectedIdentity)
-	if err != nil {
-		return nil, err
-	}
-	return lease.Release, nil
-}

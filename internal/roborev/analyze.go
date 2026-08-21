@@ -1,13 +1,9 @@
 package roborev
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 	"unicode"
@@ -17,59 +13,29 @@ import (
 )
 
 const (
-	AnalysisScopeBranch     = "branch"
-	AnalysisScopeRepository = "repository"
-	analysisListLimit       = 256 << 10
-	analysisPromptLimit     = 2 << 20
-	analysisReceiptLimit    = 2 << 20
-	analysisMaxTypes        = 64
-	analysisMaxTypeName     = 64
-	analysisMaxDescription  = 4096
-	analysisMaxFiles        = 4096
-	analysisMaxFileName     = 4096
-	analysisMaxAgent        = 256
-	analysisMaxFileBytes    = 1 << 20
+	analysisListLimit      = 256 << 10
+	analysisPromptLimit    = 2 << 20
+	analysisMaxTypes       = 64
+	analysisMaxTypeName    = 64
+	analysisMaxDescription = 4096
 )
 
 var (
-	ErrUnsupportedAnalyze       = errors.New("RoboRev v0.64 analyze capability is unavailable")
+	ErrUnsupportedAnalyze       = errors.New("RoboRev v0.64 analyze introspection is unavailable")
 	ErrMalformedAnalysisCatalog = errors.New("malformed RoboRev analysis type catalog")
-	ErrMalformedAnalysisReceipt = errors.New("malformed RoboRev analysis receipt")
-	// ErrAmbiguousAnalysisEnqueue is returned when the process may have sent an
-	// enqueue request but its receipt could not be validated. Callers must not
-	// report this as a confirmed failure or retry automatically.
-	ErrAmbiguousAnalysisEnqueue = errors.New("RoboRev analysis enqueue result is ambiguous")
 )
 
-// AnalysisService is intentionally separate from Service. Existing server
-// fakes and adapters do not need to grow an Analyze method until they expose
-// the version-gated capability.
+// AnalysisService is deliberately limited to the non-executing catalog and
+// prompt inspection surface. v0.64 Analyze enqueue is agentic upstream and is
+// intentionally not reachable through the Dashboard adapter.
 type AnalysisService interface {
 	AnalysisTypes(context.Context) ([]AnalysisType, error)
 	AnalysisPrompt(context.Context, string) (string, error)
-	Analyze(context.Context, AnalyzeRequest) (AnalysisReceipt, error)
 }
 
 type AnalysisType struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-}
-
-type AnalyzeRequest struct {
-	RepositoryPath string
-	AnalysisType   string
-	Scope          string
-}
-
-type AnalysisJob struct {
-	ID    int64  `json:"id"`
-	Agent string `json:"agent"`
-}
-
-type AnalysisReceipt struct {
-	Jobs         []AnalysisJob `json:"jobs"`
-	AnalysisType string        `json:"analysis_type"`
-	Files        []string      `json:"files"`
 }
 
 func validAnalysisType(value string) bool {
@@ -85,31 +51,6 @@ func validAnalysisType(value string) bool {
 		}
 	}
 	return true
-}
-
-func validAnalysisScope(scope string) bool {
-	return scope == AnalysisScopeBranch || scope == AnalysisScopeRepository
-}
-
-func ValidAnalysisScope(scope string) bool { return validAnalysisScope(scope) }
-
-// AnalysisArgs is the sole production builder for the supported analysis
-// command. The browser supplies only the semantic scope enum; ./... and the
-// branch flag are generated here.
-func AnalysisArgs(analysisType, scope string) ([]string, error) {
-	if !validAnalysisType(analysisType) {
-		return nil, errors.New("invalid analysis type")
-	}
-	if !validAnalysisScope(scope) {
-		return nil, errors.New("invalid analysis scope")
-	}
-	args := []string{"analyze", analysisType}
-	if scope == AnalysisScopeBranch {
-		args = append(args, "--branch=HEAD")
-	} else {
-		args = append(args, "./...")
-	}
-	return append(args, "--json"), nil
 }
 
 func AnalysisListArgs() []string { return []string{"analyze", "--list"} }
@@ -187,75 +128,6 @@ func ParseAnalysisTypes(output string) ([]AnalysisType, error) {
 	return entries, nil
 }
 
-func decodeAnalysisReceipt(raw string, requestedType string) (AnalysisReceipt, error) {
-	if !validAnalysisType(requestedType) {
-		return AnalysisReceipt{}, fmt.Errorf("%w: requested analysis type is invalid", ErrMalformedAnalysisReceipt)
-	}
-	if len(raw) == 0 || len(raw) > analysisReceiptLimit {
-		return AnalysisReceipt{}, fmt.Errorf("%w: output exceeds %d bytes", ErrMalformedAnalysisReceipt, analysisReceiptLimit)
-	}
-	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
-	var receipt struct {
-		Jobs         []AnalysisJob `json:"jobs"`
-		AnalysisType *string       `json:"analysis_type"`
-		Files        *[]string     `json:"files"`
-	}
-	if err := decoder.Decode(&receipt); err != nil {
-		return AnalysisReceipt{}, fmt.Errorf("%w: invalid JSON", ErrMalformedAnalysisReceipt)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return AnalysisReceipt{}, fmt.Errorf("%w: trailing JSON value", ErrMalformedAnalysisReceipt)
-	}
-	if receipt.AnalysisType == nil || *receipt.AnalysisType != requestedType || receipt.Files == nil || len(receipt.Jobs) != 1 {
-		return AnalysisReceipt{}, fmt.Errorf("%w: receipt identity or job count is invalid", ErrMalformedAnalysisReceipt)
-	}
-	if len(*receipt.Files) == 0 || len(*receipt.Files) > analysisMaxFiles {
-		return AnalysisReceipt{}, fmt.Errorf("%w: too many files", ErrMalformedAnalysisReceipt)
-	}
-	seen := make(map[int64]struct{}, len(receipt.Jobs))
-	for _, job := range receipt.Jobs {
-		if job.ID <= 0 || strings.TrimSpace(job.Agent) == "" || len(job.Agent) > analysisMaxAgent {
-			return AnalysisReceipt{}, fmt.Errorf("%w: invalid job", ErrMalformedAnalysisReceipt)
-		}
-		for _, char := range job.Agent {
-			if unicode.IsControl(char) {
-				return AnalysisReceipt{}, fmt.Errorf("%w: control character in agent", ErrMalformedAnalysisReceipt)
-			}
-		}
-		if _, exists := seen[job.ID]; exists {
-			return AnalysisReceipt{}, fmt.Errorf("%w: duplicate job ID", ErrMalformedAnalysisReceipt)
-		}
-		seen[job.ID] = struct{}{}
-	}
-	fileBytes := 0
-	for _, file := range *receipt.Files {
-		if strings.TrimSpace(file) == "" || len(file) > analysisMaxFileName {
-			return AnalysisReceipt{}, fmt.Errorf("%w: invalid file", ErrMalformedAnalysisReceipt)
-		}
-		for _, char := range file {
-			if unicode.IsControl(char) {
-				return AnalysisReceipt{}, fmt.Errorf("%w: control character in file", ErrMalformedAnalysisReceipt)
-			}
-		}
-		fileBytes += len(file)
-		if fileBytes > analysisMaxFileBytes {
-			return AnalysisReceipt{}, fmt.Errorf("%w: file list exceeds bounded size", ErrMalformedAnalysisReceipt)
-		}
-	}
-	return AnalysisReceipt{Jobs: append([]AnalysisJob(nil), receipt.Jobs...), AnalysisType: *receipt.AnalysisType, Files: append([]string(nil), (*receipt.Files)...)}, nil
-}
-
-// AnalysisReceiptFromJSON is exported for deterministic adapter tests and
-// keeps receipt validation at the process boundary.
-func AnalysisReceiptFromJSON(raw string, requestedType string) (AnalysisReceipt, error) {
-	return decodeAnalysisReceipt(raw, requestedType)
-}
-
-func DecodeAnalysisReceipt(raw json.RawMessage, requestedType string) (AnalysisReceipt, error) {
-	return decodeAnalysisReceipt(string(raw), requestedType)
-}
-
 func ParseAnalysisCatalog(output string) ([]AnalysisType, error) {
 	return ParseAnalysisTypes(output)
 }
@@ -268,28 +140,10 @@ func (c *Client) analysisAvailable(ctx context.Context) (Installation, error) {
 	if !roborevcompat.IsSupportedVersion(version) {
 		return Installation{}, fmt.Errorf("%w: %s", ErrUnsupportedAnalyze, version)
 	}
-	if !capabilities(version).AnalyzeCommand {
+	if !capabilities(version).AnalyzeIntrospection {
 		return Installation{}, ErrUnsupportedAnalyze
 	}
 	return Installation{Installed: true, Binary: c.BinaryPath(), Version: version, Capabilities: capabilities(version)}, nil
-}
-
-func (c *Client) analysisReady(ctx context.Context) (Installation, error) {
-	installation, err := c.analysisAvailable(ctx)
-	if err != nil {
-		return Installation{}, err
-	}
-	health, err := c.healthStatus(ctx)
-	if err != nil {
-		return Installation{}, fmt.Errorf("daemon health preflight failed: %w", err)
-	}
-	if !health.Healthy {
-		return Installation{}, ErrDaemonUnhealthy
-	}
-	if !roborevcompat.IsSupportedVersion(strings.TrimSpace(health.Version)) || strings.TrimSpace(health.Version) != installation.Version {
-		return Installation{}, fmt.Errorf("%w: daemon=%s cli=%s", ErrUnsupportedAnalyze, strings.TrimSpace(health.Version), installation.Version)
-	}
-	return installation, nil
 }
 
 func (c *Client) AnalysisTypes(ctx context.Context) ([]AnalysisType, error) {
@@ -327,41 +181,12 @@ func (c *Client) AnalysisPrompt(ctx context.Context, analysisType string) (strin
 		return "", err
 	}
 	if result.StdoutTruncated || result.StderrTruncated {
-		return "", fmt.Errorf("analysis prompt output exceeded bounded limit")
+		return "", errors.New("analysis prompt output exceeded bounded limit")
 	}
 	if strings.TrimSpace(result.Stdout) == "" {
 		return "", errors.New("analysis prompt is empty")
 	}
 	return result.Stdout, nil
-}
-
-func (c *Client) Analyze(ctx context.Context, request AnalyzeRequest) (AnalysisReceipt, error) {
-	args, err := AnalysisArgs(request.AnalysisType, request.Scope)
-	if err != nil {
-		return AnalysisReceipt{}, err
-	}
-	if strings.TrimSpace(request.RepositoryPath) == "" {
-		return AnalysisReceipt{}, errors.New("repository path is required")
-	}
-	binary, _, generation := c.snapshot()
-	if _, err := c.analysisReady(ctx); err != nil {
-		return AnalysisReceipt{}, err
-	}
-	if !c.bindingUnchanged(binary, generation) {
-		return AnalysisReceipt{}, ErrBindingChanged
-	}
-	result, runErr := c.runSnapshotDir(ctx, binary, args, request.RepositoryPath, 45*time.Second, analysisReceiptLimit)
-	if runErr != nil {
-		return AnalysisReceipt{}, fmt.Errorf("%w: %v", ErrAmbiguousAnalysisEnqueue, runErr)
-	}
-	if result.StdoutTruncated || result.StderrTruncated {
-		return AnalysisReceipt{}, fmt.Errorf("%w: bounded output was truncated", ErrAmbiguousAnalysisEnqueue)
-	}
-	receipt, err := decodeAnalysisReceipt(result.Stdout, request.AnalysisType)
-	if err != nil {
-		return AnalysisReceipt{}, fmt.Errorf("%w: %v", ErrAmbiguousAnalysisEnqueue, err)
-	}
-	return receipt, nil
 }
 
 func (c *Client) bindingUnchanged(binary string, generation uint64) bool {
@@ -370,11 +195,10 @@ func (c *Client) bindingUnchanged(binary string, generation uint64) bool {
 }
 
 func (c *Client) runSnapshot(ctx context.Context, binary string, args []string, timeout time.Duration, limit int) (proc.Result, error) {
-	return c.runSnapshotDir(ctx, binary, args, "", timeout, limit)
-}
-
-func (c *Client) runSnapshotDir(ctx context.Context, binary string, args []string, dir string, timeout time.Duration, limit int) (proc.Result, error) {
-	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: args, Dir: dir, Timeout: timeout, OutputLimit: limit})
+	if binary == "" {
+		return proc.Result{}, errors.New("roborev is not installed")
+	}
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: args, Timeout: timeout, OutputLimit: limit})
 	if err != nil {
 		message := strings.TrimSpace(result.Stderr)
 		if message == "" {
@@ -383,8 +207,4 @@ func (c *Client) runSnapshotDir(ctx context.Context, binary string, args []strin
 		return result, fmt.Errorf("%s: %w", message, err)
 	}
 	return result, nil
-}
-
-func sameAnalysisReceiptType(receipt AnalysisReceipt, requested string) bool {
-	return subtle.ConstantTimeCompare([]byte(receipt.AnalysisType), []byte(requested)) == 1
 }

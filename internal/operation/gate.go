@@ -19,7 +19,6 @@ type Gate struct {
 	refine             int
 	mutations          int
 	fixes              int
-	analyses           int
 	repositories       map[string]uint64
 	repositorySequence uint64
 }
@@ -32,7 +31,7 @@ func (g *Gate) AcquireSetup() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.analyses > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.setup = true
@@ -53,7 +52,7 @@ func (g *Gate) AcquireMutation() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.fixes > 0 || g.analyses > 0 {
+	if g.setup || g.runtime || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.mutations++
@@ -74,7 +73,7 @@ func (g *Gate) AcquireRefine() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.fixes > 0 || g.analyses > 0 {
+	if g.setup || g.runtime || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.refine++
@@ -99,7 +98,7 @@ func (g *Gate) AcquireFix() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.analyses > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.fixes++
@@ -110,30 +109,6 @@ func (g *Gate) AcquireFix() (func(), error) {
 		if !released {
 			released = true
 			g.fixes--
-		}
-	}, nil
-}
-
-// AcquireAnalysis reserves the short-lived, agentic Analyze enqueue slot.
-// It uses the shared lifecycle gate so setup, runtime control, review
-// mutations, Panel Refine, Fix, and another analysis cannot race one another.
-func (g *Gate) AcquireAnalysis() (func(), error) {
-	if g == nil {
-		return nil, ErrBusy
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.analyses > 0 {
-		return nil, ErrBusy
-	}
-	g.analyses++
-	released := false
-	return func() {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		if !released {
-			released = true
-			g.analyses--
 		}
 	}, nil
 }
@@ -180,7 +155,7 @@ func (g *Gate) AcquireRuntimeControl() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.analyses > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.runtime = true
@@ -212,7 +187,6 @@ type DetailedSnapshot struct {
 	Refine           int
 	Mutations        int
 	Fixes            int
-	Analyses         int
 	RepositoryLeases int
 }
 
@@ -222,5 +196,5 @@ func (g *Gate) SnapshotDetailed() DetailedSnapshot {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return DetailedSnapshot{Setup: g.setup, RuntimeControl: g.runtime, Refine: g.refine, Mutations: g.mutations, Fixes: g.fixes, Analyses: g.analyses, RepositoryLeases: len(g.repositories)}
+	return DetailedSnapshot{Setup: g.setup, RuntimeControl: g.runtime, Refine: g.refine, Mutations: g.mutations, Fixes: g.fixes, RepositoryLeases: len(g.repositories)}
 }

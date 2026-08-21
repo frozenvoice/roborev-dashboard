@@ -36,11 +36,18 @@ describe('setup theme stylesheet contract', () => {
     expect(darkTheme).toContain('--setup-progress-track:#303943')
   })
 
-  it('keeps selected Analyze scope labels on a dark-mode-safe semantic token', () => {
-    const selectedScope = declaration('analyze-scope label.selected')
-    expect(selectedScope).toContain('background:var(--setup-runtime-preview)')
-    expect(selectedScope).not.toContain('#faf8ff')
+  it('keeps the disabled Analyze execution state readable in light and dark themes', () => {
+    const disabledState = declaration('analyze-execution-disabled')
+    const disabledButton = declaration('analyze-execution-disabled .button[disabled]')
+    expect(disabledState).toContain('background:var(--setup-runtime-preview)')
+    expect(disabledButton).toContain('background:var(--panel)')
+    expect(disabledButton).toContain('color:var(--muted)')
+    expect(disabledButton).toContain('opacity:1')
     expect(stylesheet).toContain('--setup-runtime-preview:#202831')
+    expect(stylesheet).not.toContain('.analyze-scope')
+    expect(stylesheet).not.toContain('.analyze-command-preview')
+    expect(stylesheet).not.toContain('.analyze-receipt')
+    expect(stylesheet).not.toContain('.analyze-dialog')
   })
 
   it('keeps Analyze usable at a 390px viewport through its mobile media contract', () => {
@@ -51,8 +58,8 @@ describe('setup theme stylesheet contract', () => {
     const mobileAnalyze = mobileMatch?.[2] ?? ''
     expect(mobileAnalyze).toContain('.analyze-page{padding:23px 12px}')
     expect(mobileAnalyze).toContain('.analyze-grid{grid-template-columns:1fr}')
-    expect(mobileAnalyze).toContain('.analyze-receipt dl{grid-template-columns:repeat(2,minmax(0,1fr))}')
-    expect(mobileAnalyze).toContain('.analyze-dialog{max-height:96vh}')
-    expect(mobileAnalyze).toContain('.analyze-command-preview{max-height:300px;overflow:auto}')
+    expect(mobileAnalyze).toContain('.analyze-inline-actions{justify-content:stretch}')
+    expect(mobileAnalyze).toContain('.analyze-inline-actions .button{width:100%}')
+    expect(mobileAnalyze).toContain('.analyze-execution-disabled .button[disabled]{min-height:40px}')
   })
 })

@@ -2,37 +2,34 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
-	"github.com/froze/roborev-dashboard/internal/analysis"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
 type analysisHTTPService struct {
 	fakeService
-	analysisCalls int
+	typesCalls  int
+	promptCalls int
+}
+
+func (f *analysisHTTPService) Installation(context.Context) roborev.Installation {
+	installation := f.fakeService.Installation(context.Background())
+	installation.Capabilities.AnalyzeIntrospection = true
+	return installation
 }
 
 func (f *analysisHTTPService) AnalysisTypes(context.Context) ([]roborev.AnalysisType, error) {
+	f.typesCalls++
 	return []roborev.AnalysisType{{Name: "refactor", Description: "Suggest refactoring opportunities"}}, nil
 }
 
 func (f *analysisHTTPService) AnalysisPrompt(context.Context, string) (string, error) {
+	f.promptCalls++
 	return "prompt template", nil
-}
-
-func (f *analysisHTTPService) Analyze(_ context.Context, request roborev.AnalyzeRequest) (roborev.AnalysisReceipt, error) {
-	f.analysisCalls++
-	return roborev.AnalysisReceipt{Jobs: []roborev.AnalysisJob{{ID: 81, Agent: "codex"}}, AnalysisType: request.AnalysisType, Files: []string{"./..."}}, nil
-}
-
-func (f *analysisHTTPService) Installation(context.Context) roborev.Installation {
-	return roborev.Installation{Installed: true, Version: "v0.64.0", Binary: `C:\tools\roborev.exe`, Status: json.RawMessage(`{"running":true,"known":true}`), Capabilities: roborev.Capabilities{AnalyzeCommand: true}}
 }
 
 func setupAnalysisServer(t *testing.T) (*Server, *analysisHTTPService) {
@@ -49,105 +46,108 @@ func setupAnalysisServer(t *testing.T) (*Server, *analysisHTTPService) {
 	return server, service
 }
 
-func TestAnalysisRoutesRequireTypedInputsAndConfirmation(t *testing.T) {
+func TestAnalysisReadRoutesRequireStrictBrowserAuthorizationBeforeService(t *testing.T) {
+	routes := []struct {
+		name    string
+		target  string
+		calls   func(*analysisHTTPService) int
+		content string
+	}{
+		{name: "types", target: "/api/analyses/types", calls: func(service *analysisHTTPService) int { return service.typesCalls }, content: "refactor"},
+		{name: "prompt", target: "/api/analyses/prompt?type=refactor", calls: func(service *analysisHTTPService) int { return service.promptCalls }, content: "prompt template"},
+	}
+	cases := []struct {
+		name   string
+		origin string
+		native bool
+		query  bool
+	}{
+		{name: "explicit exact origin", origin: "same"},
+		{name: "native fetch metadata", native: true},
+		{name: "foreign origin", origin: "http://evil.test"},
+		{name: "null origin", origin: "null"},
+		{name: "duplicate origin", origin: "duplicate"},
+		{name: "missing fetch metadata"},
+		{name: "cross site fetch metadata", native: true, origin: "cross-site"},
+		{name: "unauthorized invalid query", query: true},
+	}
+	for _, route := range routes {
+		for _, test := range cases {
+			t.Run(route.name+"/"+test.name, func(t *testing.T) {
+				server, service := setupAnalysisServer(t)
+				target := route.target
+				if test.query {
+					separator := "?"
+					if strings.Contains(target, "?") {
+						separator = "&"
+					}
+					target += separator + "unexpected=x"
+				}
+				request := httptest.NewRequest(http.MethodGet, target, nil)
+				switch {
+				case test.origin == "same":
+					request.Header.Set("Origin", "http://"+request.Host)
+				case test.origin == "duplicate":
+					request.Header.Add("Origin", "http://"+request.Host)
+					request.Header.Add("Origin", "http://"+request.Host)
+				case test.origin == "cross-site":
+					request.Header.Set("Sec-Fetch-Site", "same-origin")
+					request.Header.Set("Sec-Fetch-Mode", "cors")
+					request.Header.Set("Sec-Fetch-Dest", "empty")
+				case test.origin != "":
+					request.Header.Set("Origin", test.origin)
+				case test.native:
+					request.Header.Set("Sec-Fetch-Site", "same-origin")
+					request.Header.Set("Sec-Fetch-Mode", "cors")
+					request.Header.Set("Sec-Fetch-Dest", "empty")
+				}
+				if test.origin == "cross-site" {
+					request.Header.Set("Sec-Fetch-Site", "cross-site")
+				}
+				before := route.calls(service)
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, request)
+				allowed := test.name == "explicit exact origin" || test.name == "native fetch metadata"
+				if allowed {
+					if response.Code != http.StatusOK || route.calls(service)-before != 1 || !strings.Contains(response.Body.String(), route.content) {
+						t.Fatalf("status=%d calls delta=%d body=%s", response.Code, route.calls(service)-before, response.Body.String())
+					}
+					return
+				}
+				if response.Code != http.StatusForbidden || route.calls(service) != before {
+					t.Fatalf("status=%d calls before=%d after=%d body=%s", response.Code, before, route.calls(service), response.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestAnalysisExecutionRoutesAreExplicitDisabledTombstones(t *testing.T) {
 	server, service := setupAnalysisServer(t)
-	identity, err := server.Registry.Identity(`E:\repo`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	typesRequest := httptest.NewRequest(http.MethodGet, "/api/analyses/types", nil)
-	typesResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(typesResponse, typesRequest)
-	if typesResponse.Code != http.StatusOK || !strings.Contains(typesResponse.Body.String(), "refactor") {
-		t.Fatalf("types response = %d %s", typesResponse.Code, typesResponse.Body.String())
-	}
-
-	previewRequest := httptest.NewRequest(http.MethodGet, "/api/analyses/preview?repositoryIdentity="+url.QueryEscape(identity)+"&type=refactor&scope=repository", nil)
+	preview := httptest.NewRequest(http.MethodGet, "/api/analyses/preview?repositoryIdentity=foreign&type=refactor&scope=repository", nil)
 	previewResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(previewResponse, previewRequest)
-	if previewResponse.Code != http.StatusOK {
-		t.Fatalf("preview response = %d %s", previewResponse.Code, previewResponse.Body.String())
-	}
-	var preview struct {
-		PreviewToken string `json:"previewToken"`
-		Command      struct {
-			Executable string   `json:"executable"`
-			Args       []string `json:"args"`
-		} `json:"command"`
-	}
-	if err := json.Unmarshal(previewResponse.Body.Bytes(), &preview); err != nil || preview.PreviewToken == "" {
-		t.Fatalf("preview = %#v, error = %v", preview, err)
-	}
-	if got := strings.Join(preview.Command.Args, " "); got != "analyze refactor ./... --json" {
-		t.Fatalf("preview args = %q", got)
+	server.Handler().ServeHTTP(previewResponse, preview)
+	if previewResponse.Code != http.StatusNotImplemented || !strings.Contains(previewResponse.Body.String(), "analysis-execution-disabled") {
+		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
 	}
 
-	bodyBytes, err := json.Marshal(analysisBody{RepositoryIdentity: identity, AnalysisType: "refactor", Scope: "repository", PreviewToken: preview.PreviewToken})
-	if err != nil {
-		t.Fatal(err)
+	post := httptest.NewRequest(http.MethodPost, "/api/analyses", strings.NewReader("not-json"))
+	post.Header.Set("Origin", "http://"+post.Host)
+	post.Header.Set("X-CSRF-Token", server.csrfToken)
+	postResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(postResponse, post)
+	if postResponse.Code != http.StatusNotImplemented || !strings.Contains(postResponse.Body.String(), "analysis-execution-disabled") {
+		t.Fatalf("post status=%d body=%s", postResponse.Code, postResponse.Body.String())
 	}
-	body := string(bodyBytes)
-	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/analyses", strings.NewReader(body))
+	if service.typesCalls != 0 || service.promptCalls != 0 {
+		t.Fatalf("execution tombstones touched service: types=%d prompt=%d", service.typesCalls, service.promptCalls)
+	}
+
+	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/analyses", strings.NewReader("not-json"))
+	withoutCSRF.Header.Set("Origin", "http://"+withoutCSRF.Host)
 	withoutCSRFResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(withoutCSRFResponse, withoutCSRF)
 	if withoutCSRFResponse.Code != http.StatusForbidden {
-		t.Fatalf("missing CSRF response = %d", withoutCSRFResponse.Code)
-	}
-	if service.analysisCalls != 0 {
-		t.Fatal("confirmation was bypassed")
-	}
-
-	confirmed := httptest.NewRequest(http.MethodPost, "/api/analyses", strings.NewReader(body))
-	confirmed.Header.Set("X-CSRF-Token", server.csrfToken)
-	confirmedResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(confirmedResponse, confirmed)
-	if confirmedResponse.Code != http.StatusAccepted || service.analysisCalls != 1 || !strings.Contains(confirmedResponse.Body.String(), `"id":81`) {
-		t.Fatalf("confirmed response = %d calls=%d %s", confirmedResponse.Code, service.analysisCalls, confirmedResponse.Body.String())
-	}
-
-	unknownBytes, err := json.Marshal(map[string]any{"repositoryIdentity": identity, "analysisType": "refactor", "scope": "repository", "previewToken": "x", "argv": []string{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unknown := httptest.NewRequest(http.MethodPost, "/api/analyses", strings.NewReader(string(unknownBytes)))
-	unknown.Header.Set("X-CSRF-Token", server.csrfToken)
-	unknownResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unknownResponse, unknown)
-	if unknownResponse.Code != http.StatusBadRequest {
-		t.Fatalf("unknown field response = %d", unknownResponse.Code)
-	}
-}
-
-func TestAnalysisPreviewRejectsDuplicateAndUnknownQueryFields(t *testing.T) {
-	server, _ := setupAnalysisServer(t)
-	identity, err := server.Registry.Identity(`E:\repo`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := "/api/analyses/preview?repositoryIdentity=" + url.QueryEscape(identity) + "&type=refactor&scope=repository"
-	for _, raw := range []string{base + "&type=security", base + "&argv=analyze"} {
-		request := httptest.NewRequest(http.MethodGet, raw, nil)
-		response := httptest.NewRecorder()
-		server.Handler().ServeHTTP(response, request)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("query %q returned %d, want 400", raw, response.Code)
-		}
-	}
-}
-
-func TestAnalysisErrorStatusMapsTypedKinds(t *testing.T) {
-	for _, test := range []struct {
-		kind analysis.ErrorKind
-		want int
-	}{
-		{kind: analysis.ErrorInvalid, want: http.StatusBadRequest},
-		{kind: analysis.ErrorForbidden, want: http.StatusForbidden},
-		{kind: analysis.ErrorConflict, want: http.StatusConflict},
-		{kind: analysis.ErrorUnavailable, want: http.StatusServiceUnavailable},
-		{kind: analysis.ErrorAmbiguous, want: http.StatusBadGateway},
-	} {
-		if got := analysisErrorStatus(&analysis.Error{Kind: test.kind}); got != test.want {
-			t.Fatalf("kind %s status = %d, want %d", test.kind, got, test.want)
-		}
+		t.Fatalf("missing CSRF status=%d", withoutCSRFResponse.Code)
 	}
 }

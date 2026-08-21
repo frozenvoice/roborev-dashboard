@@ -107,7 +107,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	}
 	var analyses *analysis.Manager
 	if analysisService, ok := service.(analysis.Service); ok {
-		analyses, err = analysis.NewManager(analysis.Dependencies{Registry: registry, RoboRev: analysisService, Binary: serviceBinary(service), Gate: gate})
+		analyses, err = analysis.NewManager(analysis.Dependencies{RoboRev: analysisService})
 		if err != nil {
 			return nil, err
 		}
@@ -171,11 +171,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.Fixes != nil {
 		if err := s.Fixes.Shutdown(ctx); err != nil {
-			shutdownErrors = append(shutdownErrors, err)
-		}
-	}
-	if s.Analyses != nil {
-		if err := s.Analyses.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
 		}
 	}
@@ -258,7 +253,7 @@ func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
 // The repository path is never accepted from the browser: identity lookup and
 // a fresh canonical-root inspection are centralized in Registry.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeEventStream(w, r) {
+	if !s.authorizeStrictBrowserRead(w, r) {
 		return
 	}
 	query := r.URL.Query()
@@ -434,8 +429,8 @@ func (s *Server) authorizeMutation(w http.ResponseWriter, r *http.Request) bool 
 }
 
 // authorizeSameOrigin protects mutations. Its absent-Origin compatibility is
-// intentional for local/non-browser clients; SSE uses the stricter
-// authorizeEventStream policy below.
+// intentional for local/non-browser clients; SSE and lazy analysis reads use
+// the stricter authorizeStrictBrowserRead policy below.
 func (s *Server) authorizeSameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origins := r.Header.Values("Origin")
 	if len(origins) == 0 {
@@ -448,14 +443,13 @@ func (s *Server) authorizeSameOrigin(w http.ResponseWriter, r *http.Request) boo
 	return true
 }
 
-// authorizeEventStream is deliberately stricter than mutation authorization:
-// subscribing can start a long-lived RoboRev process. An explicit Origin must
-// be the exact request origin. When browsers omit Origin, only the native
-// same-origin EventSource Fetch Metadata contract is accepted. Every metadata
-// header is required exactly once with its exact value, so missing, duplicate,
-// malformed, cross-site, and navigation requests fail closed before query or
-// registry/stream side effects.
-func (s *Server) authorizeEventStream(w http.ResponseWriter, r *http.Request) bool {
+// authorizeStrictBrowserRead protects reads that can expose lazy or live
+// upstream data. An explicit Origin must be the exact request origin. When
+// browsers omit Origin, only the native same-origin Fetch Metadata contract is
+// accepted. Every metadata header is required exactly once with its exact
+// value, so missing, duplicate, malformed, cross-site, and navigation requests
+// fail closed before query, registry, or service side effects.
+func (s *Server) authorizeStrictBrowserRead(w http.ResponseWriter, r *http.Request) bool {
 	origins := r.Header.Values("Origin")
 	if len(origins) > 0 {
 		if len(origins) != 1 || !s.sameOrigin(r, origins[0]) {
@@ -467,7 +461,7 @@ func (s *Server) authorizeEventStream(w http.ResponseWriter, r *http.Request) bo
 	if !exactHeaderValue(r.Header, "Sec-Fetch-Site", "same-origin") ||
 		!exactHeaderValue(r.Header, "Sec-Fetch-Mode", "cors") ||
 		!exactHeaderValue(r.Header, "Sec-Fetch-Dest", "empty") {
-		writeError(w, http.StatusForbidden, "same-origin stream request required", "origin")
+		writeError(w, http.StatusForbidden, "same-origin browser request required", "origin")
 		return false
 	}
 	return true
@@ -1076,20 +1070,17 @@ func analysisErrorStatus(err error) int {
 	switch typed.Kind {
 	case analysis.ErrorInvalid:
 		return http.StatusBadRequest
-	case analysis.ErrorForbidden:
-		return http.StatusForbidden
-	case analysis.ErrorConflict:
-		return http.StatusConflict
 	case analysis.ErrorUnavailable:
 		return http.StatusServiceUnavailable
-	case analysis.ErrorAmbiguous:
-		return http.StatusBadGateway
 	default:
 		return http.StatusInternalServerError
 	}
 }
 
 func (s *Server) analysisTypes(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
 	if s.Analyses == nil {
 		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
 		return
@@ -1109,6 +1100,9 @@ func (s *Server) analysisTypes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) analysisPrompt(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
 	if s.Analyses == nil {
 		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
 		return
@@ -1134,51 +1128,11 @@ func (s *Server) analysisPrompt(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) analysisPreview(w http.ResponseWriter, r *http.Request) {
-	if s.Analyses == nil {
-		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
-		return
-	}
-	query, err := analysisQuery(r, "repositoryIdentity", "type", "scope")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "request")
-		return
-	}
-	for _, name := range []string{"repositoryIdentity", "type", "scope"} {
-		if query[name] == "" {
-			writeError(w, http.StatusBadRequest, name+" is required", name)
-			return
-		}
-	}
-	preview, err := s.Analyses.Prepare(r.Context(), analysis.Request{RepositoryIdentity: query["repositoryIdentity"], AnalysisType: query["type"], Scope: query["scope"]})
-	if err != nil {
-		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-preview")
-		return
-	}
-	writeJSON(w, http.StatusOK, preview)
-}
-
-type analysisBody struct {
-	RepositoryIdentity string `json:"repositoryIdentity"`
-	AnalysisType       string `json:"analysisType"`
-	Scope              string `json:"scope"`
-	PreviewToken       string `json:"previewToken"`
+	writeError(w, http.StatusNotImplemented, "RoboRev v0.64 Analyze execution is disabled because v0.64 analysis jobs run in agentic mode.", "analysis-execution-disabled")
 }
 
 func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
-	if s.Analyses == nil {
-		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
-		return
-	}
-	var body analysisBody
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	result, err := s.Analyses.Start(r.Context(), analysis.StartRequest{Request: analysis.Request{RepositoryIdentity: body.RepositoryIdentity, AnalysisType: body.AnalysisType, Scope: body.Scope}, PreviewToken: body.PreviewToken})
-	if err != nil {
-		writeError(w, analysisErrorStatus(err), err.Error(), "analysis")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeError(w, http.StatusNotImplemented, "RoboRev v0.64 Analyze execution is disabled because v0.64 analysis jobs run in agentic mode.", "analysis-execution-disabled")
 }
 
 func (s *Server) listFixes(w http.ResponseWriter, r *http.Request) {

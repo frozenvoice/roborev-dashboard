@@ -22,8 +22,6 @@ import (
 
 const runtimeControlResponseLimit int64 = 256 << 10
 
-const daemonHealthSchemaURL = "http://127.0.0.1:7373/HealthStatus.json"
-
 var (
 	// ErrDaemonOffline is returned by queue operations when the daemon cannot
 	// serve its status endpoint.  A caller may use this to disable queue
@@ -90,30 +88,50 @@ func (c *Client) CheckDaemonHealth(ctx context.Context) (bool, error) {
 }
 
 type daemonHealthResponse struct {
-	// Schema is emitted by RoboRev v0.64.0's generated OpenAPI response. A
-	// pointer lets the decoder distinguish both a missing field and JSON null;
-	// both are rejected after decoding below.
-	Schema       *daemonHealthSchema     `json:"$schema"`
-	Healthy      bool                    `json:"healthy"`
-	Uptime       string                  `json:"uptime"`
-	Version      string                  `json:"version"`
-	Components   []daemonHealthComponent `json:"components"`
-	RecentErrors []daemonHealthError     `json:"recent_errors"`
-	ErrorCount   int                     `json:"error_count_24h"`
+	// Schema is emitted by RoboRev v0.64.0's generated OpenAPI response. The
+	// pointer plus schemaPresent bit distinguish an omitted field from a
+	// present value; the custom decoder rejects present null/non-string values.
+	Schema        *daemonHealthSchema     `json:"$schema"`
+	Healthy       bool                    `json:"healthy"`
+	Uptime        string                  `json:"uptime"`
+	Version       string                  `json:"version"`
+	Components    []daemonHealthComponent `json:"components"`
+	RecentErrors  []daemonHealthError     `json:"recent_errors"`
+	ErrorCount    int                     `json:"error_count_24h"`
+	schemaPresent bool
 }
 
 // daemonHealthSchema is deliberately a string wrapper so a present schema
-// must be a JSON string. The pointer on daemonHealthResponse handles the
-// required/presence part of the contract; encoding/json leaves it nil for
-// both an omitted and a null field.
+// must be a JSON string. daemonHealthResponse's custom decoder records field
+// presence separately so an omitted schema remains valid while null is not.
 type daemonHealthSchema string
 
 func (s *daemonHealthSchema) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New(`RoboRev daemon health "$schema" must be a string`)
+	}
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
 		return errors.New(`RoboRev daemon health "$schema" must be a string`)
 	}
 	*s = daemonHealthSchema(value)
+	return nil
+}
+
+func (h *daemonHealthResponse) UnmarshalJSON(data []byte) error {
+	type plain daemonHealthResponse
+	var decoded plain
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, decoded.schemaPresent = fields["$schema"]
+	*h = daemonHealthResponse(decoded)
 	return nil
 }
 
@@ -165,11 +183,8 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 		}
 		return daemonHealthResponse{}, fmt.Errorf("malformed RoboRev daemon health: %w", err)
 	}
-	if health.Schema == nil {
-		return daemonHealthResponse{}, errors.New(`malformed RoboRev daemon health: "$schema" is required and must be a non-null string`)
-	}
-	if string(*health.Schema) != daemonHealthSchemaURL {
-		return daemonHealthResponse{}, fmt.Errorf(`malformed RoboRev daemon health: "$schema" must equal %q`, daemonHealthSchemaURL)
+	if health.schemaPresent && health.Schema == nil {
+		return daemonHealthResponse{}, errors.New(`malformed RoboRev daemon health: "$schema" must be a string`)
 	}
 	return health, nil
 }

@@ -153,28 +153,3 @@ func TestFixLeaseIsGloballyBidirectionalWithSetupAndRuntime(t *testing.T) {
 	}
 	releaseRuntime()
 }
-
-func TestAnalysisLeaseSharesGlobalGateAndReleasesIdempotently(t *testing.T) {
-	g := NewGate()
-	releaseAnalysis, err := g.AcquireAnalysis()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := g.AcquireSetup(); !errors.Is(err, ErrBusy) {
-		t.Fatalf("setup during analysis = %v", err)
-	}
-	if _, err := g.AcquireMutation(); !errors.Is(err, ErrBusy) {
-		t.Fatalf("mutation during analysis = %v", err)
-	}
-	if _, err := g.AcquireFix(); !errors.Is(err, ErrBusy) {
-		t.Fatalf("fix during analysis = %v", err)
-	}
-	if got := g.SnapshotDetailed(); got.Analyses != 1 {
-		t.Fatalf("analysis snapshot = %#v", got)
-	}
-	releaseAnalysis()
-	releaseAnalysis()
-	if got := g.SnapshotDetailed(); got.Analyses != 0 {
-		t.Fatalf("analysis lease remained after release: %#v", got)
-	}
-}

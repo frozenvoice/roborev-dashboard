@@ -73,6 +73,9 @@ func TestCapabilitiesGateDaemonContractsByVersion(t *testing.T) {
 	if !capabilities("v0.64.0").FrozenRerunAPI {
 		t.Fatal("v0.64 must expose frozen-target rerun")
 	}
+	if !capabilities("v0.64.0").AnalyzeIntrospection || capabilities("v0.65.0").AnalyzeIntrospection {
+		t.Fatal("analysis introspection must be gated to exact v0.64.0")
+	}
 	if capabilities("v0.64.9").FixCommand || capabilities("v0.65.0").FixCommand {
 		t.Fatal("fix command must be gated to the exact verified v0.64.0 policy")
 	}
