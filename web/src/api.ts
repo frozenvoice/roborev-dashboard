@@ -558,6 +558,7 @@ export type ReviewJob = {
   id: number
   job_id?: number
   uuid?: string
+  job_uuid?: string
   repo_path?: string
   repo_name?: string
   git_ref?: string

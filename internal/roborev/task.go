@@ -413,6 +413,11 @@ func (c *Client) RunTask(ctx context.Context, request TaskRequest) (TaskReceipt,
 		StdinLimit:  TaskMaxBytes,
 		Timeout:     TaskTimeout,
 		OutputLimit: TaskOutputLimit,
+		// RoboRev v0.64's run command can ensure/start its daemon after the
+		// CLI is accepted. Only this verified task enqueue child opts out of
+		// the Windows KILL_ON_JOB_CLOSE tree; the bounded CLI itself remains
+		// cancelable through CommandContext.
+		AllowDetachedChildren: true,
 	})
 	if runErr != nil && !result.Started {
 		return TaskReceipt{}, taskError(TaskErrorUnavailable, ErrTaskProcessStart)

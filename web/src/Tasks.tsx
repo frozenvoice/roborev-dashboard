@@ -190,6 +190,10 @@ export function Tasks({ repository, jobs, daemonReady = true, onOpenReview, onQu
   const safe = Boolean(preview && !preview.safety.allowUnsafeAgents && !preview.safety.disableCodexSandbox)
 
   const onTaskChange = (next: string) => {
+    // The native disabled state covers user input while confirmation or the
+    // enqueue POST is active; keep this guard for synthetic/programmatic
+    // change events too. In-flight work must never lose its scope or lock.
+    if (confirming || submitting) return
     generation.current++
     setTask(next)
     setPreview(null)
@@ -252,6 +256,7 @@ export function Tasks({ repository, jobs, daemonReady = true, onOpenReview, onQu
         setReceipt(parsed)
         setReceiptTask(task)
         setOutcome(null)
+        setSubmitting(false)
         void onQueued?.(parsed)
       }
     } catch (error) {
@@ -263,6 +268,7 @@ export function Tasks({ repository, jobs, daemonReady = true, onOpenReview, onQu
       if (ambiguous) {
         setOutcome('ambiguous')
         setOutcomeMessage(t('tasks.ambiguousBody'))
+        setSubmitting(false)
         // An enqueue may already have reached the daemon; never blindly retry.
       } else {
         setPreviewError(apiError.message)
@@ -284,7 +290,7 @@ export function Tasks({ repository, jobs, daemonReady = true, onOpenReview, onQu
       <section className="task-composer" aria-labelledby="tasks-composer-title">
         <div className="task-card-heading"><div><h2 id="tasks-composer-title">{t('tasks.customTask')}</h2><p>{t('tasks.repositoryScoped')}</p></div><span className="task-badge"><ShieldCheck size={15} />{t('tasks.readOnly')}</span></div>
         <label htmlFor="task-input">{t('tasks.task')}</label>
-        <textarea id="task-input" value={task} onChange={event => onTaskChange(event.target.value)} placeholder={t('tasks.placeholder')} rows={8} spellCheck="false" />
+        <textarea id="task-input" value={task} onChange={event => onTaskChange(event.target.value)} placeholder={t('tasks.placeholder')} rows={8} spellCheck="false" disabled={confirming || submitting} />
         <div className="task-input-meta"><span>{task ? `${new TextEncoder().encode(task).byteLength.toLocaleString()} / ${TASK_MAX_BYTES.toLocaleString()} ${t('common.bytes')}` : t('tasks.exactPreserved')}</span>{validation && <span className="task-validation" role="alert">{t(`tasks.validation.${validation}` as never)}</span>}</div>
         <p className="task-context-hint">{t('tasks.contextHint')}</p>
         <p className="task-safety-copy">{t('tasks.agenticWarning')} {t('tasks.safetyFailClosed')}</p>

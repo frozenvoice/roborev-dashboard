@@ -188,7 +188,7 @@ func TestRunTaskFreshPreflightAndExactStdinCommand(t *testing.T) {
 	}
 	command := commands[1]
 	wantArgs := []string{"run", "--agent", "codex", "--json"}
-	if command.Executable != `C:\trusted\roborev.exe` || command.Dir != `E:\registered repo` || !reflect.DeepEqual(command.Args, wantArgs) || command.Stdin != task || command.StdinLimit != TaskMaxBytes || command.Timeout != TaskTimeout || command.OutputLimit != TaskOutputLimit {
+	if command.Executable != `C:\trusted\roborev.exe` || command.Dir != `E:\registered repo` || !reflect.DeepEqual(command.Args, wantArgs) || command.Stdin != task || command.StdinLimit != TaskMaxBytes || command.Timeout != TaskTimeout || command.OutputLimit != TaskOutputLimit || !command.AllowDetachedChildren {
 		t.Fatalf("task command=%#v", command)
 	}
 }

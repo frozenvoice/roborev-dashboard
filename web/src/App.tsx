@@ -347,6 +347,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const text = outputOf(current)
   const memberText = outputOf(memberDetail)
   const terminal = !isRunning(current)
+  const isTaskResult = current.job_type === 'task' || current.git_ref === 'run'
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
   const openFixPrompt = (value: FixPromptResponse) => { setFixPrompt(value); setFixPromptText(value.text) }
@@ -414,7 +415,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       {isRunning(current) && <button className="button danger" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/cancel`)}><CircleStop size={16} />{t('review.cancel')}</button>}
       {terminal && !isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/close`)}><Check size={16} />{t('review.close')}</button>}
       {terminal && isClosed(current) && <button className="button" disabled={busy} onClick={() => mutate(`/api/reviews/${id}/reopen`)}><RotateCcw size={16} />{t('review.reopen')}</button>}
-      {terminal && canRerun && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm(t('review.rerunConfirm', { id }))) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />{t('review.rerun')}</button>}
+      {terminal && canRerun && !isTaskResult && <button className="button subtle rerun" disabled={busy} onClick={() => { if (confirm(t('review.rerunConfirm', { id }))) mutate(`/api/reviews/${id}/rerun`) }}><RefreshCw size={16} />{t('review.rerun')}</button>}
     </footer>
   </aside>{fixPrompt && <div className="prompt-overlay"><section className="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-prompt-title"><header><div><span className="eyebrow">{t('review.finding', { id: fixPrompt.jobId })}</span><h2 id="fix-prompt-title">{t('review.fixPrompt')}</h2><p>{fixPrompt.stale ? t('review.fixPromptStale') : t('review.fixPromptGenerated')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('review.closeFixPrompt')} onClick={() => setFixPrompt(null)}><X /></button></div></header><textarea aria-label={t('review.fixPromptAria')} value={fixPromptText} onChange={event => setFixPromptText(event.target.value)} rows={20} /><footer><button className="button" onClick={() => setFixPrompt(null)}>{t('common.close')}</button><button className="button primary" onClick={copyEditedFixPrompt}><Clipboard size={16} />{t('common.copy')}</button></footer></section></div>}</>
 }

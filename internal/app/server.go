@@ -1684,6 +1684,13 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job not found", "job")
 		return
 	}
+	// A run job is a Custom Task and cannot be replayed through the generic
+	// review rerun endpoint. Tasks require their own fresh safety preflight and
+	// explicit confirmation; otherwise this route would bypass that boundary.
+	if strings.TrimSpace(job.JobType) == "task" || strings.TrimSpace(job.GitRef) == "run" {
+		writeError(w, http.StatusConflict, "task jobs must be rerun through the Tasks workspace", "task-rerun-disabled")
+		return
+	}
 	if !s.Registry.Contains(job.RepoPath) {
 		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
 		return

@@ -108,6 +108,21 @@ describe('App review workflow', () => {
     expect(await screen.findByRole('button', { name: /Rerun same target\/config/ })).toBeInTheDocument()
   })
 
+  it('does not offer frozen rerun for a custom task result', async () => {
+    const taskJob = { ...jobs[0], id: 43, job_id: 43, job_type: 'task', git_ref: 'run', uuid: '00000000-0000-0000-0000-000000000043', status: 'done' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([taskJob])
+      if (path === '/api/reviews/43') return response(taskJob)
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByText(/#43/))
+    expect(await screen.findByRole('heading', { name: 'Initial dashboard checkpoint' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Rerun same target\/config/ })).not.toBeInTheDocument()
+  })
+
   it('renders finding state and safe review text', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)

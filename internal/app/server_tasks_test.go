@@ -18,6 +18,7 @@ type taskFakeService struct {
 	receipt        roborev.TaskReceipt
 	preflightCalls int
 	taskCalls      int
+	rerunCalls     int
 }
 
 func (f *taskFakeService) TaskPreflight(context.Context) (roborev.TaskPreflight, error) {
@@ -31,6 +32,11 @@ func (f *taskFakeService) RunTask(_ context.Context, request roborev.TaskRequest
 		return roborev.TaskReceipt{}, nil
 	}
 	return f.receipt, nil
+}
+
+func (f *taskFakeService) Rerun(context.Context, int64) error {
+	f.rerunCalls++
+	return nil
 }
 
 func setupTaskServer(t *testing.T) (*Server, *taskFakeService) {
@@ -179,5 +185,25 @@ func TestTaskStartRejectsForeignOriginBeforeAdapter(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden || service.taskCalls != 0 || service.preflightCalls != 0 {
 		t.Fatalf("status=%d taskCalls=%d preflightCalls=%d", recorder.Code, service.taskCalls, service.preflightCalls)
+	}
+}
+
+func TestGenericRerunRejectsTaskJobsBeforeRoboRevRerun(t *testing.T) {
+	server, service := setupTaskServer(t)
+	service.fakeService.panelMetadata = map[int64]roborev.JobMetadata{
+		42: {ID: 42, RepoPath: `E:\repo`, GitRef: "run", Branch: "main", JobType: "task", Status: "queued"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/reviews/42/rerun", nil)
+	req.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if service.rerunCalls != 0 {
+		t.Fatalf("Rerun calls = %d", service.rerunCalls)
+	}
+	if !strings.Contains(recorder.Body.String(), "task-rerun-disabled") {
+		t.Fatalf("body = %s", recorder.Body.String())
 	}
 }
