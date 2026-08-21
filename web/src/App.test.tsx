@@ -9,7 +9,8 @@ const bootstrap = {
   csrfToken: 'csrf', selectedRepository: 'E:\\repo', selectedRepositoryIdentity: 'repo-1', repositories: [{ identity: 'repo-1', name: 'repo', path: 'E:\\repo', branch: 'main', head: 'abcdef123456', headShort: 'abcdef12', commitSubject: 'Initial', dirty: false, hasConfig: true }],
   roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities: { reviewEnqueueApi: true, frozenRerunApi: true, jobListApi: true, jobOutputStatusApi: true, panelReview: true, fixCommand: true, panelMembersApi: true, promptLazyLoad: true, rawLog: true, streamEvents: true } },
 }
-const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
+const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashboard checkpoint', branch: 'main', status: 'done', verdict: 'F', job_type: 'synthesis', panel_role: 'synthesis', panel_name: 'dashboard_cross', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', closed: false, enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding\nActionable issue' } }]
+async function openFixRefine() { await userEvent.click(screen.getByRole('button', { name: 'Fix & Refine' })) }
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
 const setupReady = { status: 'ready', phase: 'ready', operationActive: false, installed: true, binaryPath: 'C:\\Tools\\roborev.exe', version: 'v0.64.0', recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: true, blocked: false, retryable: false, installAvailable: false, canInstall: false, canRetry: false, canStartDaemon: false, architecture: 'windows-amd64', sourceURL: 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0', sourceLabel: 'Official GitHub release', assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev.exe', downloadedBytes: 1200, totalBytes: 1200 }
 const setupAgents = { repositoryIdentity: 'repo-1', roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
@@ -73,7 +74,7 @@ class FakeEventSource {
   fail() { this.onerror?.() }
 }
 
-afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers(); vi.restoreAllMocks(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
 
 describe('App review workflow', () => {
   it('keeps Review HEAD distinct from frozen rerun', async () => {
@@ -1179,7 +1180,7 @@ describe('App review workflow', () => {
     selection.resolve(new Response(JSON.stringify({ error: 'stale selection failure' }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(screen.queryByText('stale selection failure')).not.toBeInTheDocument()
-    expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('alpha')
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('alpha'))
   })
 
   it('restores the server-selected repository after a repo switch fails', async () => {
@@ -1456,6 +1457,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     expect(await screen.findByText('Reviewing')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: '#42' }))
@@ -1484,6 +1486,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     expect(await screen.findByText('Reviewing')).toBeInTheDocument()
     await vi.advanceTimersByTimeAsync(4_000)
     expect(await screen.findByRole('alert')).toHaveTextContent('refine refresh failed')
@@ -1508,6 +1511,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     await waitFor(() => expect(refineCalls).toBe(1))
     expect(await screen.findByRole('alert')).toHaveTextContent('initial refine refresh failed')
     await vi.advanceTimersByTimeAsync(2_000)
@@ -1531,6 +1535,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue('repo-1'))
     fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: otherRepository.identity } })
     await waitFor(() => expect(screen.getByText('222222222222')).toBeInTheDocument())
@@ -1559,6 +1564,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     await userEvent.click(await screen.findByRole('button', { name: 'Open Final Review' }))
     fireEvent.change(screen.getByRole('combobox', { name: 'Current repository' }), { target: { value: otherRepository.identity } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(otherRepository.identity))
@@ -1578,6 +1584,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     expect(await screen.findByText('Reviewing')).toBeInTheDocument()
   })
 
@@ -1591,6 +1598,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
     expect(trigger).toBeDisabled()
     expect(screen.getByRole('status')).toHaveTextContent('daemon is not running')
@@ -1624,6 +1632,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
     await waitFor(() => expect(trigger).toBeEnabled())
     await userEvent.click(trigger)
@@ -1641,6 +1650,7 @@ describe('App review workflow', () => {
       return response({ success: true })
     }))
     render(<App />)
+    await openFixRefine()
     await screen.findByText('Reviewing')
     await userEvent.click(screen.getByRole('button', { name: 'Cancel Panel Refine' }))
     expect(await screen.findByText('cancel rejected')).toHaveClass('toast', 'error')
@@ -2287,6 +2297,89 @@ describe('App review workflow', () => {
     expect(calls.length).toBe(beforeCalls)
     expect(calls.some(call => call.method === 'POST')).toBe(false)
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
+  })
+
+  it.each(['reviewing', 'needs_attention'])('shows only a compact Reviews summary for an active or attention refine and navigates to Fix & Refine', async phase => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([refineRun({ phase })]))
+      if (path.startsWith('/api/fixes?')) return response({ operations: [], operation: null })
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await screen.findByText(/#42/)
+    expect(screen.queryByRole('heading', { name: 'Panel Refine' })).not.toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: 'Open Fix & Refine' }))
+    expect(await screen.findByRole('heading', { name: 'Fix & Refine' })).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { name: 'Panel Refine' }).length).toBeGreaterThan(0)
+    expect(screen.queryByText('Checkpoint roadmap')).not.toBeInTheDocument()
+  })
+
+  it('preselects a parent finding in Fix & Refine without executing a fix', async () => {
+    const calls: Array<{ path: string; method: string }> = []
+    const fixPreview = { repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', target: { jobId: 42, gitRef: jobs[0].git_ref, branch: 'main', jobType: 'synthesis', panelRole: 'synthesis', panelName: 'dashboard_cross' }, agent: 'codex', command: { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: jobs[0].git_ref, startingBranch: 'main', previewToken: 'preview-42' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, method: init?.method ?? 'GET' })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
+      if (path === '/api/reviews/42') return response(jobs[0])
+      if (path.startsWith('/api/fixes/preview')) return response(fixPreview)
+      if (path.startsWith('/api/fixes?')) return response({ operations: [], operation: null })
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Fix' }))
+    expect(await screen.findByRole('heading', { name: 'Fix & Refine' })).toBeInTheDocument()
+    expect(await screen.findByRole('combobox', { name: 'Finding to fix' })).toHaveValue('42')
+    expect(calls.filter(call => call.method === 'POST')).toHaveLength(0)
+  })
+
+  it('preselects an omitted-role single finding from Reviews without executing a fix', async () => {
+    const single = { ...jobs[0], job_type: 'review', panel_role: undefined, panel_name: undefined, panel_run_uuid: undefined }
+    const fixPreview = { repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', target: { jobId: 42, gitRef: single.git_ref, branch: 'main', jobType: 'review', panelRole: '' }, agent: 'codex', command: { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: single.git_ref, startingBranch: 'main', previewToken: 'preview-single-42' }
+    const calls: Array<{ path: string; method: string }> = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, method: init?.method ?? 'GET' })
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([single])
+      if (path === '/api/reviews/42') return response(single)
+      if (path.startsWith('/api/fixes/preview')) return response(fixPreview)
+      if (path.startsWith('/api/fixes?')) return response({ operations: [], operation: null })
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await userEvent.click(await screen.findByText(/#42/))
+    await userEvent.click(await screen.findByRole('button', { name: 'Fix' }))
+    expect(await screen.findByRole('heading', { name: 'Fix & Refine' })).toBeInTheDocument()
+    expect(await screen.findByRole('combobox', { name: 'Finding to fix' })).toHaveValue('42')
+    expect(calls.filter(call => call.method === 'POST')).toHaveLength(0)
+  })
+
+  it('hides executable Fix action while viewing a panel member', async () => {
+    const parent = jobs[0]
+    const member = { id: 43, job_type: 'review', panel_role: 'member', panel_name: parent.panel_name, panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Security reviewer', status: 'done', verdict: 'F', agent: 'codex' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([parent])
+      if (path === '/api/reviews/42') return response(parent)
+      if (path.includes('/members/43')) return response(memberShow(member, 'member output'))
+      if (path.startsWith('/api/panels/')) return response({ jobs: [member] })
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await userEvent.click(await screen.findByText(/#42/))
+    expect(await screen.findByRole('button', { name: 'Fix' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Panel members' }))
+    await userEvent.click(await screen.findByRole('button', { name: /Security reviewer/ }))
+    await screen.findByText('member output')
+    expect(screen.queryByRole('button', { name: 'Fix' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm and run fix' })).not.toBeInTheDocument()
   })
 })
 

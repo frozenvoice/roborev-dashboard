@@ -90,6 +90,10 @@ review 목록은 v0.64.0의 `/api/jobs?repo=...&omit_prompt=true`를 사용하�
 
 repository 전환 시 panel catalog도 별도 current-generation request로 읽는다. valid saved preference가 있으면 복원하고, named panel이 하나면 자동 선택하며, 여러 개면 사용자 선택 전까지 Review HEAD를 막고, named panel이 없을 때만 reserved `none`을 자동 선택한다. 사용자가 선택하거나 Review HEAD를 누를 때 backend는 fresh repository identity와 current TOML을 다시 resolve해 exact panel 또는 built-in `none`만 daemon JSON enqueue에 전달한다.
 
+### 화면과 작업 진입점
+
+Sidebar의 `Fix & Refine`는 더 이상 placeholder가 아니다. 기존 Panel Refine 화면은 이 화면의 full workflow surface로 이동하고, General Fix의 terminal F single review와 panel synthesis parent도 같은 화면에서 선택한다. `Reviews`는 review 목록과 상세를 계속 소유하되 Panel Refine의 전체 조작 화면을 중복 렌더링하지 않는다. active 또는 `needs_attention`인 Panel Refine이 있으면 `Reviews`에는 compact summary만 표시하고, 사용자가 `Fix & Refine`로 이동해 해당 operation을 재개한다. Summary의 링크와 operation의 repository identity/generation은 현재 선택 repository와 일치할 때만 동작한다. `Review HEAD`와 `Rerun same target/config`는 계속 별개의 primary/advanced action이며 General Fix 진입점으로 재사용하지 않는다.
+
 ### Frontend localization
 
 `web/src/i18n.tsx`는 English source catalog와 exact-key Korean catalog, `Locale = 'ko' | 'en'`, `roborev-dashboard-language` storage key, guarded storage access와 browser fallback을 한 곳에서 소유한다. `I18nProvider`의 `t`/`format` callback은 locale 전환에도 stable identity를 유지하고 `<html lang>`만 presentation 상태로 갱신한다. App은 stable navigation/repository/panel/review IDs와 번역된 표시 label을 분리하며 locale 변경을 fetch/effect dependency나 React key/remount 조건으로 사용하지 않는다.
@@ -113,6 +117,16 @@ Panel Refine은 React effect가 아니라 Dashboard backend process가 소유하
 Review 완료 직후의 재검증과 repository identity lock은 사용자가 외부에서 commit, edit, checkout 또는 path retarget을 한 stale finding의 자동 적용을 막는다. 각 enqueue, polling, fix에는 짧은 bounded timeout을 두며 전체 run에도 명시적인 safety ceiling을 둔다. 취소 중 review는 RoboRev cancel을 best-effort로 호출하고, 취소 중 fix는 context cancellation으로 child process를 중단한다. 취소 후 fresh inspection 결과는 `cancelState`의 availability, HEAD, branch, dirty 및 inspection error로 run에 기록하며 clean을 추측하지 않는다.
 
 v0.64.0의 `fix`는 fix agent가 새 commit을 만든 뒤 panel 없는 default review를 자동 enqueue할 수 있다. Dashboard는 선택한 panel의 새 HEAD review를 별도로 enqueue하므로, 이 upstream 동작으로 unrelated extra review가 생길 수 있다. Dashboard는 응답이나 이름만으로 이를 추측해 억제하지 않으며, 해당 중복 제거는 upstream capability가 제공될 때 별도 version-gated 계약으로 다룬다.
+
+### General Fix
+
+General Fix는 Panel Refine의 반복 workflow와 별개인 명시적 단일 fix operation이다. Dashboard가 지원하는 exact RoboRev v0.64.0의 upstream contract는 positive decimal job ID를 positional target으로 받는 `fix --agent codex --quiet <job-id>`다. v0.64.0의 `fix`는 현재 checkout에서 agent를 실행하며 시작 시 dirty tree나 review target의 stale HEAD를 차단하지 않는다. stdout/stderr는 machine-readable 결과 계약이 아니고, exit 0도 no-change 또는 dirty worktree인 채 job이 닫힌 경우를 배제하지 않는다. commit이 생성되면 RoboRev가 panel 없는 default review enqueue를 시도할 수 있으므로 Dashboard는 그 부수 job을 성공 근거로 추측하거나 억제하지 않는다. 이 동작은 [v0.64.0 fix source](https://github.com/kenn-io/roborev/blob/v0.64.0/cmd/roborev/fix.go)와 [assisted-refactoring guide](https://github.com/kenn-io/roborev/blob/v0.64.0/docs/guides/assisted-refactoring.md)를 기준으로 version-gated 한다.
+
+Dashboard는 upstream의 느슨한 실행 전제를 안전 경계로 보강한다. 요청은 선택된 registered repository의 opaque `repositoryIdentity`와 positive `targetJobId`만 받으며, backend가 fresh registry/ownership lookup과 job metadata를 다시 확인한다. 대상은 명시적으로 `status=done`, `verdict=F`, `closed=false`, `skipped=false`인 terminal review여야 하며 single review 또는 panel synthesis parent만 허용한다. panel member ID, synthesis가 아닌 다른 panel row, PASS/running/canceled/closed job은 General Fix 대상이 아니다. 시작 시 current branch와 target job의 full `git_ref`/HEAD가 같고 working tree가 clean이어야 한다. stale, dirty, branch/identity drift는 자동 보정하지 않고 conflict로 거부한다.
+
+Preview/prepare 단계는 backend가 fresh authorization으로 만든 opaque preview token과 exact executable/argument array를 반환한다. Browser는 executable, job ID 이외의 argv, finding text, prompt, diff 또는 arbitrary command를 제출하지 않으며, preview에 표시된 command가 confirmation 대상이다. 확인 POST는 token을 재사용하더라도 repository, target, branch, HEAD, clean state와 authorization을 다시 검사하고 같은 typed command builder로 argv를 다시 생성한다. Browser request의 lifetime과 분리된 process-scoped manager가 operation을 `running`, `succeeded`, `failed`, `cancelled` 같은 명시 상태로 소유한다. API는 `GET /api/fixes/preview`, `POST /api/fixes`(확인된 실행), `GET /api/fixes`, `GET /api/fixes/{id}`, `POST /api/fixes/{id}/cancel`을 제공하며, cancel과 Dashboard shutdown은 context와 child process를 정리한다. browser disconnect나 reload는 실행을 암묵적으로 취소하지 않고, process restart 뒤 active operation을 resume하지 않는다.
+
+General Fix는 shared global operation gate와 repository-scoped lease를 사용한다. global gate는 Setup/runtime control/Panel Refine/Review·Rerun을 포함한 다른 mutation과 active Fix를 상호 배제하고, repository lease는 Panel Refine 및 Review/Rerun과 같은 repository의 worktree 경쟁을 fail-fast conflict으로 거부한다. read-only 조회는 허용한다. process runner는 shell 없이 validated executable과 argument slice를 사용하며 stdout/stderr와 오류는 bounded status/error summary만 보존한다. 실행 완료 후 backend는 fresh Git inspection으로 같은 registered identity와 branch, HEAD advancement, clean tree를 모두 확인한다. exit 0이더라도 commit/HEAD가 전진하지 않았거나 dirty, branch 변경, identity drift, process/cancel/timeout 오류가 있으면 성공으로 표시하지 않고 `failed` 또는 `cancelled`로 남긴다. 성공·실패·취소 뒤에는 UI 추측 상태를 갱신하지 않고 Reviews와 Fix & Refine의 authoritative API를 다시 조회한다.
 
 ## 확장 원칙
 

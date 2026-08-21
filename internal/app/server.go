@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
+	"github.com/froze/roborev-dashboard/internal/fixoperation"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/operation"
@@ -33,6 +34,7 @@ type Server struct {
 	Registry    *Registry
 	Panels      roborev.PanelCatalogResolver
 	Refines     *refine.Manager
+	Fixes       *fixoperation.Manager
 	Setup       *setup.Manager
 	Agents      *agentstatus.Service
 	Runtime     *runtimecontrol.Manager
@@ -86,6 +88,10 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if err != nil {
 		return nil, err
 	}
+	fixes, err := fixoperation.NewManager(fixoperation.Dependencies{Registry: registry, RoboRev: service, Binary: serviceBinary(service), Gate: gate})
+	if err != nil {
+		return nil, err
+	}
 	if setupManager != nil {
 		setupManager.SetGate(gate)
 	}
@@ -107,7 +113,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -154,6 +160,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			shutdownErrors = append(shutdownErrors, err)
 		}
 	}
+	if s.Fixes != nil {
+		if err := s.Fixes.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.Setup != nil {
 		if err := s.Setup.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -179,9 +190,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/repos/panels", s.repositoryPanels)
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
+	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
+	s.mux.HandleFunc("GET /api/fixes", s.listFixes)
+	s.mux.HandleFunc("GET /api/fixes/{id}", s.getFix)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
 	s.mux.HandleFunc("POST /api/panel-refines", s.mutation(s.startPanelRefine))
 	s.mux.HandleFunc("POST /api/panel-refines/{id}/cancel", s.mutation(s.cancelPanelRefine))
+	s.mux.HandleFunc("POST /api/fixes", s.mutationAuth(s.startFix))
+	s.mux.HandleFunc("POST /api/fixes/{id}/cancel", s.mutationAuth(s.cancelFix))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
 	s.mux.HandleFunc("POST /api/reviews/{id}/close", s.mutation(s.closeReview))
@@ -362,6 +378,19 @@ func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		defer release()
+		next(w, r)
+	}
+}
+
+// mutationAuth applies same-origin and CSRF checks without reserving the
+// short-lived ordinary mutation slot. Process-scoped agentic operations own
+// their Fix lease after fresh validation and must not be blocked by this
+// request's handler lifetime.
+func (s *Server) mutationAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authorizeMutation(w, r) {
+			return
+		}
 		next(w, r)
 	}
 }
@@ -950,6 +979,137 @@ type panelRefineBody struct {
 	MaxFixAttempts int    `json:"maxFixAttempts"`
 	FinalPanel     string `json:"finalPanel"`
 }
+
+type fixBody struct {
+	RepositoryIdentity string `json:"repositoryIdentity"`
+	TargetJobID        int64  `json:"targetJobId"`
+	Agent              string `json:"agent"`
+	PreviewToken       string `json:"previewToken"`
+}
+
+func fixRequest(body fixBody) fixoperation.Request {
+	return fixoperation.Request{RepositoryIdentity: body.RepositoryIdentity, TargetJobID: body.TargetJobID, Agent: body.Agent}
+}
+
+func fixErrorStatus(err error) int {
+	var typed *fixoperation.Error
+	if !errors.As(err, &typed) {
+		return http.StatusInternalServerError
+	}
+	switch typed.Kind {
+	case fixoperation.ErrorInvalid:
+		return http.StatusBadRequest
+	case fixoperation.ErrorForbidden:
+		return http.StatusForbidden
+	case fixoperation.ErrorNotFound:
+		return http.StatusNotFound
+	case fixoperation.ErrorConflict:
+		return http.StatusConflict
+	case fixoperation.ErrorUnavailable:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func (s *Server) fixPreview(w http.ResponseWriter, r *http.Request) {
+	if s.Fixes == nil {
+		writeError(w, http.StatusServiceUnavailable, "Fix operation manager is unavailable", "fix")
+		return
+	}
+	agent := r.URL.Query().Get("agent")
+	if agent == "" {
+		agent = "codex"
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("targetJobId"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "targetJobId must be a positive integer", "targetJobId")
+		return
+	}
+	preview, err := s.Fixes.Prepare(r.Context(), fixoperation.Request{RepositoryIdentity: r.URL.Query().Get("repositoryIdentity"), TargetJobID: id, Agent: agent})
+	if err != nil {
+		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) listFixes(w http.ResponseWriter, r *http.Request) {
+	if s.Fixes == nil {
+		writeJSON(w, http.StatusOK, fixoperation.ListResponse{Operations: []*fixoperation.Operation{}})
+		return
+	}
+	identity := strings.TrimSpace(r.URL.Query().Get("repositoryIdentity"))
+	if identity == "" {
+		identity = strings.TrimSpace(r.URL.Query().Get("repo"))
+	}
+	if identity == "" {
+		writeError(w, http.StatusBadRequest, "repository identity is required", "repository")
+		return
+	}
+	if _, err := s.Registry.ResolveIdentity(identity); err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Fixes.List(identity))
+}
+
+func (s *Server) getFix(w http.ResponseWriter, r *http.Request) {
+	if s.Fixes == nil {
+		writeError(w, http.StatusNotFound, "Fix operation not found", "fix")
+		return
+	}
+	item, ok := s.Fixes.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "Fix operation not found", "fix")
+		return
+	}
+	if _, err := s.Registry.ResolveIdentity(item.RepositoryIdentity); err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) startFix(w http.ResponseWriter, r *http.Request) {
+	if s.Fixes == nil {
+		writeError(w, http.StatusServiceUnavailable, "Fix operation manager is unavailable", "fix")
+		return
+	}
+	var body fixBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	item, err := s.Fixes.Start(r.Context(), fixoperation.StartRequest{Request: fixRequest(body), PreviewToken: body.PreviewToken})
+	if err != nil {
+		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+func (s *Server) cancelFix(w http.ResponseWriter, r *http.Request) {
+	if s.Fixes == nil {
+		writeError(w, http.StatusNotFound, "Fix operation not found", "fix")
+		return
+	}
+	item, ok := s.Fixes.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "Fix operation not found", "fix")
+		return
+	}
+	if _, err := s.Registry.ResolveIdentity(item.RepositoryIdentity); err != nil {
+		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		return
+	}
+	if err := s.Fixes.Cancel(item.ID); err != nil {
+		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+		return
+	}
+	item, _ = s.Fixes.Get(item.ID)
+	writeJSON(w, http.StatusAccepted, item)
+}
+
 type commentBody struct {
 	Comment string `json:"comment"`
 }

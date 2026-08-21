@@ -96,6 +96,10 @@ func CancelArgs(id int64) ([]string, error) {
 	return []string{"cancel", strconv.FormatInt(id, 10)}, nil
 }
 
+// FixArgs is the exact RoboRev v0.64 single-job contract. Cobra accepts the
+// positional job id after flags, so the returned array is intentionally
+// `fix --agent <agent> --quiet <job-id>`. Callers must pass the canonical
+// repository as process working directory, never as an argv value.
 func FixArgs(id int64, agent string) ([]string, error) {
 	if err := validateJobID(id); err != nil {
 		return nil, err

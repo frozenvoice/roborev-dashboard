@@ -382,6 +382,107 @@ export type PanelRefineResponse = {
   options: PanelRefineOptions | null
 }
 
+export type FixTarget = {
+  jobId: number
+  gitRef: string
+  branch: string
+  jobType: string
+  panelRole: string
+  panelName?: string
+}
+
+export type FixCommand = { executable: string; args: string[] }
+export type FixPreview = {
+  repositoryIdentity: string
+  repositoryPath: string
+  target: FixTarget
+  agent: string
+  command: FixCommand
+  startingHead: string
+  startingBranch: string
+  previewToken: string
+}
+export type FixPhase = 'starting' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type FixOperation = {
+  id: number | string
+  repositoryIdentity: string
+  repositoryPath: string
+  target: FixTarget
+  agent: string
+  command: FixCommand
+  startingHead?: string
+  startingBranch?: string
+  endingHead?: string
+  endingBranch?: string
+  endingDirty?: boolean
+  phase: FixPhase
+  startedAt?: string
+  updatedAt?: string
+  completedAt?: string
+  error?: string
+  errorCode?: string
+  cancelRequestedAt?: string
+}
+export type FixOperationsResponse = { operations: FixOperation[]; operation: FixOperation | null }
+
+function readFixAlias(object: Record<string, unknown>, camel: string, snake: string) { return object[camel] ?? object[snake] }
+function fixString(object: Record<string, unknown>, camel: string, snake = camel) { const value = readFixAlias(object, camel, snake); return typeof value === 'string' ? value : undefined }
+function fixNumber(object: Record<string, unknown>, camel: string, snake = camel) {
+  const value = readFixAlias(object, camel, snake)
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+function parseFixTarget(value: unknown): FixTarget | null {
+  const object = objectValue(value)
+  if (!object) return null
+  const jobId = fixNumber(object, 'jobId', 'job_id')
+  const gitRef = fixString(object, 'gitRef', 'git_ref')
+  const branch = fixString(object, 'branch')
+  const jobType = fixString(object, 'jobType', 'job_type')
+  const panelRole = fixString(object, 'panelRole', 'panel_role')
+  if (jobId === undefined || jobId <= 0 || !gitRef || !branch || !jobType || typeof panelRole !== 'string') return null
+  return { jobId, gitRef, branch, jobType, panelRole, panelName: fixString(object, 'panelName', 'panel_name') }
+}
+function parseFixCommand(value: unknown): FixCommand | null {
+  const object = objectValue(value)
+  if (!object || typeof object.executable !== 'string' || !object.executable.trim() || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
+  return { executable: object.executable, args: object.args as string[] }
+}
+function parseFixPreview(value: unknown): FixPreview | null {
+  const object = objectValue(value)
+  if (!object || typeof readFixAlias(object, 'repositoryIdentity', 'repository_identity') !== 'string' || typeof readFixAlias(object, 'repositoryPath', 'repository_path') !== 'string' || typeof object.agent !== 'string' || typeof readFixAlias(object, 'startingHead', 'starting_head') !== 'string' || typeof readFixAlias(object, 'startingBranch', 'starting_branch') !== 'string' || typeof readFixAlias(object, 'previewToken', 'preview_token') !== 'string') return null
+  const target = parseFixTarget(object.target)
+  const command = parseFixCommand(object.command)
+  if (!target || !command) return null
+  return { repositoryIdentity: readFixAlias(object, 'repositoryIdentity', 'repository_identity') as string, repositoryPath: readFixAlias(object, 'repositoryPath', 'repository_path') as string, target, agent: object.agent, command, startingHead: readFixAlias(object, 'startingHead', 'starting_head') as string, startingBranch: readFixAlias(object, 'startingBranch', 'starting_branch') as string, previewToken: readFixAlias(object, 'previewToken', 'preview_token') as string }
+}
+function parseFixOperation(value: unknown): FixOperation | null {
+  const object = objectValue(value)
+  if (!object || (typeof object.id !== 'string' && typeof object.id !== 'number')) return null
+  const phase = fixString(object, 'phase')
+  const phases: FixPhase[] = ['starting', 'running', 'succeeded', 'failed', 'cancelled']
+  const target = parseFixTarget(object.target)
+  const command = parseFixCommand(object.command)
+  const repositoryIdentity = fixString(object, 'repositoryIdentity', 'repository_identity')
+  const repositoryPath = fixString(object, 'repositoryPath', 'repository_path')
+  if (!phase || !phases.includes(phase as FixPhase) || !target || !command || !repositoryIdentity || !repositoryPath || typeof object.agent !== 'string') return null
+  const optionalBool = (camel: string, snake: string) => { const value = readFixAlias(object, camel, snake); return typeof value === 'boolean' ? value : undefined }
+  return { id: object.id as number | string, repositoryIdentity, repositoryPath, target, agent: object.agent, command, phase: phase as FixPhase, startingHead: fixString(object, 'startingHead', 'starting_head'), startingBranch: fixString(object, 'startingBranch', 'starting_branch'), endingHead: fixString(object, 'endingHead', 'ending_head'), endingBranch: fixString(object, 'endingBranch', 'ending_branch'), endingDirty: optionalBool('endingDirty', 'ending_dirty'), startedAt: fixString(object, 'startedAt', 'started_at'), updatedAt: fixString(object, 'updatedAt', 'updated_at'), completedAt: fixString(object, 'completedAt', 'completed_at'), error: fixString(object, 'error'), errorCode: fixString(object, 'errorCode', 'error_code'), cancelRequestedAt: fixString(object, 'cancelRequestedAt', 'cancel_requested_at') }
+}
+export function normalizeFixPreview(value: unknown): FixPreview | null { return parseFixPreview(value) }
+export function normalizeFixOperation(value: unknown): FixOperation | null { return parseFixOperation(value) }
+export function normalizeFixOperationsResponse(value: unknown): FixOperationsResponse {
+  const object = objectValue(value)
+  if (!object) return { operations: [], operation: null }
+  const values = Array.isArray(object.operations) ? object.operations : []
+  const operations = values.map(parseFixOperation).filter((item): item is FixOperation => Boolean(item))
+  const direct = parseFixOperation(object.operation)
+  const sorted = [...operations].sort((left, right) => String(right.updatedAt ?? right.startedAt ?? '').localeCompare(String(left.updatedAt ?? left.startedAt ?? '')))
+  return { operations, operation: direct ?? sorted[0] ?? null }
+}
+
 function numberValue(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }

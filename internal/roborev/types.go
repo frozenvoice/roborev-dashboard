@@ -37,6 +37,10 @@ type JobMetadata struct {
 	Status       string `json:"status"`
 	Verdict      string `json:"verdict"`
 	Skipped      bool   `json:"skipped"`
+	// Closed is a pointer because v0.64's job API makes closure an explicit
+	// nullable field. Callers that authorize agentic fixes must reject a
+	// missing value instead of treating it as false.
+	Closed *bool `json:"closed"`
 }
 
 // PanelEnqueueResponse is the exact v0.64 panel synthesis receipt returned by
@@ -73,9 +77,9 @@ type ReviewRequest struct {
 	Panel    string `json:"panel,omitempty"`
 }
 
-// FixRequest identifies the panel synthesis job to fix. RepoPath is used
-// only as the process working directory; findings and prompts are never
-// passed to the command line.
+// FixRequest identifies one terminal v0.64 review job to fix. RepoPath is
+// used only as the process working directory; findings and prompts are never
+// passed to the command line. FixArgs is the sole source of the argv contract.
 type FixRequest struct {
 	RepoPath string
 	JobID    int64

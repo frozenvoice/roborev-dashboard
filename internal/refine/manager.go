@@ -211,6 +211,7 @@ type Manager struct {
 	cancel        map[string]context.CancelFunc
 	terminalOrder []string
 	gateRelease   map[string]func()
+	repoRelease   map[string]func()
 	wg            sync.WaitGroup
 }
 
@@ -235,7 +236,7 @@ func NewManager(deps Dependencies) (*Manager, error) {
 	if deps.Gate == nil {
 		deps.Gate = operation.NewGate()
 	}
-	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, gate: deps.Gate, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc), gateRelease: make(map[string]func())}, nil
+	return &Manager{registry: deps.Registry, panels: deps.Panels, service: deps.RoboRev, binary: deps.Binary, pollInterval: deps.PollInterval, wait: deps.Wait, historyLimit: deps.HistoryLimit, gate: deps.Gate, runs: make(map[string]*PanelRefineRun), locks: make(map[string]string), leases: make(map[string]string), cancel: make(map[string]context.CancelFunc), gateRelease: make(map[string]func()), repoRelease: make(map[string]func())}, nil
 }
 
 func (m *Manager) currentBinary() string {
@@ -358,6 +359,11 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 		m.mu.Unlock()
 		return nil, startError(StartConflict, errors.New("repository has an active review mutation"))
 	}
+	repoRelease, repoErr := m.gate.AcquireRepository(identity)
+	if repoErr != nil {
+		m.mu.Unlock()
+		return nil, startError(StartConflict, repoErr)
+	}
 	id := newID()
 	now := time.Now().UTC()
 	run := &PanelRefineRun{ID: id, RepositoryIdentity: identity, RepositoryPath: repo.Path, Branch: repo.Branch, IterationPanel: request.Panel, FinalPanel: request.FinalPanel, FixAgent: request.FixAgent, MaxFixAttempts: request.MaxFixAttempts, Phase: PhaseReviewing, StartingHead: repo.Head, CurrentHead: repo.Head, StartedAt: now, UpdatedAt: now, Iterations: []PanelRefineIteration{}, Command: CommandTemplate{Executable: m.currentBinary(), Args: []string{"fix", "--agent", request.FixAgent, "--quiet", "<synthesisJobID>"}}}
@@ -366,6 +372,7 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	ctx, cancel := context.WithTimeout(context.Background(), runCeiling)
 	m.cancel[id] = cancel
 	m.gateRelease[id] = gateRelease
+	m.repoRelease[id] = repoRelease
 	keepGate = true
 	m.wg.Add(1)
 	snapshot := cloneRun(run)
@@ -394,14 +401,19 @@ func (m *Manager) AcquireReviewLease(path string) (func(), error) {
 	if m.leases[identity] != "" {
 		return nil, errors.New("repository has an active review mutation")
 	}
+	repoRelease, err := m.gate.AcquireRepository(identity)
+	if err != nil {
+		return nil, errors.New("repository has an active operation")
+	}
 	owner := newID()
 	m.leases[identity] = owner
 	return func() {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		if m.leases[identity] == owner {
 			delete(m.leases, identity)
 		}
+		m.mu.Unlock()
+		repoRelease()
 	}, nil
 }
 
@@ -928,6 +940,10 @@ func (m *Manager) finishContext(id string) {
 	defer m.mu.Unlock()
 	if release := m.gateRelease[id]; release != nil {
 		delete(m.gateRelease, id)
+		release()
+	}
+	if release := m.repoRelease[id]; release != nil {
+		delete(m.repoRelease, id)
 		release()
 	}
 	if run := m.runs[id]; run != nil && isTerminal(run.Phase) {

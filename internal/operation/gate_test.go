@@ -87,3 +87,69 @@ func TestSetupAndRuntimeRejectEachOther(t *testing.T) {
 	}
 	releaseRuntime()
 }
+
+func TestFixLeaseConflictsWithOrdinaryAndRepositoryLeases(t *testing.T) {
+	g := NewGate()
+	releaseFix, err := g.AcquireFix()
+	if err != nil {
+		t.Fatalf("AcquireFix: %v", err)
+	}
+	defer releaseFix()
+	if _, err := g.AcquireMutation(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("ordinary mutation during fix = %v", err)
+	}
+	if _, err := g.AcquireRefine(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("refine during fix = %v", err)
+	}
+	releaseRepo, err := g.AcquireRepository("repo-a")
+	if err != nil {
+		t.Fatalf("AcquireRepository: %v", err)
+	}
+	if _, err := g.AcquireRepository("repo-a"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("same repository lease = %v", err)
+	}
+	releaseRepo()
+	releaseAgain, err := g.AcquireRepository("repo-a")
+	if err != nil {
+		t.Fatalf("repository lease after release = %v", err)
+	}
+	// A stale once-safe release must not drop a newer owner.
+	releaseRepo()
+	if _, err := g.AcquireRepository("repo-a"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("stale release removed newer owner: %v", err)
+	}
+	releaseAgain()
+}
+
+func TestFixLeaseIsGloballyBidirectionalWithSetupAndRuntime(t *testing.T) {
+	g := NewGate()
+	releaseFix, err := g.AcquireFix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.AcquireSetup(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("setup during Fix = %v", err)
+	}
+	if _, err := g.AcquireRuntimeControl(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("runtime during Fix = %v", err)
+	}
+	releaseFix()
+
+	releaseSetup, err := g.AcquireSetup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.AcquireFix(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Fix during setup = %v", err)
+	}
+	releaseSetup()
+
+	releaseRuntime, err := g.AcquireRuntimeControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.AcquireFix(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Fix during runtime = %v", err)
+	}
+	releaseRuntime()
+}
