@@ -1249,8 +1249,11 @@ func TestShutdownWaitsForAcceptedPreflightCancelsItAndRejectsLaterStarts(t *test
 	close(registry.release)
 	select {
 	case err := <-startErr:
-		if err == nil {
-			t.Fatal("canceled preflight Start succeeded after shutdown began")
+		// A shutdown-canceled preflight must be classified as a shutdown
+		// conflict, not an unrelated repository-state error.
+		var typedErr *StartError
+		if !errors.As(err, &typedErr) || typedErr.Kind != StartConflict || !strings.Contains(err.Error(), "shutting down") {
+			t.Fatalf("canceled preflight Start = %v; want shutdown conflict", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Start never returned after its preflight was canceled")

@@ -340,6 +340,9 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	defer preflightCancel()
 	installation := m.service.Installation(preflightCtx)
 	if err := validateInstallation(installation); err != nil {
+		if shutdownErr := m.shutdownCanceled(parent); shutdownErr != nil {
+			return nil, startError(StartConflict, shutdownErr)
+		}
 		return nil, startError(StartUnavailable, err)
 	}
 	if !installation.Capabilities.PanelReview || !installation.Capabilities.FixCommand || !installation.Capabilities.JobOutputStatusAPI {
@@ -354,8 +357,8 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	}
 	repo, err := m.registry.Inspect(preflightCtx, path)
 	if err != nil {
-		if parentErr := parent.Err(); parentErr != nil {
-			return nil, startError(StartConflict, parentErr)
+		if shutdownErr := m.shutdownCanceled(parent); shutdownErr != nil {
+			return nil, startError(StartConflict, shutdownErr)
 		}
 		return nil, startError(StartUnavailable, fmt.Errorf("repository state is unavailable: %w", err))
 	}
@@ -431,6 +434,16 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	tracked = false
 	go m.execute(ctx, id)
 	return snapshot, nil
+}
+
+// shutdownCanceled explains a preflight failure that Shutdown caused, so a
+// canceled registry/service call is classified as a shutdown conflict instead
+// of an unrelated repository or transport error.
+func (m *Manager) shutdownCanceled(parent context.Context) error {
+	if err := m.shutdownCtx.Err(); err != nil {
+		return fmt.Errorf("server is shutting down: %w", err)
+	}
+	return parent.Err()
 }
 
 // AcquireReviewLease serializes short-lived Review HEAD/Rerun mutations with
