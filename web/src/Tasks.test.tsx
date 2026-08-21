@@ -39,6 +39,14 @@ describe('Tasks workspace with disabled execution', () => {
     expect(screen.getByRole('button', { name: 'View result' })).toBeInTheDocument()
   })
 
+  it('never guesses a missing agent as codex and preserves recorded agents verbatim', () => {
+    const { rerender } = render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 51, uuid: '550e8400-e29b-41d4-a716-446655440051', job_type: 'task', git_ref: 'run', status: 'done' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('Unknown agent')).toBeInTheDocument()
+    rerender(<I18nProvider><Tasks repository={repository} jobs={[{ id: 51, uuid: '550e8400-e29b-41d4-a716-446655440051', job_type: 'task', git_ref: 'run', status: 'done', agent: 'claude-code' }]} onOpenReview={vi.fn()} /></I18nProvider>)
+    expect(screen.getByText('claude-code')).toBeInTheDocument()
+    expect(screen.queryByText('codex')).not.toBeInTheDocument()
+  })
+
   it('renders an inspection-only composer with the fail-closed explanation and never requests execution', () => {
     const fetchMock = vi.fn(() => response([]))
     vi.stubGlobal('fetch', fetchMock)

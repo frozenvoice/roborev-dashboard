@@ -67,6 +67,13 @@
 - 최종 보고에는 각 reviewer job의 review job ID, reviewer, target first SHA, target last SHA, verdict를 함께 기록한다.
 - final code gate 결과를 기록하기 위한 docs-only commit이 생기더라도 그 docs commit의 HEAD review를 최종 code gate라고 부르지 않는다.
 - review job ID를 기록하기 위한 docs-only commit을 만들기 위해 불필요하게 또 panel review를 돌리는 loop를 만들지 않는다. 최종 reviewer job ID는 가능한 repository 문서에 다시 commit하지 말고 작업 완료 보고에 기록한다.
+- RoboRev quality gate를 실행했으면 synthesis만 보지 말고 모든 panel member 결과도 terminal까지 직접 확인한다.
+- F verdict가 나오면 해당 output을 반드시 읽고 실제 코드와 upstream 계약으로 대조한다.
+- latest quality gate에 unresolved valid High 또는 Medium finding이 하나라도 있으면 작업을 완료라고 선언하지 않는다.
+- valid material finding은 수정 → tests → 새 commit → cumulative range re-review 순서로 닫는다.
+- Low finding은 검증 뒤 작고 scope 안이면 같이 수정하고, defer하면 명시적 근거를 남긴다.
+- latest cumulative gate가 clean일 때(해당 gate에서 제기된 valid High/Medium이 전부 해결되었을 때)만 완료할 수 있다.
+- 이 completion 규칙은 Codex뿐 아니라 OpenCode, Cursor 및 모든 개발 agent에 동일하게 적용한다.
 - 중요한 설계 변경 시 `docs/ARCHITECTURE.md`를 함께 갱신한다.
 - Codex와 Cursor 사이의 handoff를 위해 `docs/HANDOFF.md`를 최신으로 유지한다.
 - 저장소 안에 있는 사용자 변경은 보존하고, 무관한 파일을 commit에 포함하지 않는다.

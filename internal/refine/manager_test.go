@@ -1233,3 +1233,91 @@ func TestShutdownRejectsStartStillValidatingAndEnqueuesNothing(t *testing.T) {
 	}
 	refineLease()
 }
+
+// An accepted review lease is part of the shutdown lifecycle: Shutdown stays
+// waiting until the lease is released, and its repository gate is freed
+// before Shutdown returns.
+func TestReviewLeaseIsTrackedByShutdownUntilRelease(t *testing.T) {
+	service := &fakeReviewService{verdicts: []string{"P"}}
+	manager, _ := newTestManager(t, service)
+	release, err := manager.AcquireReviewLease(`C:\repo`)
+	if err != nil {
+		t.Fatalf("AcquireReviewLease: %v", err)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- manager.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned while a review lease was active: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the review lease was released")
+	}
+	gateRelease, err := manager.gate.AcquireRepository("repo-key")
+	if err != nil {
+		t.Fatalf("repository gate was not released after shutdown: %v", err)
+	}
+	gateRelease()
+}
+
+// Once Shutdown has closed acceptance, no new review lease can be granted.
+func TestReviewLeaseIsRejectedAfterShutdownBegan(t *testing.T) {
+	service := &fakeReviewService{verdicts: []string{"P"}}
+	manager, _ := newTestManager(t, service)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if _, err := manager.AcquireReviewLease(`C:\repo`); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("lease after shutdown = %v; want shutdown rejection", err)
+	}
+}
+
+// Double release must neither panic nor corrupt the shutdown accounting.
+func TestReviewLeaseReleaseIsExactlyOnce(t *testing.T) {
+	service := &fakeReviewService{verdicts: []string{"P"}}
+	manager, _ := newTestManager(t, service)
+	release, err := manager.AcquireReviewLease(`C:\repo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown after double release: %v", err)
+	}
+}
+
+// The pre-existing mutual exclusion between an active Panel Refine and a
+// review lease on the same repository is preserved.
+func TestReviewLeaseStillExcludesActivePanelRefine(t *testing.T) {
+	service := &blockingReviewService{fakeReviewService: &fakeReviewService{verdicts: []string{"P"}}, started: make(chan struct{}, 1)}
+	manager, _ := newTestManager(t, service.fakeReviewService)
+	manager.service = service
+	if _, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-service.started:
+	case <-time.After(time.Second):
+		t.Fatal("panel refine never reached status polling")
+	}
+	if _, err := manager.AcquireReviewLease(`C:\repo`); err == nil || !strings.Contains(err.Error(), "active Panel Refine") {
+		t.Fatalf("lease during active refine = %v; want Panel Refine conflict", err)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+}

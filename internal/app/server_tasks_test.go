@@ -49,14 +49,41 @@ func assertTaskExecutionDisabled(t *testing.T, recorder *httptest.ResponseRecord
 	}
 }
 
-func TestTaskPreviewIsStablyDisabledWithoutTouchingRoboRev(t *testing.T) {
-	server, service := setupTaskServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(`{"repositoryIdentity":"e:\\repo","task":"inspect"}`))
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, req)
-	assertTaskExecutionDisabled(t, recorder)
-	if service.installationCalls != 0 || service.metadataCalls != 0 {
-		t.Fatalf("service was consulted by disabled preview: installation=%d metadata=%d", service.installationCalls, service.metadataCalls)
+func TestTaskPreviewFollowsMutationAuthConvention(t *testing.T) {
+	tests := []struct {
+		name       string
+		origin     string
+		csrf       bool
+		wantStatus int
+		wantPhase  string
+	}{
+		{name: "foreign origin", origin: "https://evil.example", csrf: true, wantStatus: http.StatusForbidden, wantPhase: "origin"},
+		{name: "missing csrf", origin: "http://example.com", wantStatus: http.StatusForbidden, wantPhase: "csrf"},
+		{name: "authorized", origin: "http://example.com", csrf: true, wantStatus: http.StatusNotImplemented, wantPhase: "task-execution-disabled"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, service := setupTaskServer(t)
+			req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(`{"repositoryIdentity":"e:\\repo","task":"inspect"}`))
+			req.Host = "example.com"
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if test.csrf {
+				req.Header.Set("X-CSRF-Token", server.csrfToken)
+			}
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), test.wantPhase) {
+				t.Fatalf("body = %s", recorder.Body.String())
+			}
+			if service.installationCalls != 0 || service.metadataCalls != 0 {
+				t.Fatalf("service was consulted by disabled preview: installation=%d metadata=%d", service.installationCalls, service.metadataCalls)
+			}
+		})
 	}
 }
 
@@ -118,5 +145,27 @@ func TestGenericRerunRejectsTaskJobsBeforeRoboRevRerun(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "task-rerun-unsupported") || !strings.Contains(recorder.Body.String(), "Tasks v1 does not support rerun") {
 		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+// Repository ownership is authorized before job-type policy: an unregistered
+// repository's task job must not reveal its type or rerun policy.
+func TestGenericRerunAuthorizesRepositoryBeforeTaskPolicy(t *testing.T) {
+	server, service := setupTaskServer(t)
+	service.fakeService.panelMetadata = map[int64]roborev.JobMetadata{
+		43: {ID: 43, RepoPath: `D:\unregistered`, GitRef: "run", Branch: "main", JobType: "task", Status: "done"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/reviews/43/rerun", nil)
+	req.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"repository"`) || strings.Contains(recorder.Body.String(), "task-rerun-unsupported") || strings.Contains(recorder.Body.String(), "task") {
+		t.Fatalf("task policy leaked before ownership authorization: %s", recorder.Body.String())
+	}
+	if service.rerunCalls != 0 {
+		t.Fatalf("Rerun calls = %d", service.rerunCalls)
 	}
 }

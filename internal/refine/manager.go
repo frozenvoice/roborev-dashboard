@@ -391,7 +391,10 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 
 // AcquireReviewLease serializes short-lived Review HEAD/Rerun mutations with
 // Panel Refine start and with each other. The owner must explicitly release
-// the lease; HTTP callers use defer and process shutdown drops all leases.
+// the lease exactly once. Acceptance is linearized with Shutdown under the
+// manager mutex: a lease is registered in the shutdown wait group only while
+// closing is false, so Shutdown waits for every accepted lease to be released
+// and no new lease can be accepted after shutdown has begun.
 func (m *Manager) AcquireReviewLease(path string) (func(), error) {
 	resolved, err := m.registry.Resolve(path)
 	if err != nil {
@@ -402,26 +405,43 @@ func (m *Manager) AcquireReviewLease(path string) (func(), error) {
 		return nil, err
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil, errors.New("server is shutting down")
+	}
 	if m.locks[identity] != "" {
+		m.mu.Unlock()
 		return nil, errors.New("repository has an active Panel Refine")
 	}
 	if m.leases[identity] != "" {
+		m.mu.Unlock()
 		return nil, errors.New("repository has an active review mutation")
 	}
 	repoRelease, err := m.gate.AcquireRepository(identity)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, errors.New("repository has an active operation")
 	}
 	owner := newID()
 	m.leases[identity] = owner
+	m.wg.Add(1)
+	m.mu.Unlock()
+	released := false
 	return func() {
 		m.mu.Lock()
-		if m.leases[identity] == owner {
+		first := !released
+		released = true
+		if first && m.leases[identity] == owner {
 			delete(m.leases, identity)
 		}
 		m.mu.Unlock()
+		if !first {
+			return
+		}
+		// The repository gate is released before the shutdown accounting so
+		// Shutdown never returns while a lease still holds its gate lease.
 		repoRelease()
+		m.wg.Done()
 	}, nil
 }
 

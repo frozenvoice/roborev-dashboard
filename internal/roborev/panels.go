@@ -171,8 +171,8 @@ func loadPanelConfigWithCommands(path string) (panelReviewConfig, panelAgentComm
 }
 
 // loadPanelConfigFile is the common bounded, no-follow TOML reader used by
-// panel discovery and task safety preflight. Keeping one reader prevents the
-// safety lookup from gaining a weaker path or size policy over time.
+// panel discovery and agent command discovery. Keeping one reader prevents
+// any config lookup from gaining a weaker path or size policy over time.
 func loadPanelConfigFile(path string) (panelConfigFile, bool, error) {
 	var file panelConfigFile
 	handle, err := openPanelConfigNoFollow(path)

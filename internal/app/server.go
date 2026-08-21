@@ -204,7 +204,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
-	s.mux.HandleFunc("POST /api/tasks/preview", s.taskPreview)
+	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))
 	s.mux.HandleFunc("GET /api/tasks/preview", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "task preview requires POST", "method")
 	})
@@ -1572,15 +1572,17 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job not found", "job")
 		return
 	}
+	// Repository ownership is authorized before any job-type policy so an
+	// unregistered repository's job never reveals its type or rerun policy.
+	if !s.Registry.Contains(job.RepoPath) {
+		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
+		return
+	}
 	// A run job is a Custom Task and cannot be replayed through the generic
 	// review rerun endpoint. Tasks require their own fresh safety preflight and
 	// explicit confirmation; otherwise this route would bypass that boundary.
 	if strings.TrimSpace(job.JobType) == "task" || strings.TrimSpace(job.GitRef) == "run" {
 		writeError(w, http.StatusConflict, "Tasks v1 does not support rerun; generic frozen rerun is unavailable for task jobs", "task-rerun-unsupported")
-		return
-	}
-	if !s.Registry.Contains(job.RepoPath) {
-		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
 		return
 	}
 	var releaseReviewLease func()
