@@ -660,7 +660,7 @@ type panelMemberShow struct {
 }
 
 func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
-	_, _, _, raw, ok := s.loadPanelMembers(w, r)
+	_, _, raw, ok := s.loadPanelMembers(w, r)
 	if !ok {
 		return
 	}
@@ -672,7 +672,7 @@ func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	request, _, jobs, _, ok := s.loadPanelMembers(w, r)
+	request, jobs, _, ok := s.loadPanelMembers(w, r)
 	if !ok {
 		return
 	}
@@ -705,32 +705,15 @@ func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
 	writeRawJSON(w, http.StatusOK, raw)
 }
 
-func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panelMembersRequest, roborev.JobMetadata, []roborev.JobMetadata, json.RawMessage, bool) {
+func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panelMembersRequest, []roborev.JobMetadata, json.RawMessage, bool) {
 	request, ok := s.panelMembersRequest(w, r)
 	if !ok {
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
-	}
-	parent, err := s.RoboRev.JobMetadata(r.Context(), request.parentJobID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "panel parent job not found", "panel-members")
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
-	}
-	if !s.Registry.Contains(parent.RepoPath) {
-		if strings.TrimSpace(parent.RepoPath) == "" {
-			writeError(w, http.StatusBadGateway, "malformed panel parent metadata: repository path is required", "panel-members")
-			return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
-		}
-		writeError(w, http.StatusForbidden, errPanelForeignRepository.Error(), "repository")
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
-	}
-	if err := validatePanelParent(parent, request); err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "panel-members")
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+		return panelMembersRequest{}, nil, nil, false
 	}
 	raw, err := s.RoboRev.PanelMembers(r.Context(), request.run)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+		return panelMembersRequest{}, nil, nil, false
 	}
 	jobs, err := decodePanelMemberList(raw)
 	if err != nil {
@@ -739,9 +722,9 @@ func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panel
 		} else {
 			writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
 		}
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+		return panelMembersRequest{}, nil, nil, false
 	}
-	if err := s.validatePanelMemberList(jobs, request, parent); err != nil {
+	if _, err := s.validatePanelMemberList(jobs, request); err != nil {
 		status := http.StatusConflict
 		switch {
 		case errors.Is(err, errPanelForeignRepository):
@@ -750,9 +733,9 @@ func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panel
 			status = http.StatusBadGateway
 		}
 		writeError(w, status, err.Error(), "panel-members")
-		return panelMembersRequest{}, roborev.JobMetadata{}, nil, nil, false
+		return panelMembersRequest{}, nil, nil, false
 	}
-	return request, parent, jobs, raw, true
+	return request, jobs, raw, true
 }
 
 var (
@@ -849,46 +832,56 @@ func decodePanelMemberList(raw json.RawMessage) ([]roborev.JobMetadata, error) {
 	return jobs, nil
 }
 
-func (s *Server) validatePanelMemberList(jobs []roborev.JobMetadata, request panelMembersRequest, parent roborev.JobMetadata) error {
+func (s *Server) validatePanelMemberList(jobs []roborev.JobMetadata, request panelMembersRequest) (roborev.JobMetadata, error) {
 	seen := make(map[int64]struct{}, len(jobs))
 	parentCount := 0
+	var parent roborev.JobMetadata
 	for _, job := range jobs {
 		if job.ID <= 0 {
-			return errors.New("panel member job ID must be positive")
+			return roborev.JobMetadata{}, errors.New("panel member job ID must be positive")
 		}
 		if _, ok := seen[job.ID]; ok {
-			return errors.New("panel members response contains duplicate job IDs")
+			return roborev.JobMetadata{}, errors.New("panel members response contains duplicate job IDs")
 		}
 		seen[job.ID] = struct{}{}
 		if strings.TrimSpace(job.RepoPath) == "" || strings.TrimSpace(job.PanelName) == "" || strings.TrimSpace(job.PanelRunUUID) == "" || strings.TrimSpace(job.PanelRole) == "" {
-			return errors.New("panel member identity fields do not match the requested panel")
+			return roborev.JobMetadata{}, errors.New("panel member identity fields do not match the requested panel")
 		}
 		if job.PanelRole != "synthesis" && job.PanelRole != "member" {
-			return errors.New("panel member has an unsupported panel role")
+			return roborev.JobMetadata{}, errors.New("panel member has an unsupported panel role")
 		}
 		if !gitx.SameRepositoryPath(job.RepoPath, request.repositoryPath) {
 			if !s.Registry.Contains(job.RepoPath) {
-				return errPanelForeignRepository
+				return roborev.JobMetadata{}, errPanelForeignRepository
 			}
-			return errors.New("panel member repository does not match identity")
+			return roborev.JobMetadata{}, errors.New("panel member repository does not match identity")
 		}
-		if !panelIdentityMatches(job, parent, request.run) {
-			return errors.New("panel member identity does not match parent panel")
+		if job.PanelRunUUID != request.run {
+			return roborev.JobMetadata{}, errors.New("panel member identity does not match requested panel run")
 		}
 		if job.PanelRole == "synthesis" {
 			if job.JobType != "synthesis" {
-				return errors.New("panel synthesis job has an invalid synthesis type")
+				return roborev.JobMetadata{}, errors.New("panel synthesis job has an invalid synthesis type")
 			}
 			parentCount++
-			if job.ID != parent.ID {
-				return errors.New("panel synthesis job does not match parent job")
+			if job.ID != request.parentJobID {
+				return roborev.JobMetadata{}, errors.New("panel synthesis job does not match parent job")
 			}
+			parent = job
 		}
 	}
 	if parentCount != 1 {
-		return errors.New("panel members response must contain exactly one synthesis job")
+		return roborev.JobMetadata{}, errors.New("panel members response must contain exactly one synthesis job")
 	}
-	return nil
+	if err := validatePanelParent(parent, request); err != nil {
+		return roborev.JobMetadata{}, err
+	}
+	for _, job := range jobs {
+		if !panelIdentityMatches(job, parent, request.run) {
+			return roborev.JobMetadata{}, errors.New("panel member identity does not match parent panel")
+		}
+	}
+	return parent, nil
 }
 
 func panelIdentityMatches(job, parent roborev.JobMetadata, run string) bool {

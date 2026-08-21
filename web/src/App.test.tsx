@@ -28,8 +28,8 @@ function memberListPath(runUUID: string, parentJobId = 42, repositoryIdentity = 
 function memberDetailPath(runUUID: string, memberId: number, parentJobId = 42, repositoryIdentity = 'repo-1') {
   return `/api/panels/${encodeURIComponent(runUUID)}/members/${memberId}?parentJobId=${parentJobId}&repositoryIdentity=${encodeURIComponent(repositoryIdentity)}`
 }
-function memberShow(member: { id: number; panel_run_uuid: string; panel_role: string }, output: string) {
-  return { job_id: member.id, job: { id: member.id, repo_path: 'E:\\repo', panel_name: 'dashboard_cross', panel_run_uuid: member.panel_run_uuid, panel_role: member.panel_role }, review: { output } }
+function memberShow(member: { id: number; panel_run_uuid: string; panel_role: string }, output: string, repoPath = 'E:\\repo') {
+  return { job_id: member.id, job: { id: member.id, repo_path: repoPath, panel_name: 'dashboard_cross', panel_run_uuid: member.panel_run_uuid, panel_role: member.panel_role }, review: { output } }
 }
 function panelConfiguration(repositoryIdentity = 'repo-1', panels: PanelInfo[] = [defaultPanel], selectedPanel = defaultPanel.name, selectionRequired = false, error?: string) {
   return { repositoryIdentity, panels, selectedPanel, selectionRequired, ...(error ? { error } : {}) }
@@ -261,6 +261,22 @@ describe('App review workflow', () => {
     expect(screen.queryByText('Review detail refresh failed')).not.toBeInTheDocument()
   })
 
+  it('trusts backend repository authorization instead of comparing Windows path spellings', async () => {
+    const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-detail-path' }
+    const member = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Path-authorized reviewer', status: 'done', verdict: 'P', agent: 'codex' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(parent)
+      if (path === memberListPath(parent.panel_run_uuid)) return response({ jobs: [member] })
+      if (path === memberDetailPath(parent.panel_run_uuid, 43)) return response(memberShow(member, 'Backend-authorized member output', 'e:/foo/../repo/'))
+      return response({ success: true })
+    }))
+    const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: /Path-authorized reviewer/ }))
+    expect(await screen.findByText('Backend-authorized member output')).toBeInTheDocument()
+  })
+
   it('keeps only positive exact member jobs from the scoped panel response', async () => {
     const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-member-contract' }
     const validMember = { id: 46, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 3, panel_member_name: 'Valid member', status: 'done', verdict: 'P', agent: 'codex' }
@@ -352,28 +368,88 @@ describe('App review workflow', () => {
 
   it('drops old member loading and results when repository identity switches', async () => {
     const parent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-deferred-c' }
-    const firstMembers = deferred<Response>()
+    const staleRefresh = deferred<Response>()
     const secondMembers = deferred<Response>()
     const staleMember = { id: 43, panel_role: 'member', panel_run_uuid: parent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Old repository member', status: 'done', verdict: 'P', agent: 'codex' }
-    let listCalls = 0
+    let firstRepositoryCalls = 0
+    let secondRepositoryCalls = 0
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/reviews/42') return response(parent)
-      if (path === memberListPath('panel-deferred-c', 42, 'repo-1')) return firstMembers.promise
-      if (path === memberListPath('panel-deferred-c', 42, 'repo-2')) { listCalls++; return secondMembers.promise }
+      if (path === memberListPath('panel-deferred-c', 42, 'repo-1')) return ++firstRepositoryCalls === 1 ? response({ jobs: [staleMember] }) : staleRefresh.promise
+      if (path === memberListPath('panel-deferred-c', 42, 'repo-2')) { secondRepositoryCalls++; return secondMembers.promise }
       return response({ success: true })
     }))
     const props = { job: parent, jobs: [parent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
     const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
-    expect(await screen.findByLabelText('Loading…')).toBeInTheDocument()
+    expect(await screen.findByText('Old repository member')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Panel members' }))
+    await waitFor(() => expect(firstRepositoryCalls).toBe(2))
     rerender(<I18nProvider><ReviewDetail {...props} repoIdentity="repo-2" /></I18nProvider>)
-    await waitFor(() => expect(listCalls).toBe(1))
-    firstMembers.resolve(new Response(JSON.stringify({ jobs: [staleMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(secondRepositoryCalls).toBe(1))
+    expect(screen.queryByText('Old repository member')).not.toBeInTheDocument()
+    expect(document.querySelector('.member-list-loading')).toBeInTheDocument()
+    expect(screen.queryByText('0 / 0')).not.toBeInTheDocument()
+    expect(screen.queryByText('No member jobs')).not.toBeInTheDocument()
+    staleRefresh.resolve(new Response(JSON.stringify({ jobs: [staleMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(screen.queryByText('Old repository member')).not.toBeInTheDocument()
     secondMembers.resolve(new Response(JSON.stringify({ jobs: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await waitFor(() => expect(screen.queryByLabelText('Loading…')).not.toBeInTheDocument())
     expect(screen.queryByText('Old repository member')).not.toBeInTheDocument()
+  })
+
+  it('starts a fresh member skeleton when the panel parent or run changes', async () => {
+    const firstParent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-scope-a' }
+    const secondParent = { ...firstParent, id: 99, panel_run_uuid: 'panel-scope-b' }
+    const firstMembers = deferred<Response>()
+    const secondMembers = deferred<Response>()
+    const staleMember = { id: 43, panel_role: 'member', panel_run_uuid: firstParent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Old run member', status: 'done', verdict: 'P', agent: 'codex' }
+    const freshMember = { id: 44, panel_role: 'member', panel_run_uuid: secondParent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'New run member', status: 'running', agent: 'claude-code' }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(firstParent)
+      if (path === '/api/reviews/99') return response(secondParent)
+      if (path === memberListPath(firstParent.panel_run_uuid)) return firstMembers.promise
+      if (path === memberListPath(secondParent.panel_run_uuid, 99)) return secondMembers.promise
+      return response({ success: true })
+    }))
+    const props = { job: firstParent, jobs: [firstParent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByLabelText('Loading…')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={secondParent} jobs={[secondParent]} /></I18nProvider>)
+    expect(document.querySelector('.member-list-loading')).toBeInTheDocument()
+    firstMembers.resolve(new Response(JSON.stringify({ jobs: [staleMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Old run member')).not.toBeInTheDocument()
+    secondMembers.resolve(new Response(JSON.stringify({ jobs: [freshMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('New run member')).toBeInTheDocument()
+    expect(document.querySelector('.member-list-loading')).not.toBeInTheDocument()
+  })
+
+  it('keeps the existing member tree during a same-scope status refresh', async () => {
+    const runningParent = { ...jobs[0], status: 'running', verdict: undefined, review: undefined, panel_run_uuid: 'panel-scope-status' }
+    const terminalParent = { ...runningParent, status: 'done', verdict: 'P' }
+    const runningMember = { id: 43, panel_role: 'member', panel_run_uuid: runningParent.panel_run_uuid, panel_member_index: 0, panel_member_name: 'Stable member', status: 'running', agent: 'codex' }
+    const terminalMember = { ...runningMember, status: 'done', verdict: 'P' }
+    const terminalRefresh = deferred<Response>()
+    let memberCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(runningParent)
+      if (path === memberListPath(runningParent.panel_run_uuid)) return ++memberCalls === 1 ? response({ jobs: [runningMember] }) : terminalRefresh.promise
+      return response({ success: true })
+    }))
+    const props = { job: runningParent, jobs: [runningParent], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: true, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    expect(await screen.findByText('Stable member')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminalParent} jobs={[terminalParent]} /></I18nProvider>)
+    await waitFor(() => expect(memberCalls).toBe(2))
+    expect(screen.getByText('Stable member')).toBeInTheDocument()
+    expect(document.querySelector('.member-list-loading')).not.toBeInTheDocument()
+    terminalRefresh.resolve(new Response(JSON.stringify({ jobs: [terminalMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Pass')).toBeInTheDocument()
   })
 
   it('copies and opens a finding member fix prompt across a routine member refresh', async () => {
@@ -511,6 +587,148 @@ describe('App review workflow', () => {
     expect(screen.getByLabelText('Comment')).toHaveValue('keep this draft')
     fireEvent.click(screen.getByRole('button', { name: 'Review' }))
     expect(await screen.findByText('Completed review')).toBeInTheDocument()
+  })
+
+  it('hands detail loading ownership to terminal reconciliation and ignores the late initial response', async () => {
+    const initialDetail = deferred<Response>()
+    const reconciledDetail = deferred<Response>()
+    let detailCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const terminal = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return ++detailCalls === 1 ? initialDetail.promise : reconciledDetail.promise
+      return response({ success: true })
+    }))
+    const props = { job: running, jobs: [running], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: false, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }))
+    expect(document.querySelector('.skeleton.tall')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(detailCalls).toBe(2))
+    reconciledDetail.resolve(new Response(JSON.stringify({ ...terminal, output: 'Reconciled terminal output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Reconciled terminal output')).toBeInTheDocument()
+    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
+    initialDetail.resolve(new Response(JSON.stringify({ ...running, output: 'Late initial output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Late initial output')).not.toBeInTheDocument()
+    expect(screen.getByText('Reconciled terminal output')).toBeInTheDocument()
+  })
+
+  it('ends detail loading and shows an error after terminal reconciliation retries fail', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const initialDetail = deferred<Response>()
+    const firstRetry = deferred<Response>()
+    const finalRetry = deferred<Response>()
+    let detailCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const terminal = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') {
+        detailCalls++
+        return detailCalls === 1 ? initialDetail.promise : detailCalls === 2 ? firstRetry.promise : finalRetry.promise
+      }
+      return response({ success: true })
+    }))
+    const props = { job: running, jobs: [running], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: false, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Review' }))
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(detailCalls).toBe(2))
+    firstRetry.reject(new Error('first reconciliation failure'))
+    await vi.advanceTimersByTimeAsync(1200)
+    await waitFor(() => expect(detailCalls).toBe(3))
+    expect(document.querySelector('.skeleton.tall')).toBeInTheDocument()
+    finalRetry.reject(new Error('final reconciliation failure'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('final reconciliation failure')
+    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
+    initialDetail.resolve(new Response(JSON.stringify({ ...running, output: 'Late initial output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await vi.runOnlyPendingTimersAsync()
+    expect(screen.queryByText('Late initial output')).not.toBeInTheDocument()
+  })
+
+  it('hands log loading ownership to terminal refresh and ignores a late initial log', async () => {
+    const initialLog = deferred<Response>()
+    const terminalLog = deferred<Response>()
+    let logCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const terminal = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(running)
+      if (path === '/api/reviews/42/log') return ++logCalls === 1 ? initialLog.promise : terminalLog.promise
+      return response({ success: true })
+    }))
+    const props = { job: running, jobs: [running], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: false, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Log' }))
+    await waitFor(() => expect(logCalls).toBe(1))
+    expect(document.querySelector('.skeleton.tall')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(logCalls).toBe(2))
+    terminalLog.resolve(new Response(JSON.stringify({ text: 'Terminal log' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Terminal log')).toBeInTheDocument()
+    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
+    initialLog.resolve(new Response(JSON.stringify({ text: 'Late initial log' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Late initial log')).not.toBeInTheDocument()
+    expect(screen.getByText('Terminal log')).toBeInTheDocument()
+  })
+
+  it('ends log loading and shows retry after terminal refresh fails over a pending initial log', async () => {
+    const initialLog = deferred<Response>()
+    const terminalLog = deferred<Response>()
+    let logCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const terminal = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(running)
+      if (path === '/api/reviews/42/log') return ++logCalls === 1 ? initialLog.promise : terminalLog.promise
+      return response({ success: true })
+    }))
+    const props = { job: running, jobs: [running], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: false, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Log' }))
+    await waitFor(() => expect(logCalls).toBe(1))
+    expect(document.querySelector('.skeleton.tall')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(logCalls).toBe(2))
+    terminalLog.reject(new Error('terminal log unavailable'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('terminal log unavailable')
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
+    initialLog.resolve(new Response(JSON.stringify({ text: 'Late initial log' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('Late initial log')).not.toBeInTheDocument()
+  })
+
+  it('surfaces a terminal log refresh error with retry after an initial log load', async () => {
+    const terminalLogFailure = deferred<Response>()
+    const retryLog = deferred<Response>()
+    let logCalls = 0
+    const running = { ...jobs[0], status: 'running', verdict: undefined, review: undefined }
+    const terminal = { ...jobs[0], status: 'done', verdict: 'P', review: undefined }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/reviews/42') return response(running)
+      if (path === '/api/reviews/42/log') return ++logCalls === 1 ? response({ text: 'Initial log' }) : logCalls === 2 ? terminalLogFailure.promise : retryLog.promise
+      return response({ success: true })
+    }))
+    const props = { job: running, jobs: [running], close: vi.fn(), mutate: vi.fn().mockResolvedValue(undefined), busy: false, canRerun: true, canLoadMembers: false, repoPath: 'E:\\repo', repoIdentity: 'repo-1', toast: vi.fn() }
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Log' }))
+    expect(await screen.findByText('Initial log')).toBeInTheDocument()
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(logCalls).toBe(2))
+    terminalLogFailure.reject(new Error('terminal log unavailable'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('terminal log unavailable')
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(logCalls).toBe(3))
+    retryLog.resolve(new Response(JSON.stringify({ text: 'Refreshed terminal log' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    expect(await screen.findByText('Refreshed terminal log')).toBeInTheDocument()
+    expect(screen.queryByText('Initial log')).not.toBeInTheDocument()
   })
 
   it('disables Review HEAD when the enqueue capability is unavailable', async () => {

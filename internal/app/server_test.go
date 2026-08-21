@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,8 @@ type fakeService struct {
 	showErr           error
 	panelMetadata     map[int64]roborev.JobMetadata
 	metadataID        int64
+	metadataCalls     int
+	panelMembersCalls int
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -91,6 +94,7 @@ func (f *fakeService) TerminalJobMetadata(_ context.Context, id int64) (roborev.
 	return roborev.JobMetadata{ID: id, RepoPath: path, GitRef: "abcdef123456", Branch: "main", PanelName: "dashboard_cross", PanelRunUUID: "00000000-0000-0000-0000-000000000001", PanelRole: "synthesis", JobType: "synthesis", Status: "done", Verdict: "P"}, nil
 }
 func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
+	f.metadataCalls++
 	if f.panelMetadata != nil {
 		metadata, ok := f.panelMetadata[id]
 		if !ok {
@@ -119,6 +123,7 @@ func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
 	return json.RawMessage(`{"id":42}`), nil
 }
 func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, error) {
+	f.panelMembersCalls++
 	if f.panelRaw != nil {
 		return f.panelRaw, nil
 	}
@@ -316,11 +321,11 @@ func TestPanelRefineListRequiresRepositoryQuery(t *testing.T) {
 	}
 }
 
-func TestPanelMembersEnforcesRepositoryBoundary(t *testing.T) {
+func TestPanelMembersAcceptsRoboRevV064FullRunAndEnforcesRepositoryBoundary(t *testing.T) {
 	run := "986d3bfa-05da-4621-aeca-66f493a19ea3"
 	parent := panelTestJob(42, `E:\repo`, "dashboard_cross", run, "synthesis")
 	member := panelTestJob(43, `E:\repo`, "dashboard_cross", run, "member")
-	service := &fakeService{panelMetadata: map[int64]roborev.JobMetadata{42: parent}, panelRaw: panelJobsJSON(parent, member)}
+	service := &fakeService{panelRaw: panelJobsJSON(parent, member)}
 	server := setupServer(t, service)
 	identity, err := server.Registry.Identity(`E:\repo`)
 	if err != nil {
@@ -333,6 +338,9 @@ func TestPanelMembersEnforcesRepositoryBoundary(t *testing.T) {
 	if recorder.Code != http.StatusOK || recorder.Body.String() != string(service.panelRaw) {
 		t.Fatalf("registered panel members = %d: %s", recorder.Code, recorder.Body.String())
 	}
+	if service.panelMembersCalls != 1 || service.metadataCalls != 0 {
+		t.Fatalf("panel member list calls = PanelMembers:%d JobMetadata:%d, want 1/0", service.panelMembersCalls, service.metadataCalls)
+	}
 
 	service.panelRaw = json.RawMessage(`{"jobs":[{"id":42,"repo_path":"E:\\foreign","panel_name":"dashboard_cross","panel_run_uuid":"` + run + `","panel_role":"synthesis","job_type":"synthesis"},{"id":43,"repo_path":"E:\\foreign","panel_name":"dashboard_cross","panel_run_uuid":"` + run + `","panel_role":"member","job_type":"review"}]}`)
 	request = httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members"+query, nil)
@@ -340,6 +348,30 @@ func TestPanelMembersEnforcesRepositoryBoundary(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("unregistered panel members status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPanelMembersAcceptsBackendValidatedAlternateWindowsPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path identity contract")
+	}
+	run := "986d3bfa-05da-4621-aeca-66f493a19ea3"
+	// RoboRev can spell the same registered checkout with different case,
+	// separators, and dot segments. The backend's gitx identity is authoritative.
+	alternatePath := `e:/REPO/.`
+	parent := panelTestJob(42, alternatePath, "dashboard_cross", run, "synthesis")
+	member := panelTestJob(43, alternatePath, "dashboard_cross", run, "member")
+	service := &fakeService{panelRaw: panelJobsJSON(parent, member)}
+	server := setupServer(t, service)
+	identity, err := server.Registry.Identity(`E:\repo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity), nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("alternate Windows repository spelling status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -366,7 +398,7 @@ func TestPanelMembersRequiresExactIdentityQueryAndParent(t *testing.T) {
 	run := "986d3bfa-05da-4621-aeca-66f493a19ea3"
 	parent := panelTestJob(42, `E:\repo`, "dashboard_cross", run, "synthesis")
 	member := panelTestJob(43, `E:\repo`, "dashboard_cross", run, "member")
-	service := &fakeService{panelMetadata: map[int64]roborev.JobMetadata{42: parent}, panelRaw: panelJobsJSON(parent, member)}
+	service := &fakeService{panelRaw: panelJobsJSON(parent, member)}
 	server := setupServer(t, service)
 	identity, err := server.Registry.Identity(`E:\repo`)
 	if err != nil {
@@ -390,7 +422,6 @@ func TestPanelMembersRequiresExactIdentityQueryAndParent(t *testing.T) {
 		}
 	}
 
-	service.panelMetadata[42] = parent
 	request := httptest.NewRequest(http.MethodGet, base+"?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity), nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
@@ -403,7 +434,7 @@ func TestPanelMembersRejectsSemanticAndMalformedUpstreamRows(t *testing.T) {
 	run := "986d3bfa-05da-4621-aeca-66f493a19ea3"
 	parent := panelTestJob(42, `E:\repo`, "dashboard_cross", run, "synthesis")
 	member := panelTestJob(43, `E:\repo`, "dashboard_cross", run, "member")
-	server := setupServer(t, &fakeService{panelMetadata: map[int64]roborev.JobMetadata{42: parent}})
+	server := setupServer(t, &fakeService{})
 	identity, err := server.Registry.Identity(`E:\repo`)
 	if err != nil {
 		t.Fatal(err)
@@ -423,6 +454,7 @@ func TestPanelMembersRejectsSemanticAndMalformedUpstreamRows(t *testing.T) {
 		{name: "wrong run", raw: panelJobsJSON(parent, panelTestJob(43, `E:\repo`, "dashboard_cross", "00000000-0000-0000-0000-000000000001", "member")), want: http.StatusConflict},
 		{name: "wrong panel", raw: panelJobsJSON(parent, panelTestJob(43, `E:\repo`, "other", run, "member")), want: http.StatusConflict},
 		{name: "missing synthesis", raw: panelJobsJSON(member), want: http.StatusConflict},
+		{name: "duplicate synthesis", raw: panelJobsJSON(parent, panelTestJob(44, `E:\repo`, "dashboard_cross", run, "synthesis"), member), want: http.StatusConflict},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -448,7 +480,7 @@ func TestPanelMembersRejectsParentAndRegisteredRepositoryConflicts(t *testing.T)
 	}
 	parent := panelTestJob(42, `E:\repo`, "dashboard_cross", run, "synthesis")
 	member := panelTestJob(43, `E:\repo`, "dashboard_cross", run, "member")
-	service := &fakeService{panelMetadata: map[int64]roborev.JobMetadata{42: parent}, panelRaw: panelJobsJSON(parent, member)}
+	service := &fakeService{panelRaw: panelJobsJSON(parent, member)}
 	server, err := NewServer(service, registry, "")
 	if err != nil {
 		t.Fatal(err)
@@ -459,25 +491,24 @@ func TestPanelMembersRejectsParentAndRegisteredRepositoryConflicts(t *testing.T)
 	}
 	requestURL := "/api/panels/" + run + "/members?parentJobId=42&repositoryIdentity=" + url.QueryEscape(identity)
 	cases := []struct {
-		name   string
-		parent roborev.JobMetadata
-		raw    json.RawMessage
-		want   int
+		name string
+		raw  json.RawMessage
+		want int
 	}{
-		{name: "parent ID mismatch", parent: panelTestJob(99, `E:\repo`, "dashboard_cross", run, "synthesis"), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "parent role mismatch", parent: panelTestJob(42, `E:\repo`, "dashboard_cross", run, "member"), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "parent synthesis type mismatch", parent: panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", "review"), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "parent synthesis type missing", parent: panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", ""), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "parent run mismatch", parent: panelTestJob(42, `E:\repo`, "dashboard_cross", "00000000-0000-0000-0000-000000000001", "synthesis"), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "registered repository mismatch", parent: panelTestJob(42, `E:\other`, "dashboard_cross", run, "synthesis"), raw: panelJobsJSON(parent, member), want: http.StatusConflict},
-		{name: "member registered repository mismatch", parent: parent, raw: panelJobsJSON(parent, panelTestJob(43, `E:\other`, "dashboard_cross", run, "member")), want: http.StatusConflict},
-		{name: "member unregistered repository", parent: parent, raw: panelJobsJSON(parent, panelTestJob(43, `E:\foreign`, "dashboard_cross", run, "member")), want: http.StatusForbidden},
-		{name: "raw synthesis type mismatch", parent: parent, raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", "review"), member), want: http.StatusConflict},
-		{name: "raw synthesis type missing", parent: parent, raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", ""), member), want: http.StatusConflict},
+		{name: "synthesis ID mismatch", raw: panelJobsJSON(panelTestJob(99, `E:\repo`, "dashboard_cross", run, "synthesis"), member), want: http.StatusConflict},
+		{name: "synthesis role missing", raw: panelJobsJSON(panelTestJob(42, `E:\repo`, "dashboard_cross", run, "member"), member), want: http.StatusConflict},
+		{name: "synthesis type mismatch", raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", "review"), member), want: http.StatusConflict},
+		{name: "synthesis type missing", raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", ""), member), want: http.StatusConflict},
+		{name: "synthesis run mismatch", raw: panelJobsJSON(panelTestJob(42, `E:\repo`, "dashboard_cross", "00000000-0000-0000-0000-000000000001", "synthesis"), member), want: http.StatusConflict},
+		{name: "synthesis panel mismatch", raw: panelJobsJSON(panelTestJob(42, `E:\repo`, "other", run, "synthesis"), member), want: http.StatusConflict},
+		{name: "registered repository mismatch", raw: panelJobsJSON(panelTestJob(42, `E:\other`, "dashboard_cross", run, "synthesis"), member), want: http.StatusConflict},
+		{name: "member registered repository mismatch", raw: panelJobsJSON(parent, panelTestJob(43, `E:\other`, "dashboard_cross", run, "member")), want: http.StatusConflict},
+		{name: "member unregistered repository", raw: panelJobsJSON(parent, panelTestJob(43, `E:\foreign`, "dashboard_cross", run, "member")), want: http.StatusForbidden},
+		{name: "raw synthesis type mismatch", raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", "review"), member), want: http.StatusConflict},
+		{name: "raw synthesis type missing", raw: panelJobsJSON(panelTestJobWithType(42, `E:\repo`, "dashboard_cross", run, "synthesis", ""), member), want: http.StatusConflict},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			service.panelMetadata[42] = test.parent
 			service.panelRaw = test.raw
 			request := httptest.NewRequest(http.MethodGet, requestURL, nil)
 			recorder := httptest.NewRecorder()
@@ -494,7 +525,7 @@ func TestPanelMemberDetailValidatesListBeforeShowAndShowIdentity(t *testing.T) {
 	parent := panelTestJob(42, `E:\repo`, "dashboard_cross", run, "synthesis")
 	member := panelTestJob(43, `E:\repo`, "dashboard_cross", run, "member")
 	show, _ := json.Marshal(map[string]any{"job_id": int64(43), "job": map[string]any{"id": int64(43), "repo_path": `E:\repo`, "panel_name": "dashboard_cross", "panel_run_uuid": run, "panel_role": "member"}, "review": map[string]any{"output": "heavy"}})
-	service := &fakeService{panelMetadata: map[int64]roborev.JobMetadata{42: parent}, panelRaw: panelJobsJSON(parent, member), showRaw: show}
+	service := &fakeService{panelRaw: panelJobsJSON(parent, member), showRaw: show}
 	server := setupServer(t, service)
 	identity, err := server.Registry.Identity(`E:\repo`)
 	if err != nil {
@@ -504,8 +535,8 @@ func TestPanelMemberDetailValidatesListBeforeShowAndShowIdentity(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query, nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || recorder.Body.String() != string(show) || service.showCalls != 1 {
-		t.Fatalf("detail = %d calls=%d body=%s", recorder.Code, service.showCalls, recorder.Body.String())
+	if recorder.Code != http.StatusOK || recorder.Body.String() != string(show) || service.showCalls != 1 || service.panelMembersCalls != 1 || service.metadataCalls != 0 {
+		t.Fatalf("detail = %d PanelMembers=%d Show=%d JobMetadata=%d body=%s", recorder.Code, service.panelMembersCalls, service.showCalls, service.metadataCalls, recorder.Body.String())
 	}
 
 	service.showCalls = 0

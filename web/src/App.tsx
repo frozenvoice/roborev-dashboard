@@ -62,19 +62,14 @@ function panelMembersFromPayload(value: unknown, panelRunUUID: string) {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
-function sameRepositoryPath(left: string, right: string) {
-  if (left === right) return true
-  const windowsPath = (value: string) => /^[A-Za-z]:[\\/]/.test(value)
-  return windowsPath(left) && windowsPath(right) && left.toLowerCase() === right.toLowerCase()
-}
-function validatePanelMemberDetail(value: unknown, expected: { id: number; panelRunUUID: string; panelName?: string; repoPath: string }) {
+function validatePanelMemberDetail(value: unknown, expected: { id: number; panelRunUUID: string; panelName?: string }) {
   if (!isRecord(value)) throw new Error('Panel member detail was not an object')
   const job = value.job
   if (!isRecord(job)) throw new Error('Panel member detail job identity is missing')
   const topLevelID = positiveJobId(value.job_id)
   const nestedID = positiveJobId(job.id)
   if (topLevelID === null || nestedID === null || topLevelID !== expected.id || nestedID !== expected.id) throw new Error('Panel member detail job identity mismatch')
-  if (typeof job.repo_path !== 'string' || !job.repo_path.trim() || expected.repoPath && !sameRepositoryPath(job.repo_path, expected.repoPath)) throw new Error('Panel member detail repository path mismatch')
+  if (typeof job.repo_path !== 'string' || !job.repo_path.trim()) throw new Error('Panel member detail repository path mismatch')
   if (job.panel_run_uuid !== expected.panelRunUUID) throw new Error('Panel member detail panel run mismatch')
   if (job.panel_role !== 'member') throw new Error('Panel member detail role mismatch')
   if (expected.panelName && job.panel_name !== expected.panelName) throw new Error('Panel member detail panel mismatch')
@@ -169,7 +164,8 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const memberPollGeneration = useRef(0)
   const selectedMemberIdRef = useRef<number | null>(null)
   const memberSnapshot = useRef<Map<number, string>>(new Map())
-  const memberPanelRunRef = useRef(job.panel_run_uuid)
+  const memberScopeRef = useRef('')
+  const memberPollScopeRef = useRef('')
   const memberRepositoryIdentity = useRef(repoIdentity)
   const fixPromptGeneration = useRef(0)
   const fixPromptTarget = useRef<{ jobId: number; member: boolean } | null>(null)
@@ -194,13 +190,13 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     try {
       const value = await request<unknown>(memberDetailURL(memberId))
       if (generation !== memberDetailGeneration.current || memberRepositoryIdentity.current !== repoIdentity) return
-      setMemberDetail(validatePanelMemberDetail(value, { id: memberId, panelRunUUID, panelName: job.panel_name, repoPath }))
+      setMemberDetail(validatePanelMemberDetail(value, { id: memberId, panelRunUUID, panelName: job.panel_name }))
     } catch (error) {
       if (generation === memberDetailGeneration.current && memberRepositoryIdentity.current === repoIdentity) setMemberDetailError((error as Error).message)
     } finally {
       if (generation === memberDetailGeneration.current && memberRepositoryIdentity.current === repoIdentity) setMemberDetailLoading(false)
     }
-  }, [job.panel_run_uuid, memberListURL, repoIdentity, repoPath])
+  }, [job.panel_run_uuid, memberListURL, repoIdentity])
 
   useEffect(() => {
     const generation = ++detailGeneration.current
@@ -214,23 +210,12 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     return () => { detailGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
   }, [id])
   useEffect(() => {
+    const scope = `${repoIdentity}\u0000${id}\u0000${job.panel_run_uuid || ''}`
+    if (memberScopeRef.current === scope) return
+    const hadScope = Boolean(memberScopeRef.current)
+    memberScopeRef.current = scope
+    memberPollScopeRef.current = ''
     memberRepositoryIdentity.current = repoIdentity
-    memberDetailGeneration.current++
-    memberPollGeneration.current++
-    selectedMemberIdRef.current = null
-    memberSnapshot.current = new Map()
-    setSelectedMemberId(null)
-    setMemberJobs([])
-    setMemberLoadState('not-requested')
-    setMemberLoading(false)
-    setMemberError('')
-    setMemberDetail(null)
-    setMemberDetailError('')
-    setMemberDetailLoading(false)
-  }, [repoIdentity])
-  useEffect(() => {
-    if (memberPanelRunRef.current === job.panel_run_uuid) return
-    memberPanelRunRef.current = job.panel_run_uuid
     memberPollGeneration.current++
     memberDetailGeneration.current++
     selectedMemberIdRef.current = null
@@ -243,19 +228,40 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     setMemberDetail(null)
     setMemberDetailError('')
     setMemberDetailLoading(false)
-    setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review')
-  }, [canLoadMembers, job.panel_run_uuid, job.status])
+    if (hadScope) setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review')
+  }, [canLoadMembers, id, job.panel_run_uuid, repoIdentity])
   useEffect(() => {
     const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
     previousStatus.current = job.status
     if (!wasRunning || isRunning(job)) return
     const detailRequest = ++detailGeneration.current
-    const refreshDetail = (attempt: number) => request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (detailRequest === detailGeneration.current) { setDetail({ ...value, id, job_id: id }); setDetailError('') } }).catch(error => { if (detailRequest !== detailGeneration.current) return; if (attempt < 1) setTimeout(() => refreshDetail(attempt + 1), 1200); else setDetailError((error as Error).message) })
-    refreshDetail(0)
+    setDetailLoading(true)
+    const refreshDetail = async (attempt: number): Promise<void> => {
+      try {
+        const value = await request<ReviewJob>(`/api/reviews/${id}`)
+        if (detailRequest === detailGeneration.current) {
+          setDetail({ ...value, id, job_id: id })
+          setDetailError('')
+        }
+      } catch (error) {
+        if (detailRequest !== detailGeneration.current) return
+        if (attempt < 1) {
+          await new Promise<void>(resolve => setTimeout(resolve, 1200))
+          if (detailRequest !== detailGeneration.current) return
+          return refreshDetail(attempt + 1)
+        }
+        setDetailError((error as Error).message)
+      }
+    }
+    void refreshDetail(0).finally(() => {
+      if (detailRequest === detailGeneration.current) setDetailLoading(false)
+    })
     if (lazyLoaded.log) {
       const logRequest = (lazyGeneration.current.log ?? 0) + 1
       lazyGeneration.current.log = logRequest
-      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) { setLazy(old => ({ ...old, log: value.text })); setLazyError(old => ({ ...old, log: '' })) } })
+      setLazyLoading(old => ({ ...old, log: true }))
+      setLazyError(old => ({ ...old, log: '' }))
+      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) { setLazy(old => ({ ...old, log: value.text })); setLazyError(old => ({ ...old, log: '' })) } }).catch(error => { if (logRequest === lazyGeneration.current.log) setLazyError(old => ({ ...old, log: (error as Error).message })) }).finally(() => { if (logRequest === lazyGeneration.current.log) setLazyLoading(old => ({ ...old, log: false })) })
     }
   }, [id, job.status, lazyLoaded.log])
   useEffect(() => {
@@ -271,12 +277,14 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     if (tab !== 'members' || !job.panel_run_uuid) return
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    let first = true
     const generation = ++memberPollGeneration.current
     const panelRunUUID = job.panel_run_uuid
     const identity = repoIdentity
+    const scope = `${identity}\u0000${id}\u0000${panelRunUUID}`
+    const firstScopeRequest = memberPollScopeRef.current !== scope
+    let first = firstScopeRequest
     const loadMembers = async () => {
-      if (first && memberLoadState === 'not-requested') {
+      if (first) {
         setMemberLoading(true)
         setMemberLoadState('pending')
       }
@@ -309,12 +317,15 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
         setMemberError('')
         if (isRunning(job) || next.some(isRunning)) timer = setTimeout(loadMembers, 4000)
       } catch (error) {
-        if (cancelled) return
+        if (cancelled || generation !== memberPollGeneration.current || identity !== memberRepositoryIdentity.current) return
         setMemberLoadState('error')
         setMemberError((error as Error).message)
         if (isRunning(job)) timer = setTimeout(loadMembers, 4000)
       } finally {
-        if (!cancelled && first) setMemberLoading(false)
+        if (!cancelled && generation === memberPollGeneration.current && identity === memberRepositoryIdentity.current && first) {
+          memberPollScopeRef.current = scope
+          setMemberLoading(false)
+        }
         first = false
       }
     }

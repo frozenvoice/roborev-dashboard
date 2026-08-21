@@ -47,6 +47,7 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 			}
 			query := request.URL.Query()
 			job := map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "status": "running", "verdict": "F", "commit_subject": "Observed metadata", "enqueued_at": "2026-08-17T00:00:00Z", "started_at": "2026-08-17T00:00:05Z", "prompt": strings.Repeat("large-active-prompt", 140_000), "diff_content": "secret diff"}
+			jobs := []any{job}
 			switch {
 			case query.Get("id") == "42":
 				if query.Get("limit") != "1" {
@@ -58,14 +59,21 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 				}
 				job["id"] = 43
 				job["panel_role"] = "member"
+				job["job_type"] = "review"
+				job["panel_run_uuid"] = query.Get("panel_run")
+				job["panel_name"] = "dashboard_cross"
 				job["panel_member_index"] = 0
+				jobs = []any{
+					map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "panel_run_uuid": query.Get("panel_run"), "panel_role": "synthesis", "job_type": "synthesis", "panel_name": "dashboard_cross", "status": "running"},
+					job,
+				}
 			case query.Get("repo") == `E:\한글 프로젝트\repo`:
 				job["finished_at"] = "2026-08-17T00:00:30Z"
 			default:
 				http.Error(w, "unexpected jobs query", http.StatusBadRequest)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []any{job}, "has_more": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs, "has_more": false})
 		default:
 			http.NotFound(w, request)
 		}
@@ -121,6 +129,24 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	members, err := client.PanelMembers(ctx, "986d3bfa-05da-4621-aeca-66f493a19ea3")
 	if err != nil || !bytes.Contains(members, []byte(`"panel_role":"member"`)) {
 		t.Fatalf("panel member lookup failed: %v %s", err, members)
+	}
+	var panelRun struct {
+		Jobs []JobMetadata `json:"jobs"`
+	}
+	if err := json.Unmarshal(members, &panelRun); err != nil {
+		t.Fatalf("decode panel run: %v", err)
+	}
+	synthesisCount := 0
+	for _, panelJob := range panelRun.Jobs {
+		if panelJob.PanelRole == "synthesis" {
+			synthesisCount++
+			if panelJob.ID != 42 || panelJob.JobType != "synthesis" {
+				t.Fatalf("unexpected synthesis row: %#v", panelJob)
+			}
+		}
+	}
+	if len(panelRun.Jobs) != 2 || synthesisCount != 1 || bytes.Contains(members, []byte(`"prompt"`)) || bytes.Contains(members, []byte(`"diff_content"`)) {
+		t.Fatalf("RoboRev v0.64 panel_run must contain members plus exactly one synthesis without heavy fields: %s", members)
 	}
 	prompt, err := client.Prompt(ctx, 42)
 	if err != nil || prompt == "" {
