@@ -217,8 +217,7 @@ export function Tasks({ repository, jobs, daemonReady = true, onOpenReview, onQu
     setPreviewLoading(true)
     setPreviewError('')
     try {
-      const query = new URLSearchParams({ repositoryIdentity: expectedIdentity, task: expectedTask })
-      const value = normalizeTaskPreview(await request<unknown>(`/api/tasks/preview?${query.toString()}`), expectedTask)
+      const value = normalizeTaskPreview(await request<unknown>('/api/tasks/preview', { method: 'POST', body: JSON.stringify({ repositoryIdentity: expectedIdentity, task: expectedTask }) }), expectedTask)
       if (!value) throw new APIError(t('tasks.previewInvalid'))
       if (expectedGeneration !== generation.current || expectedIdentity !== repository.identity || expectedTask !== task) return
       setPreview(value)

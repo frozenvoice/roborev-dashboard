@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -55,8 +54,7 @@ func setupTaskServer(t *testing.T) (*Server, *taskFakeService) {
 
 func TestTaskPreviewStrictBrowserAuthRunsNoPreflightBeforeAuth(t *testing.T) {
 	server, service := setupTaskServer(t)
-	query := url.Values{"repositoryIdentity": []string{`E:\repo`}, "task": []string{"inspect"}}
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/preview?"+query.Encode(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(`{"repositoryIdentity":"e:\\repo","task":"inspect"}`))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden {
@@ -90,8 +88,8 @@ func TestTaskPreviewStrictBrowserAuthMatrix(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server, service := setupTaskServer(t)
-			query := url.Values{"repositoryIdentity": []string{`e:\repo`}, "task": []string{"inspect"}}
-			req := httptest.NewRequest(http.MethodGet, "/api/tasks/preview?"+query.Encode(), nil)
+			body, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": "inspect"})
+			req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(string(body)))
 			req.Host = "example.com"
 			for _, value := range test.origin {
 				req.Header.Add("Origin", value)
@@ -120,8 +118,8 @@ func TestTaskPreviewStrictBrowserAuthMatrix(t *testing.T) {
 func TestTaskPreviewAndStartRequireAuthAndUseExactTask(t *testing.T) {
 	server, service := setupTaskServer(t)
 	taskText := "한글\nquotes ' \" & | $(echo no)"
-	query := url.Values{"repositoryIdentity": []string{`e:\repo`}, "task": []string{taskText}}
-	req := httptest.NewRequest(http.MethodGet, "/api/tasks/preview?"+query.Encode(), nil)
+	body, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": taskText})
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(string(body)))
 	req.Host = "example.com"
 	req.Header.Set("Origin", "http://example.com")
 	recorder := httptest.NewRecorder()
@@ -143,8 +141,8 @@ func TestTaskPreviewAndStartRequireAuthAndUseExactTask(t *testing.T) {
 		t.Fatalf("preview = %#v", preview)
 	}
 
-	body, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": taskText, "previewToken": preview.PreviewToken})
-	post := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(string(body)))
+	startBody, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": taskText, "previewToken": preview.PreviewToken})
+	post := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(string(startBody)))
 	post.Host = "example.com"
 	post.Header.Set("Origin", "http://example.com")
 	post.Header.Set("X-CSRF-Token", server.csrfToken)
@@ -188,6 +186,16 @@ func TestTaskStartRejectsForeignOriginBeforeAdapter(t *testing.T) {
 	}
 }
 
+func TestTaskPreviewGETIsNotAllowed(t *testing.T) {
+	server, service := setupTaskServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/preview", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusMethodNotAllowed || service.preflightCalls != 0 {
+		t.Fatalf("status=%d preflightCalls=%d", recorder.Code, service.preflightCalls)
+	}
+}
+
 func TestGenericRerunRejectsTaskJobsBeforeRoboRevRerun(t *testing.T) {
 	server, service := setupTaskServer(t)
 	service.fakeService.panelMetadata = map[int64]roborev.JobMetadata{
@@ -203,7 +211,7 @@ func TestGenericRerunRejectsTaskJobsBeforeRoboRevRerun(t *testing.T) {
 	if service.rerunCalls != 0 {
 		t.Fatalf("Rerun calls = %d", service.rerunCalls)
 	}
-	if !strings.Contains(recorder.Body.String(), "task-rerun-disabled") {
+	if !strings.Contains(recorder.Body.String(), "task-rerun-unsupported") || !strings.Contains(recorder.Body.String(), "Tasks v1 does not support rerun") {
 		t.Fatalf("body = %s", recorder.Body.String())
 	}
 }

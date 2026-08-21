@@ -229,7 +229,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
-	s.mux.HandleFunc("GET /api/tasks/preview", s.taskPreview)
+	s.mux.HandleFunc("POST /api/tasks/preview", s.taskPreview)
+	s.mux.HandleFunc("GET /api/tasks/preview", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusMethodNotAllowed, "task preview requires POST", "method")
+	})
 	s.mux.HandleFunc("GET /api/analyses/types", s.analysisTypes)
 	s.mux.HandleFunc("GET /api/analyses/prompt", s.analysisPrompt)
 	s.mux.HandleFunc("GET /api/analyses/preview", s.analysisPreview)
@@ -1106,25 +1109,34 @@ func (s *Server) taskPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "RoboRev task capability is unavailable", "task")
 		return
 	}
-	values := r.URL.Query()
-	allowed := map[string]bool{"repositoryIdentity": true, "task": true}
-	for key, entries := range values {
-		if !allowed[key] || len(entries) != 1 {
-			writeError(w, http.StatusBadRequest, "invalid task preview query", "request")
-			return
-		}
-	}
-	identity, taskText := values.Get("repositoryIdentity"), values.Get("task")
-	if len(values["repositoryIdentity"]) != 1 || len(values["task"]) != 1 {
-		writeError(w, http.StatusBadRequest, "repositoryIdentity and task are required", "request")
+	var body task.Request
+	if !decodeTaskPreviewBody(w, r, &body) {
 		return
 	}
-	preview, err := s.Tasks.Prepare(r.Context(), task.Request{RepositoryIdentity: identity, Task: taskText})
+	preview, err := s.Tasks.Prepare(r.Context(), body)
 	if err != nil {
 		writeTaskError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
+}
+
+func decodeTaskPreviewBody(w http.ResponseWriter, r *http.Request, target any) bool {
+	// 16 KiB task text can expand when JSON-escaped; 64 KiB leaves room for
+	// request keys while keeping preview input tightly bounded.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid task preview request", "request")
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid task preview request", "request")
+		return false
+	}
+	return true
 }
 
 func taskPreviewMessage(err error) string {
@@ -1688,7 +1700,7 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 	// review rerun endpoint. Tasks require their own fresh safety preflight and
 	// explicit confirmation; otherwise this route would bypass that boundary.
 	if strings.TrimSpace(job.JobType) == "task" || strings.TrimSpace(job.GitRef) == "run" {
-		writeError(w, http.StatusConflict, "task jobs must be rerun through the Tasks workspace", "task-rerun-disabled")
+		writeError(w, http.StatusConflict, "Tasks v1 does not support rerun; generic frozen rerun is unavailable for task jobs", "task-rerun-unsupported")
 		return
 	}
 	if !s.Registry.Contains(job.RepoPath) {

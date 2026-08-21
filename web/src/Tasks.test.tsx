@@ -38,10 +38,14 @@ describe('Tasks normalizers and workspace', () => {
     expect(normalizeTaskReceipt({ job_id: 42, job_uuid: 'not-a-uuid', git_ref: 'run', status: 'queued' })).toBeNull()
   })
 
-  it('opens a preview without POST and submits exactly once', async () => {
+  it('opens a preview without enqueueing and submits exactly once', async () => {
     const postResponse = deferred<Response>()
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).startsWith('/api/tasks/preview?')) return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
+      if (String(input) === '/api/tasks/preview') {
+        expect(init?.method).toBe('POST')
+        expect(init?.body).toBe(JSON.stringify({ repositoryIdentity: repository.identity, task: task.replace(/\r\n/g, '\n') }))
+        return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
+      }
       if (String(input) === '/api/tasks') return postResponse.promise
       return response([])
     })
@@ -68,7 +72,7 @@ describe('Tasks normalizers and workspace', () => {
 
   it('treats an ambiguous_enqueue phase as uncertain and keeps retry locked', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).startsWith('/api/tasks/preview?')) return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
+      if (String(input) === '/api/tasks/preview') return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
       if (String(input) === '/api/tasks') return response({ error: 'enqueue result unavailable', phase: 'ambiguous_enqueue' }, 502)
       return response([])
     })
@@ -86,7 +90,7 @@ describe('Tasks normalizers and workspace', () => {
   it('ignores a late preview after task edit', async () => {
     const pendingPreview = deferred<Response>()
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).startsWith('/api/tasks/preview?')) return pendingPreview.promise
+      if (String(input) === '/api/tasks/preview') return pendingPreview.promise
       return response([])
     })
     vi.stubGlobal('fetch', fetchMock)
@@ -107,7 +111,7 @@ describe('Tasks normalizers and workspace', () => {
 
   it('shows skipped receipt without fabricating a task history row', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).startsWith('/api/tasks/preview?')) return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
+      if (String(input) === '/api/tasks/preview') return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
       if (String(input) === '/api/tasks') return response({ skipped: true, reason: 'duplicate task' })
       return response([])
     })
@@ -137,7 +141,7 @@ describe('Tasks normalizers and workspace', () => {
 
   it('switches locale without refetching preview or executing a task', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
-      if (String(input).startsWith('/api/tasks/preview?')) return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
+      if (String(input) === '/api/tasks/preview') return response({ ...preview, command: { ...preview.command, stdin: task.replace(/\r\n/g, '\n') } })
       return response([])
     })
     vi.stubGlobal('fetch', fetchMock)
