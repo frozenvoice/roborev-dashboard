@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
+	"github.com/froze/roborev-dashboard/internal/analysis"
 	"github.com/froze/roborev-dashboard/internal/fixoperation"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -38,6 +39,7 @@ type Server struct {
 	Setup       *setup.Manager
 	Agents      *agentstatus.Service
 	Runtime     *runtimecontrol.Manager
+	Analyses    *analysis.Manager
 	Events      EventRelay
 	Gate        *operation.Gate
 	AllowedHost string
@@ -103,6 +105,13 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if err != nil {
 		return nil, err
 	}
+	var analyses *analysis.Manager
+	if analysisService, ok := service.(analysis.Service); ok {
+		analyses, err = analysis.NewManager(analysis.Dependencies{Registry: registry, RoboRev: analysisService, Binary: serviceBinary(service), Gate: gate})
+		if err != nil {
+			return nil, err
+		}
+	}
 	var events EventRelay
 	if source, ok := service.(streamrelay.Source); ok {
 		events = streamrelay.NewManager(source, func(ctx context.Context, identity string) (string, error) {
@@ -113,7 +122,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -165,6 +174,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			shutdownErrors = append(shutdownErrors, err)
 		}
 	}
+	if s.Analyses != nil {
+		if err := s.Analyses.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.Setup != nil {
 		if err := s.Setup.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -191,12 +205,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
+	s.mux.HandleFunc("GET /api/analyses/types", s.analysisTypes)
+	s.mux.HandleFunc("GET /api/analyses/prompt", s.analysisPrompt)
+	s.mux.HandleFunc("GET /api/analyses/preview", s.analysisPreview)
 	s.mux.HandleFunc("GET /api/fixes", s.listFixes)
 	s.mux.HandleFunc("GET /api/fixes/{id}", s.getFix)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
 	s.mux.HandleFunc("POST /api/panel-refines", s.mutation(s.startPanelRefine))
 	s.mux.HandleFunc("POST /api/panel-refines/{id}/cancel", s.mutation(s.cancelPanelRefine))
 	s.mux.HandleFunc("POST /api/fixes", s.mutationAuth(s.startFix))
+	s.mux.HandleFunc("POST /api/analyses", s.mutationAuth(s.startAnalysis))
 	s.mux.HandleFunc("POST /api/fixes/{id}/cancel", s.mutationAuth(s.cancelFix))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
@@ -1032,6 +1050,135 @@ func (s *Server) fixPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
+}
+
+func analysisQuery(r *http.Request, allowed ...string) (map[string]string, error) {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	values := r.URL.Query()
+	result := make(map[string]string, len(allowed))
+	for name, entries := range values {
+		if _, ok := allowedSet[name]; !ok || len(entries) != 1 || strings.TrimSpace(entries[0]) == "" {
+			return nil, errors.New("unknown or duplicate analysis query field")
+		}
+		result[name] = entries[0]
+	}
+	return result, nil
+}
+
+func analysisErrorStatus(err error) int {
+	var typed *analysis.Error
+	if !errors.As(err, &typed) {
+		return http.StatusInternalServerError
+	}
+	switch typed.Kind {
+	case analysis.ErrorInvalid:
+		return http.StatusBadRequest
+	case analysis.ErrorForbidden:
+		return http.StatusForbidden
+	case analysis.ErrorConflict:
+		return http.StatusConflict
+	case analysis.ErrorUnavailable:
+		return http.StatusServiceUnavailable
+	case analysis.ErrorAmbiguous:
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func (s *Server) analysisTypes(w http.ResponseWriter, r *http.Request) {
+	if s.Analyses == nil {
+		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
+		return
+	}
+	if len(r.URL.Query()) != 0 {
+		writeError(w, http.StatusBadRequest, "unknown analysis query field", "request")
+		return
+	}
+	types, err := s.Analyses.Types(r.Context())
+	if err != nil {
+		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-types")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Types []roborev.AnalysisType `json:"types"`
+	}{Types: types})
+}
+
+func (s *Server) analysisPrompt(w http.ResponseWriter, r *http.Request) {
+	if s.Analyses == nil {
+		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
+		return
+	}
+	query, err := analysisQuery(r, "type")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "request")
+		return
+	}
+	if query["type"] == "" {
+		writeError(w, http.StatusBadRequest, "type is required", "analysis-type")
+		return
+	}
+	prompt, err := s.Analyses.Prompt(r.Context(), query["type"])
+	if err != nil {
+		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-prompt")
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		AnalysisType string `json:"analysisType"`
+		Prompt       string `json:"prompt"`
+	}{AnalysisType: query["type"], Prompt: prompt})
+}
+
+func (s *Server) analysisPreview(w http.ResponseWriter, r *http.Request) {
+	if s.Analyses == nil {
+		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
+		return
+	}
+	query, err := analysisQuery(r, "repositoryIdentity", "type", "scope")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "request")
+		return
+	}
+	for _, name := range []string{"repositoryIdentity", "type", "scope"} {
+		if query[name] == "" {
+			writeError(w, http.StatusBadRequest, name+" is required", name)
+			return
+		}
+	}
+	preview, err := s.Analyses.Prepare(r.Context(), analysis.Request{RepositoryIdentity: query["repositoryIdentity"], AnalysisType: query["type"], Scope: query["scope"]})
+	if err != nil {
+		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-preview")
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+type analysisBody struct {
+	RepositoryIdentity string `json:"repositoryIdentity"`
+	AnalysisType       string `json:"analysisType"`
+	Scope              string `json:"scope"`
+	PreviewToken       string `json:"previewToken"`
+}
+
+func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
+	if s.Analyses == nil {
+		writeError(w, http.StatusServiceUnavailable, "Analyze capability is unavailable", "analysis")
+		return
+	}
+	var body analysisBody
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	result, err := s.Analyses.Start(r.Context(), analysis.StartRequest{Request: analysis.Request{RepositoryIdentity: body.RepositoryIdentity, AnalysisType: body.AnalysisType, Scope: body.Scope}, PreviewToken: body.PreviewToken})
+	if err != nil {
+		writeError(w, analysisErrorStatus(err), err.Error(), "analysis")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) listFixes(w http.ResponseWriter, r *http.Request) {

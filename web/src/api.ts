@@ -26,6 +26,8 @@ export type Installation = {
     panelMembersApi: boolean
     promptLazyLoad: boolean
     rawLog: boolean
+    /** Version-gated RoboRev analyze command contract. */
+    analyzeCommand?: boolean
     /** Optional because older bootstrap responses predate the stream relay. */
     streamEvents?: boolean
   }
@@ -587,6 +589,155 @@ export type ReviewJob = {
   member_job_ids?: number[]
   duration_ms?: number
   [key: string]: unknown
+}
+
+export type AnalysisScope = 'branch' | 'repository'
+
+export type AnalysisType = {
+  name: string
+  description: string
+}
+
+export type AnalysisPrompt = {
+  analysisType: string
+  prompt: string
+}
+
+export type AnalysisCommand = {
+  executable: string
+  args: string[]
+}
+
+export type AnalysisPreview = {
+  repositoryIdentity: string
+  repositoryPath: string
+  head: string
+  branch: string
+  analysisType: string
+  scope: AnalysisScope
+  command: AnalysisCommand
+  previewToken: string
+}
+
+export type AnalysisReceiptJob = {
+  id: number
+  agent: string
+}
+
+export type AnalysisReceipt = {
+  jobs: AnalysisReceiptJob[]
+  analysisType: string
+  files: string[]
+}
+
+const analysisTypePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const analysisScopes: AnalysisScope[] = ['branch', 'repository']
+const maxAnalysisTypes = 64
+const maxAnalysisDescriptionLength = 4_096
+const maxAnalysisPromptLength = 2_097_152
+const maxAnalysisArgs = 64
+const maxAnalysisArgLength = 8_192
+const maxAnalysisFiles = 4_096
+const maxAnalysisFileLength = 4_096
+
+function analysisString(value: unknown, maxLength = 8_192) {
+  return typeof value === 'string' && value.trim() && value.length <= maxLength && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value) ? value : null
+}
+
+function analysisTypeName(value: unknown) {
+  const name = analysisString(value, 80)
+  return name && analysisTypePattern.test(name) ? name : null
+}
+
+function analysisObject(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function analysisAlias(object: Record<string, unknown>, camel: string, snake: string) {
+  return object[camel] ?? object[snake]
+}
+
+/**
+ * Normalize the validated JSON envelope returned by GET /api/analyses/types.
+ * The server owns discovery; the browser never manufactures a type catalog.
+ */
+export function normalizeAnalysisTypesResponse(value: unknown): AnalysisType[] | null {
+  const object = analysisObject(value)
+  const values = Array.isArray(value) ? value : object && Array.isArray(object.types) ? object.types : null
+  if (!values || values.length === 0 || values.length > maxAnalysisTypes) return null
+  const seen = new Set<string>()
+  const types: AnalysisType[] = []
+  for (const item of values) {
+    const entry = analysisObject(item)
+    const name = analysisTypeName(entry && analysisAlias(entry, 'name', 'type'))
+    const description = analysisString(entry && analysisAlias(entry, 'description', 'description'), maxAnalysisDescriptionLength)
+    if (!name || !description || seen.has(name)) return null
+    seen.add(name)
+    types.push({ name, description })
+  }
+  return types
+}
+
+/** Normalize the lazy prompt response without translating RoboRev text. */
+export function normalizeAnalysisPrompt(value: unknown, expectedType?: string): AnalysisPrompt | null {
+  const object = analysisObject(value)
+  if (!object) return null
+  const analysisType = analysisTypeName(analysisAlias(object, 'analysisType', 'analysis_type') ?? object.type)
+  const prompt = analysisString(object.prompt, maxAnalysisPromptLength)
+  if (!analysisType || !prompt || (expectedType && analysisType !== expectedType)) return null
+  return { analysisType, prompt }
+}
+
+function normalizeAnalysisCommand(value: unknown): AnalysisCommand | null {
+  const object = analysisObject(value)
+  if (!object || !analysisString(object.executable) || !Array.isArray(object.args) || object.args.length > maxAnalysisArgs || !object.args.every(item => typeof item === 'string' && item.length <= maxAnalysisArgLength && !/[\u0000-\u001F\u007F]/.test(item))) return null
+  return { executable: object.executable as string, args: object.args as string[] }
+}
+
+/** Normalize a server-prepared, repository-bound command preview. */
+export function normalizeAnalysisPreview(value: unknown, expected?: { repositoryIdentity?: string; analysisType?: string; scope?: AnalysisScope }): AnalysisPreview | null {
+  const object = analysisObject(value)
+  if (!object) return null
+  const repositoryIdentity = analysisString(analysisAlias(object, 'repositoryIdentity', 'repository_identity'), 512)
+  const repositoryPath = analysisString(analysisAlias(object, 'repositoryPath', 'repository_path'), 32_768)
+  const head = analysisString(object.head, 256)
+  const branch = analysisString(object.branch, 512)
+  const analysisType = analysisTypeName(analysisAlias(object, 'analysisType', 'analysis_type'))
+  const scope = analysisAlias(object, 'scope', 'scope')
+  const previewToken = analysisString(analysisAlias(object, 'previewToken', 'preview_token'), 4_096)
+  const command = normalizeAnalysisCommand(object.command)
+  if (!repositoryIdentity || !repositoryPath || !head || !branch || !analysisType || !analysisScopes.includes(scope as AnalysisScope) || !command || !previewToken) return null
+  if (expected?.repositoryIdentity && expected.repositoryIdentity !== repositoryIdentity) return null
+  if (expected?.analysisType && expected.analysisType !== analysisType) return null
+  if (expected?.scope && expected.scope !== scope) return null
+  return { repositoryIdentity, repositoryPath, head, branch, analysisType, scope: scope as AnalysisScope, command, previewToken }
+}
+
+/** Normalize the strict, non-per-file JSON receipt returned after enqueue. */
+export function normalizeAnalysisReceipt(value: unknown, expectedType?: string): AnalysisReceipt | null {
+  const envelope = analysisObject(value)
+  const object = envelope && analysisObject(envelope.receipt) ? analysisObject(envelope.receipt) : envelope
+  if (!object || !Array.isArray(object.jobs) || object.jobs.length !== 1 || object.jobs.length > maxAnalysisTypes) return null
+  const analysisType = analysisTypeName(analysisAlias(object, 'analysisType', 'analysis_type'))
+  if (!analysisType || (expectedType && expectedType !== analysisType) || !Array.isArray(object.files) || object.files.length > maxAnalysisFiles) return null
+  const files: string[] = []
+  const fileSeen = new Set<string>()
+  for (const item of object.files) {
+    if (typeof item !== 'string' || !item.trim() || item.length > maxAnalysisFileLength || /[\u0000-\u001F\u007F]/.test(item)) return null
+    if (!fileSeen.has(item)) fileSeen.add(item)
+    files.push(item)
+  }
+  const jobs: AnalysisReceiptJob[] = []
+  const seen = new Set<number>()
+  for (const item of object.jobs) {
+    const entry = analysisObject(item)
+    const id = entry?.id
+    const agent = analysisString(entry?.agent, 512)
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 || !agent || seen.has(id)) return null
+    seen.add(id)
+    jobs.push({ id, agent })
+  }
+  return { jobs, analysisType, files }
 }
 
 /**

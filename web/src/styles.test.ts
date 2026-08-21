@@ -35,4 +35,24 @@ describe('setup theme stylesheet contract', () => {
     expect(darkTheme).toContain('--setup-runtime-preview:#202831')
     expect(darkTheme).toContain('--setup-progress-track:#303943')
   })
+
+  it('keeps selected Analyze scope labels on a dark-mode-safe semantic token', () => {
+    const selectedScope = declaration('analyze-scope label.selected')
+    expect(selectedScope).toContain('background:var(--setup-runtime-preview)')
+    expect(selectedScope).not.toContain('#faf8ff')
+    expect(stylesheet).toContain('--setup-runtime-preview:#202831')
+  })
+
+  it('keeps Analyze usable at a 390px viewport through its mobile media contract', () => {
+    const mobileMatch = stylesheet.match(/@media\(max-width:(\d+)px\)\{([\s\S]*)\}\s*$/)
+    expect(mobileMatch, 'missing Analyze mobile media query').not.toBeNull()
+    expect(Number(mobileMatch?.[1])).toBeGreaterThanOrEqual(390)
+
+    const mobileAnalyze = mobileMatch?.[2] ?? ''
+    expect(mobileAnalyze).toContain('.analyze-page{padding:23px 12px}')
+    expect(mobileAnalyze).toContain('.analyze-grid{grid-template-columns:1fr}')
+    expect(mobileAnalyze).toContain('.analyze-receipt dl{grid-template-columns:repeat(2,minmax(0,1fr))}')
+    expect(mobileAnalyze).toContain('.analyze-dialog{max-height:96vh}')
+    expect(mobileAnalyze).toContain('.analyze-command-preview{max-height:300px;overflow:auto}')
+  })
 })

@@ -22,6 +22,8 @@ import (
 
 const runtimeControlResponseLimit int64 = 256 << 10
 
+const daemonHealthSchemaURL = "http://127.0.0.1:7373/HealthStatus.json"
+
 var (
 	// ErrDaemonOffline is returned by queue operations when the daemon cannot
 	// serve its status endpoint.  A caller may use this to disable queue
@@ -165,6 +167,9 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 	}
 	if health.Schema == nil {
 		return daemonHealthResponse{}, errors.New(`malformed RoboRev daemon health: "$schema" is required and must be a non-null string`)
+	}
+	if string(*health.Schema) != daemonHealthSchemaURL {
+		return daemonHealthResponse{}, fmt.Errorf(`malformed RoboRev daemon health: "$schema" must equal %q`, daemonHealthSchemaURL)
 	}
 	return health, nil
 }

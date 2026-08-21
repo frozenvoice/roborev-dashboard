@@ -163,7 +163,15 @@ func (c *Client) snapshot() (string, string, uint64) {
 	return c.binding.binary, c.binding.daemonURL, c.binding.generation
 }
 
-func (c *Client) BinaryPath() string                               { binary, _, _ := c.snapshot(); return binary }
+func (c *Client) BinaryPath() string { binary, _, _ := c.snapshot(); return binary }
+
+// BindingIdentity is an opaque process-local identity for the validated
+// executable binding. Rebinding the same path increments generation and
+// therefore invalidates previously issued preview tokens.
+func (c *Client) BindingIdentity() string {
+	binary, _, generation := c.snapshot()
+	return fmt.Sprintf("%d:%s", generation, binary)
+}
 func (c *Client) HasExplicitOverride() bool                        { return c.explicitOverride }
 func (c *Client) ProbeVersion(ctx context.Context) (string, error) { return c.detectVersion(ctx) }
 
@@ -243,7 +251,7 @@ func decodeRaw(output string) (json.RawMessage, error) {
 
 func capabilities(version string) Capabilities {
 	v64 := roborevcompat.IsSupportedVersion(version)
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeCommand: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {

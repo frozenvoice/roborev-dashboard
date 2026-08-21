@@ -128,6 +128,27 @@ Preview/prepare 단계는 backend가 fresh authorization으로 만든 opaque pre
 
 General Fix는 shared global operation gate와 repository-scoped lease를 사용한다. global gate는 Setup/runtime control/Panel Refine/Review·Rerun을 포함한 다른 mutation과 active Fix를 상호 배제하고, repository lease는 Panel Refine 및 Review/Rerun과 같은 repository의 worktree 경쟁을 fail-fast conflict으로 거부한다. read-only 조회는 허용한다. process runner는 shell 없이 validated executable과 argument slice를 사용하며 stdout/stderr와 오류는 bounded status/error summary만 보존한다. 실행 완료 후 backend는 fresh Git inspection으로 같은 registered identity와 branch, HEAD advancement, clean tree를 모두 확인한다. exit 0이더라도 commit/HEAD가 전진하지 않았거나 dirty, branch 변경, identity drift, process/cancel/timeout 오류가 있으면 성공으로 표시하지 않고 `failed` 또는 `cancelled`로 남긴다. 성공·실패·취소 뒤에는 UI 추측 상태를 갱신하지 않고 Reviews와 Fix & Refine의 authoritative API를 다시 조회한다.
 
+### Analyze
+
+Analyze는 exact v0.64.0 capability로만 열리는 별도의 짧은 agentic enqueue 경로다. type discovery는 bounded human-readable `roborev analyze --list`를 strict typed parser로 읽고, `Available analysis types:` header, safe-slug 이름, nonempty description, 중복 금지와 reasonable count/output bound를 검증한다. prompt는 사용자가 선택한 type에 대해 lazy하게 `roborev analyze <type> --show-prompt`를 호출한다. RoboRev가 반환한 type name, description, prompt template과 이후 analysis result는 source of truth이며 Dashboard는 locale에 따라 번역하거나 재작성하지 않는다.
+
+사용자가 제출할 수 있는 semantic input은 registered opaque `repositoryIdentity`, discovery catalog에 있는 `analysisType`, `scope=branch|repository`뿐이다. backend가 생성하는 exact argv는 다음 두 가지다.
+
+```text
+list:       roborev analyze --list
+prompt:     roborev analyze <type> --show-prompt
+branch:     analyze <type> --branch=HEAD --json
+repository: analyze <type> ./... --json
+```
+
+`branch` scope는 current branch의 upstream divergence/change set을 분석하는 의미이며 uncommitted dirty working-tree 변경은 branch 분석 대상에서 제외된다. 따라서 UI도 이를 “현재 변경사항” 전체라고 표시하지 않으며, dirty tree를 무조건 거부하지 않는다. `repository` scope는 현재 checkout 전체를 `./...`로 전달하며 working tree의 dirty 상태와 파일도 포함할 수 있다. 두 scope 모두 arbitrary path, file, glob, ref, base branch를 browser에서 받지 않는다. `--fix`, `--per-file`, `--agent`, `--model`, `--reasoning`, `--wait`는 builder와 request DTO에 존재하지 않는다.
+
+Analyze manager는 operation history나 별도 job lifecycle을 저장하지 않는 stateless preview/confirmation adapter다. preview와 confirmation 모두 selected repository identity, canonical path, fresh HEAD/branch, exact supported version, binary, discovered type, scope와 exact executable/argv를 다시 검증한다. preview token은 이 전체 tuple에 bind되고, confirmation에서는 fresh validation 후 token을 constant-time 비교한다. shared `operation.Gate`와 selected-repository/repository lease는 setup, daemon runtime control, review/refine/fix mutation 및 repository switch race와 충돌하며, JSON receipt가 반환되어 enqueue가 확정되면 CLI return 직후 release한다. analysis job이 terminal이 될 때까지 worktree를 장기 lock하지 않는다.
+
+실행 전 installed RoboRev, exact v0.64.0 `analyzeCommand` capability와 already-online/healthy daemon을 확인하며 Dashboard가 daemon을 몰래 시작하지 않는다. daemon preflight는 기존 strict v0.64 health decoder를 재사용해 exact `$schema`, known fields, `healthy=true`, exact v0.64 daemon version과 CLI version equality를 요구한다. `analyze ... --json`의 bounded stdout은 exactly one JSON value로 decode하고 requested `analysis_type`, exactly one valid job, positive unique ID, bounded nonempty agent, nonempty files array와 file count/aggregate bounds를 검증한다. malformed/truncated/identity-mismatched receipt는 성공으로 표시하지 않으며 process가 enqueue했을 가능성을 보존하는 explicit ambiguous result error를 반환한다.
+
+확인 acceptance 뒤 enqueue process context는 browser request context와 분리된 bounded server-owned context를 사용한다. browser disconnect는 이미 accepted command를 취소하지 않지만 Dashboard shutdown은 active context를 취소하고 bounded wait를 수행한다. process timeout/cancel/nonzero와 receipt parse failure는 모두 enqueue가 이미 수락되었을 수 있는 ambiguous error semantics를 유지한다. POST 성공 뒤 Dashboard는 receipt를 current authoritative jobs list와 reconcile한다. 별도 Analyze polling loop나 history DB를 만들지 않고 기존 SSE의 lossy `jobs-changed` invalidation, authoritative `/api/reviews` refresh와 4초 fallback polling을 재사용한다. analysis job이 목록에 나타나면 기존 `ReviewDetail`/Markdown/prompt/log/metadata 경로로 결과를 연다. 실제 RoboRev, daemon 또는 LLM analysis smoke는 자동 검증에서 실행하지 않는다.
+
 ## 확장 원칙
 
 각 RoboRev 기능은 service method, typed request, command builder, capability, HTTP route, confirmation 정책과 테스트를 함께 추가한다. CLI help에서 확인되지 않은 flag를 추측해 만들지 않는다. 중요한 변경은 이 문서와 coverage matrix를 함께 갱신한다.

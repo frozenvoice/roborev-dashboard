@@ -23,6 +23,7 @@ type Capabilities struct {
 	PromptLazyLoad     bool `json:"promptLazyLoad"`
 	RawLog             bool `json:"rawLog"`
 	StreamEvents       bool `json:"streamEvents"`
+	AnalyzeCommand     bool `json:"analyzeCommand"`
 }
 
 type JobMetadata struct {
