@@ -40,14 +40,20 @@
 | `fix --agent codex --quiet <job-id>` | General Fix: terminal F single review 또는 panel synthesis parent | typed CLI + Dashboard process-scoped manager | B | 예 | positive decimal ID만 positional target으로 사용; backend preview/confirmation과 fresh authorization을 거치며 exact argv는 `fix --agent codex --quiet <job-id>`; panel member·PASS·running·closed job은 대상에서 제외; 실제 fix 실행은 이 checkpoint에서 하지 않음 |
 | `GET /api/fixes/preview`, `POST/GET /api/fixes`, `GET /api/fixes/{id}`, `POST /api/fixes/{id}/cancel` | General Fix preview/confirm, status, cancel | Dashboard async state machine + typed CLI | B | 예 | selected registered opaque identity, done/F/`closed=false`/`skipped=false`, current branch+HEAD equality, clean tree, shared global/repository gate, bounded status/error, post-run same identity/branch + advanced HEAD + clean tree, authoritative refresh; process restart resume 없음 |
 | `refine` | iterative refine | typed CLI stream | P | 아니요 | unsafe 기본 OFF, confirmation 필수 |
-| `compact` | dry-run/background/wait | typed CLI stream | P | 아니요 | same-branch concurrency 경고 |
 | `analyze --list` | analysis type discovery | CLI text | B | 예 | exact v0.64.0 capability; bounded strict parser가 header, safe slug, description, duplicate와 size/count를 검증하며 `--json`을 사용하지 않음 |
 | `analyze <type> --show-prompt` | selected analysis prompt template | CLI text | B | 예 | discovered type allowlist 기준 lazy read-only lookup; RoboRev prompt 원문을 번역/재작성하지 않음 |
 | `analyze <type> --json` | confirmed analysis enqueue | JSON CLI | P | 아니요 | v0.64 upstream enqueue는 `Agentic: true`/worker `WithAgentic(true)`인 Edit·Write·Bash 위험 작업이므로 Dashboard execution disabled; future explicit safe capability/confirmation contract 필요 |
 | `analyze --fix` | analysis 후 자동 수정 | JSON/agentic CLI | P | 아니요 | 이번 checkpoint에서 UI·request·argv 모두 미지원 |
 | `analyze --per-file` | per-file analysis fan-out | JSON CLI | P | 아니요 | v0.64 agentic execution disabled; no fan-out request or argv |
 | analysis arbitrary path/file/glob selection | 사용자 지정 분석 대상 | CLI argument surface | P | 아니요 | v0.64 agentic execution disabled; no user target/path/ref/base-branch input |
-| `run --json` | custom task receipt | JSON CLI | P | 아니요 | agentic/yolo 기본 OFF |
+| `run --json` | Tasks v1 custom task receipt | JSON CLI + exact UTF-8 stdin | B | 예 | Codex-only, job-level non-agentic; exact argv `run --agent codex --json`, 16 KiB stdin, fresh safe preflight, preview/confirmation and strict created/skipped/ambiguous receipt handling |
+| `run --agentic` | agentic custom task mode | JSON CLI | P | 아니요 | Dashboard does not expose agentic execution; Tasks v1 is job-level non-agentic |
+| `run --yolo` | unsafe/yolo custom task mode | JSON CLI | P | 아니요 | Dashboard does not expose yolo/unsafe execution; `allow_unsafe_agents=true` 또는 `disable_codex_sandbox=true`면 Tasks를 fail closed |
+| `run --wait` | wait-for-task completion mode | CLI stream | P | 아니요 | enqueue와 completion waiting은 분리된 future contract |
+| custom task agent | arbitrary/custom agent selection | JSON CLI | P | 아니요 | Tasks v1은 `codex`만 허용; custom agent argv와 agent-specific execution contract는 미지원 |
+| custom task model | custom model override | JSON CLI | P | 아니요 | model 입력과 argv는 Dashboard가 받거나 저장하지 않음 |
+| custom task reasoning | custom reasoning override | JSON CLI | P | 아니요 | reasoning 입력과 argv는 Dashboard가 받거나 저장하지 않음 |
+| `compact` | dry-run/background compaction | typed CLI stream | P | 아니요 | compact execution은 미지원; same-branch concurrency 경고는 별도 checkpoint |
 | `config list --show-origin` | effective/origin | CLI tabular text | P | 아니요 | version-gated parser 필요 |
 | `config get/set` | common settings | typed CLI | P | 아니요 | unknown key 보존 |
 | `repo list/show/rename/move/delete/merge` | RoboRev repo management | CLI text/API 검토 | P | 아니요 | `repo list --json` 미지원 |
@@ -60,7 +66,6 @@
 | `init`, `init gh-action` | 초기화/CI 생성 | typed CLI | P | 아니요 | 자동 hook 설치 주의 |
 | `export reviews`, `export ci-metrics` | export | JSON/file stream | P | 아니요 | download endpoint 예정 |
 | `sync status/now` | PostgreSQL sync | typed CLI | P | 아니요 | local feature만 |
-| `wait` | existing jobs wait | typed CLI | P | 아니요 | enqueue와 분리 |
 | `log clean` | old log cleanup | typed CLI | P | 아니요 | destructive 확인 |
 | `update --check` / `update` | update | typed CLI stream | P | 아니요 | v0.65+ adapter 검증 전 자동 update 금지; preview + confirmation 필요 |
 | official remote PowerShell installer | missing setup | remote script | N | 예 | Dashboard는 `irm | iex`, execution-policy bypass와 latest install을 사용하지 않음 |
@@ -91,3 +96,4 @@
 - `stream`은 **lossy refresh/invalidation hint**이며 UI source of truth가 아니다. frontend는 event burst를 coalesce/debounce한 뒤 `/api/reviews` **authoritative API = actual state**를 다시 요청하고, repository epoch로 stale event/late response를 거부한다. EventSource reconnect를 지원하지만 **4초 polling = fallback/safety net**을 유지한다. 자동 테스트는 `internal/process/stream_test.go`, `internal/roborev/stream_test.go`, `internal/streamrelay/manager_test.go`, `internal/app/server_events_test.go`에서 deterministic fake process/service만 사용하며 실제 RoboRev/daemon/LLM은 실행하지 않는다.
 - `/api/events`의 browser authorization은 mutation과 분리된다. explicit Origin은 정확히 한 개의 same-origin 값만 허용하고 Origin이 없으면 세 Fetch Metadata 값을 exact하게 모두 요구한다. mutation은 기존 absent-Origin 허용 및 CSRF 검증을 유지한다. authorization 실패는 query parsing, Registry.InspectIdentity, `Subscribe`, stream process start 전에 종료된다.
 - Analyze introspection checkpoint는 exact v0.64.0의 `analyze --list`와 `analyze <type> --show-prompt`만 지원한다(B). upstream `analyze <type> --json`은 `Agentic: true`와 worker `WithAgentic(true)`로 Edit·Write·Bash 위험 작업을 수행하므로 Dashboard execution은 P/disabled이며, preview/confirmation/receipt/process 경로도 없다. `/api/analyses/preview`와 CSRF/Origin 이후 POST는 service/process 0의 501 tombstone이다. future upstream safe transport/capability/explicit confirmation이 확인될 때만 JSON execution을 재검토한다. 실제 RoboRev/LLM analysis smoke는 실행하지 않았다.
+- Tasks v1은 **Codex-only, job-level non-agentic**이다. Dashboard는 exact `roborev run --agent codex --json`만 생성하고 task는 exact UTF-8 stdin(최대 16 KiB)으로 전달한다. global config file/key가 unset이면 safe default `false`로 허용하지만, `allow_unsafe_agents=true` 또는 `disable_codex_sandbox=true`이거나 config가 malformed/unreadable/type-invalid/unknown이면 fail closed한다. preview/confirm은 exact v0.64.0 CLI와 healthy same-version daemon, binary binding, repository HEAD/branch 및 safety를 fresh하게 검증한다. signed one-time confirmation token, global/repository/selection lease, strict created/skipped receipt와 child-start-after ambiguity semantics를 사용한다. Existing `job_type=task` + `git_ref=run` rows는 `/api/reviews`/SSE/4초 fallback/ReviewDetail을 통해 읽으며 persistent task history는 없다. GET preview는 strict browser read authorization, POST는 same-origin/CSRF mutation authorization을 사용한다. 자동 검증은 fake-only이며 실제 task/Codex/LLM enqueue를 실행하지 않았다.

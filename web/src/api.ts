@@ -26,6 +26,8 @@ export type Installation = {
     panelMembersApi: boolean
     promptLazyLoad: boolean
     rawLog: boolean
+    /** v0.64 run --json task capability, optional for older bootstrap responses. */
+    taskRun?: boolean
     /** Optional because older bootstrap responses predate the stream relay. */
     streamEvents?: boolean
   }
@@ -688,7 +690,8 @@ export function setCSRF(value: string) { csrfToken = value }
 
 export class APIError extends Error {
   phase?: string
-  constructor(message: string, phase?: string) { super(message); this.phase = phase }
+  code?: string
+  constructor(message: string, phase?: string, code?: string) { super(message); this.phase = phase; this.code = code }
 }
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -702,8 +705,8 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
     try { payload = JSON.parse(text) } catch { payload = text }
   }
   if (!response.ok) {
-    const problem = payload as { error?: string; phase?: string } | undefined
-    throw new APIError(problem?.error ?? `Request failed (${response.status})`, problem?.phase)
+    const problem = payload as { error?: string; phase?: string; code?: string; error_code?: string; errorCode?: string } | undefined
+    throw new APIError(problem?.error ?? `Request failed (${response.status})`, problem?.phase, problem?.code ?? problem?.error_code ?? problem?.errorCode)
   }
   return payload as T
 }

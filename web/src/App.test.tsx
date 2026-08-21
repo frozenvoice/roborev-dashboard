@@ -77,6 +77,22 @@ class FakeEventSource {
 afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers(); vi.restoreAllMocks(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
 
 describe('App review workflow', () => {
+  it('opens the Tasks workspace from the sidebar without Soon or roadmap placeholder', async () => {
+    const taskBootstrap = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, taskRun: true } } }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(taskBootstrap)
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    const tasksButton = await screen.findByRole('button', { name: 'Tasks' })
+    expect(within(tasksButton).queryByText('Soon')).not.toBeInTheDocument()
+    await userEvent.click(tasksButton)
+    expect(await screen.findByRole('heading', { name: 'Custom Task' })).toBeInTheDocument()
+    expect(screen.queryByText('Checkpoint roadmap')).not.toBeInTheDocument()
+  })
+
   it('keeps Review HEAD distinct from frozen rerun', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)

@@ -71,6 +71,11 @@ type panelConfigFile struct {
 	CursorCmd     string            `toml:"cursor_cmd"`
 	PiCmd         string            `toml:"pi_cmd"`
 	GrokCmd       string            `toml:"grok_cmd"`
+	// These are pointers so a missing global key remains distinguishable from
+	// an explicit false. Both values are safe when omitted, but a present value
+	// with the wrong TOML type must fail closed in the task adapter.
+	AllowUnsafeAgents   *bool `toml:"allow_unsafe_agents"`
+	DisableCodexSandbox *bool `toml:"disable_codex_sandbox"`
 }
 
 type panelAgentCommands struct {
@@ -160,39 +165,50 @@ func loadPanelConfig(path string) (panelReviewConfig, bool, error) {
 }
 
 func loadPanelConfigWithCommands(path string) (panelReviewConfig, panelAgentCommands, bool, error) {
-	var file panelConfigFile
-	handle, err := openPanelConfigNoFollow(path)
-	if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
-		return panelReviewConfig{}, panelAgentCommands{}, false, nil
-	}
+	file, present, err := loadPanelConfigFile(path)
 	if err != nil {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config could not be opened")
-	}
-	defer handle.Close()
-	info, err := handle.Stat()
-	if err != nil {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config metadata could not be read")
-	}
-	if !info.Mode().IsRegular() {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config must be a regular file")
-	}
-	if info.Size() < 0 || info.Size() > maxPanelConfigBytes {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config exceeds the maximum size")
-	}
-	data, err := io.ReadAll(io.LimitReader(handle, maxPanelConfigBytes+1))
-	if err != nil {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config could not be read")
-	}
-	if len(data) > maxPanelConfigBytes {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config exceeds the maximum size")
-	}
-	if _, err := toml.Decode(string(data), &file); err != nil {
-		return panelReviewConfig{}, panelAgentCommands{}, true, errors.New("panel config contains invalid TOML syntax or types")
+		return panelReviewConfig{}, panelAgentCommands{}, present, err
 	}
 	return file.Review, panelAgentCommands{
 		Codex: file.CodexCmd, ClaudeCode: file.ClaudeCodeCmd, Gemini: file.GeminiCmd,
 		OpenCode: file.OpenCodeCmd, Cursor: file.CursorCmd, Pi: file.PiCmd, Grok: file.GrokCmd,
-	}, true, nil
+	}, present, nil
+}
+
+// loadPanelConfigFile is the common bounded, no-follow TOML reader used by
+// panel discovery and task safety preflight. Keeping one reader prevents the
+// safety lookup from gaining a weaker path or size policy over time.
+func loadPanelConfigFile(path string) (panelConfigFile, bool, error) {
+	var file panelConfigFile
+	handle, err := openPanelConfigNoFollow(path)
+	if errors.Is(err, os.ErrNotExist) || os.IsNotExist(err) {
+		return panelConfigFile{}, false, nil
+	}
+	if err != nil {
+		return panelConfigFile{}, true, errors.New("panel config could not be opened")
+	}
+	defer handle.Close()
+	info, err := handle.Stat()
+	if err != nil {
+		return panelConfigFile{}, true, errors.New("panel config metadata could not be read")
+	}
+	if !info.Mode().IsRegular() {
+		return panelConfigFile{}, true, errors.New("panel config must be a regular file")
+	}
+	if info.Size() < 0 || info.Size() > maxPanelConfigBytes {
+		return panelConfigFile{}, true, errors.New("panel config exceeds the maximum size")
+	}
+	data, err := io.ReadAll(io.LimitReader(handle, maxPanelConfigBytes+1))
+	if err != nil {
+		return panelConfigFile{}, true, errors.New("panel config could not be read")
+	}
+	if len(data) > maxPanelConfigBytes {
+		return panelConfigFile{}, true, errors.New("panel config exceeds the maximum size")
+	}
+	if _, err := toml.Decode(string(data), &file); err != nil {
+		return panelConfigFile{}, true, errors.New("panel config contains invalid TOML syntax or types")
+	}
+	return file, true, nil
 }
 
 func (r *PanelResolver) Resolve(ctx context.Context, repoPath string) (PanelCatalog, error) {

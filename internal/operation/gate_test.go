@@ -153,3 +153,52 @@ func TestFixLeaseIsGloballyBidirectionalWithSetupAndRuntime(t *testing.T) {
 	}
 	releaseRuntime()
 }
+
+func TestTaskLeaseConflictsBidirectionallyWithEveryOperation(t *testing.T) {
+	g := NewGate()
+	release, err := g.AcquireTaskRepository("repo-a")
+	if err != nil {
+		t.Fatalf("AcquireTaskRepository: %v", err)
+	}
+	defer release()
+	if got := g.SnapshotDetailed(); got.Tasks != 1 || got.RepositoryLeases != 1 {
+		t.Fatalf("task snapshot = %#v", got)
+	}
+	if _, err := g.AcquireTask(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second task = %v", err)
+	}
+	if _, err := g.AcquireRepository("repo-b"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("repository during task = %v", err)
+	}
+	if _, err := g.AcquireMutation(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("mutation during task = %v", err)
+	}
+	if _, err := g.AcquireRefine(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("refine during task = %v", err)
+	}
+	if _, err := g.AcquireFix(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("fix during task = %v", err)
+	}
+	if _, err := g.AcquireSetup(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("setup during task = %v", err)
+	}
+	if _, err := g.AcquireRuntimeControl(); !errors.Is(err, ErrBusy) {
+		t.Fatalf("runtime during task = %v", err)
+	}
+	release()
+	if got := g.SnapshotDetailed(); got.Tasks != 0 || got.RepositoryLeases != 0 {
+		t.Fatalf("task release snapshot = %#v", got)
+	}
+}
+
+func TestTaskGlobalLeaseRejectsRepositoryLease(t *testing.T) {
+	g := NewGate()
+	release, err := g.AcquireTask()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := g.AcquireTaskRepository("repo-a"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("task repository while task global = %v", err)
+	}
+}

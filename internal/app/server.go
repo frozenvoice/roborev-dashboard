@@ -27,6 +27,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 	"github.com/froze/roborev-dashboard/internal/setup"
 	"github.com/froze/roborev-dashboard/internal/streamrelay"
+	"github.com/froze/roborev-dashboard/internal/task"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
 
@@ -40,6 +41,7 @@ type Server struct {
 	Agents      *agentstatus.Service
 	Runtime     *runtimecontrol.Manager
 	Analyses    *analysis.Manager
+	Tasks       *task.Manager
 	Events      EventRelay
 	Gate        *operation.Gate
 	AllowedHost string
@@ -112,6 +114,19 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return nil, err
 		}
 	}
+	var tasks *task.Manager
+	if taskService, ok := service.(task.Adapter); ok {
+		tasks, err = task.NewManager(task.Dependencies{Registry: registry, RoboRev: taskService, Gate: gate, AcquireSelected: func(identity string) (func(), error) {
+			lease, leaseErr := registry.acquireSelected(identity)
+			if leaseErr != nil {
+				return nil, leaseErr
+			}
+			return lease.Release, nil
+		}})
+		if err != nil {
+			return nil, err
+		}
+	}
 	var events EventRelay
 	if source, ok := service.(streamrelay.Source); ok {
 		events = streamrelay.NewManager(source, func(ctx context.Context, identity string) (string, error) {
@@ -122,7 +137,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Tasks: tasks, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
 	s.routes()
 	return s, nil
 }
@@ -140,14 +155,23 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
-// BeginShutdown stops long-lived SSE sources before net/http begins waiting
-// for active handlers.  It is idempotent with Shutdown and intentionally does
-// not wait for the other process-scoped managers.
+// BeginShutdown stops long-lived SSE sources and cancels/waits for active task
+// enqueue commands before net/http begins waiting for active handlers. It is
+// idempotent with Shutdown; the remaining process-scoped managers are handled
+// by Shutdown.
 func (s *Server) BeginShutdown(ctx context.Context) error {
-	if s.Events == nil {
-		return nil
+	var shutdownErrors []error
+	if s.Events != nil {
+		if err := s.Events.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
 	}
-	return s.Events.Shutdown(ctx)
+	if s.Tasks != nil {
+		if err := s.Tasks.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
+	return errors.Join(shutdownErrors...)
 }
 
 // Shutdown cancels every process-scoped operation and waits for its gate
@@ -156,6 +180,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
 	if s.Events != nil {
 		if err := s.Events.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
+	if s.Tasks != nil {
+		if err := s.Tasks.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
 		}
 	}
@@ -200,6 +229,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
+	s.mux.HandleFunc("GET /api/tasks/preview", s.taskPreview)
 	s.mux.HandleFunc("GET /api/analyses/types", s.analysisTypes)
 	s.mux.HandleFunc("GET /api/analyses/prompt", s.analysisPrompt)
 	s.mux.HandleFunc("GET /api/analyses/preview", s.analysisPreview)
@@ -210,6 +240,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/panel-refines/{id}/cancel", s.mutation(s.cancelPanelRefine))
 	s.mux.HandleFunc("POST /api/fixes", s.mutationAuth(s.startFix))
 	s.mux.HandleFunc("POST /api/analyses", s.mutationAuth(s.startAnalysis))
+	s.mux.HandleFunc("POST /api/tasks", s.mutationAuth(s.startTask))
 	s.mux.HandleFunc("POST /api/fixes/{id}/cancel", s.mutationAuth(s.cancelFix))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment", s.mutation(s.comment))
 	s.mux.HandleFunc("POST /api/reviews/{id}/comment-close", s.mutation(s.commentClose))
@@ -1044,6 +1075,108 @@ func (s *Server) fixPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
+}
+
+func taskErrorStatus(err error) int {
+	var typedErr *task.Error
+	if !errors.As(err, &typedErr) {
+		return http.StatusInternalServerError
+	}
+	switch typedErr.Kind {
+	case task.ErrorInvalid:
+		return http.StatusBadRequest
+	case task.ErrorForbidden:
+		return http.StatusForbidden
+	case task.ErrorConflict:
+		return http.StatusConflict
+	case task.ErrorUnavailable:
+		return http.StatusServiceUnavailable
+	case task.ErrorAmbiguous:
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func (s *Server) taskPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
+	if s.Tasks == nil {
+		writeError(w, http.StatusServiceUnavailable, "RoboRev task capability is unavailable", "task")
+		return
+	}
+	values := r.URL.Query()
+	allowed := map[string]bool{"repositoryIdentity": true, "task": true}
+	for key, entries := range values {
+		if !allowed[key] || len(entries) != 1 {
+			writeError(w, http.StatusBadRequest, "invalid task preview query", "request")
+			return
+		}
+	}
+	identity, taskText := values.Get("repositoryIdentity"), values.Get("task")
+	if len(values["repositoryIdentity"]) != 1 || len(values["task"]) != 1 {
+		writeError(w, http.StatusBadRequest, "repositoryIdentity and task are required", "request")
+		return
+	}
+	preview, err := s.Tasks.Prepare(r.Context(), task.Request{RepositoryIdentity: identity, Task: taskText})
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func taskPreviewMessage(err error) string {
+	var typedErr *task.Error
+	if errors.As(err, &typedErr) {
+		switch typedErr.Kind {
+		case task.ErrorInvalid:
+			return "invalid task request"
+		case task.ErrorForbidden:
+			return "repository is not authorized"
+		case task.ErrorConflict:
+			if typedErr.Code == "unsafe_task_configuration" {
+				return "RoboRev task safety configuration is unsafe"
+			}
+			return "task state is stale or busy"
+		case task.ErrorUnavailable:
+			return "RoboRev task capability is unavailable"
+		case task.ErrorAmbiguous:
+			return "task enqueue result is uncertain; check RoboRev jobs"
+		}
+	}
+	return "task operation failed"
+}
+
+func writeTaskError(w http.ResponseWriter, err error) {
+	phase := "task"
+	var typedErr *task.Error
+	if errors.As(err, &typedErr) && typedErr.Code != "" {
+		phase = typedErr.Code
+	}
+	writeError(w, taskErrorStatus(err), taskPreviewMessage(err), phase)
+}
+
+func (s *Server) startTask(w http.ResponseWriter, r *http.Request) {
+	if s.Tasks == nil {
+		writeError(w, http.StatusServiceUnavailable, "RoboRev task capability is unavailable", "task")
+		return
+	}
+	var body task.StartRequest
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	receipt, err := s.Tasks.Start(r.Context(), body)
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	status := http.StatusAccepted
+	if receipt.Skipped {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, receipt)
 }
 
 func analysisQuery(r *http.Request, allowed ...string) (map[string]string, error) {
