@@ -14,9 +14,11 @@ import (
 
 const DefaultOutputLimit = 4 << 20
 
-// DefaultStdinLimit is the bound used by short-lived task commands.  The
-// runner accepts stdin as opaque bytes represented by a string; it never
-// interpolates those bytes into an executable or argument string.
+// DefaultStdinLimit is the bound used by short-lived commands that consume
+// bounded stdin. The runner accepts stdin as opaque bytes represented by a
+// string; it never interpolates those bytes into an executable or argument
+// string. No current production caller supplies stdin; the capability stays
+// generic and is covered by process-level tests.
 const DefaultStdinLimit = 16 << 10
 
 type Command struct {
@@ -28,7 +30,7 @@ type Command struct {
 	Stdin string
 	// StdinLimit overrides the default bounded stdin contract. Zero uses
 	// DefaultStdinLimit; callers should only raise this for a separately
-	// reviewed machine protocol, never for user task text.
+	// reviewed machine protocol, never for unreviewed user input.
 	StdinLimit int
 	// Env replaces the inherited environment when non-nil.
 	Env     []string

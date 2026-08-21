@@ -31,10 +31,12 @@ describe('Tasks workspace with disabled execution', () => {
     expect(onOpenReview).toHaveBeenLastCalledWith(49)
   })
 
-  it('filters foreign repository task rows so switching repositories cannot leak stale entries', () => {
-    render(<I18nProvider><Tasks repository={repository} jobs={[...historyJobs, { id: 77, uuid: '550e8400-e29b-41d4-a716-446655440077', job_type: 'task', git_ref: 'run', status: 'done', repo_path: 'D:\\other' }]} onOpenReview={vi.fn()} /></I18nProvider>)
-    expect(screen.queryByText('#77')).not.toBeInTheDocument()
+  it('renders backend-scoped history rows regardless of daemon path spelling', () => {
+    // The daemon reports repo_path with forward slashes while the registry
+    // uses Windows backslashes; the browser must not re-compare raw paths.
+    render(<I18nProvider><Tasks repository={repository} jobs={[{ id: 51, uuid: '550e8400-e29b-41d4-a716-446655440051', job_type: 'task', git_ref: 'run', status: 'done', repo_path: 'E:/repo' }]} onOpenReview={vi.fn()} /></I18nProvider>)
     expect(screen.getByText('#51')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View result' })).toBeInTheDocument()
   })
 
   it('renders an inspection-only composer with the fail-closed explanation and never requests execution', () => {

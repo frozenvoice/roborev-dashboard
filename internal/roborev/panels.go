@@ -71,11 +71,6 @@ type panelConfigFile struct {
 	CursorCmd     string            `toml:"cursor_cmd"`
 	PiCmd         string            `toml:"pi_cmd"`
 	GrokCmd       string            `toml:"grok_cmd"`
-	// These are pointers so a missing global key remains distinguishable from
-	// an explicit false. Both values are safe when omitted, but a present value
-	// with the wrong TOML type must fail closed in the task adapter.
-	AllowUnsafeAgents   *bool `toml:"allow_unsafe_agents"`
-	DisableCodexSandbox *bool `toml:"disable_codex_sandbox"`
 }
 
 type panelAgentCommands struct {

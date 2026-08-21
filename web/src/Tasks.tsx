@@ -39,7 +39,10 @@ export type TasksProps = {
  */
 export function Tasks({ repository, jobs, onOpenReview }: TasksProps) {
   const { t } = useI18n()
-  const taskJobs = jobs.filter(job => job.job_type === 'task' && job.git_ref === 'run' && (!job.repo_path || !repository || job.repo_path === repository.path))
+  // jobs is the backend-scoped /api/reviews list for the selected repository;
+  // raw repo_path strings are never re-compared in the browser because the
+  // daemon's path spelling differs from the registry's canonical form.
+  const taskJobs = jobs.filter(job => job.job_type === 'task' && job.git_ref === 'run')
 
   return <section className="tasks-page">
     <header className="section-heading"><div><span className="eyebrow">{t('tasks.eyebrow')}</span><h1>{t('tasks.title')}</h1><p>{t('tasks.description')}</p></div></header>
