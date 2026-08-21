@@ -205,6 +205,7 @@ type Manager struct {
 	gate         *operation.Gate
 
 	mu            sync.RWMutex
+	closing       bool
 	runs          map[string]*PanelRefineRun
 	locks         map[string]string
 	leases        map[string]string
@@ -351,6 +352,13 @@ func (m *Manager) Start(parent context.Context, request StartRequest) (*PanelRef
 	}()
 
 	m.mu.Lock()
+	// Acceptance and shutdown are linearized under the manager mutex: once
+	// Shutdown has set closing, no Start can register a run that Shutdown's
+	// wg.Wait would miss.
+	if m.closing {
+		m.mu.Unlock()
+		return nil, startError(StartConflict, errors.New("server is shutting down"))
+	}
 	if existing := m.locks[identity]; existing != "" {
 		m.mu.Unlock()
 		return nil, startError(StartConflict, errors.New("a Panel Refine is already active for this repository"))
@@ -793,13 +801,16 @@ func (m *Manager) bestEffortCancel(id int64) {
 	_ = m.service.Cancel(cleanupCtx, id)
 }
 
+// Shutdown closes new Start acceptance under the manager mutex, cancels every
+// registered run, and waits for the gate leases and refine work to finish.
 func (m *Manager) Shutdown(ctx context.Context) error {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.closing = true
 	ids := make([]string, 0, len(m.cancel))
 	for id := range m.cancel {
 		ids = append(ids, id)
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	for _, id := range ids {
 		_ = m.Cancel(id)
 	}

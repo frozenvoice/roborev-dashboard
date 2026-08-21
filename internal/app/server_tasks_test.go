@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,36 +10,21 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
-type taskFakeService struct {
-	*fakeService
-	preflight      roborev.TaskPreflight
-	receipt        roborev.TaskReceipt
-	preflightCalls int
-	taskCalls      int
-	rerunCalls     int
+// taskCountingService proves that the disabled endpoints never reach the
+// RoboRev adapter or registry inspection machinery.
+type taskCountingService struct {
+	fakeService
+	rerunCalls int
 }
 
-func (f *taskFakeService) TaskPreflight(context.Context) (roborev.TaskPreflight, error) {
-	f.preflightCalls++
-	return f.preflight, nil
-}
-
-func (f *taskFakeService) RunTask(_ context.Context, request roborev.TaskRequest) (roborev.TaskReceipt, error) {
-	f.taskCalls++
-	if request.Agent != "codex" || request.Task == "" || request.ExpectedBindingIdentity != f.preflight.BindingIdentity {
-		return roborev.TaskReceipt{}, nil
-	}
-	return f.receipt, nil
-}
-
-func (f *taskFakeService) Rerun(context.Context, int64) error {
+func (f *taskCountingService) Rerun(context.Context, int64) error {
 	f.rerunCalls++
 	return nil
 }
 
-func setupTaskServer(t *testing.T) (*Server, *taskFakeService) {
+func setupTaskServer(t *testing.T) (*Server, *taskCountingService) {
 	t.Helper()
-	service := &taskFakeService{fakeService: &fakeService{}, preflight: roborev.TaskPreflight{Binary: `C:\roborev.exe`, Version: "v0.64.0", DaemonVersion: "v0.64.0", BindingIdentity: "1:binary", Safety: roborev.TaskSafety{Known: true}}, receipt: roborev.TaskReceipt{JobID: 7, JobUUID: "00000000-0000-0000-0000-000000000007", GitRef: "run", Status: "queued"}}
+	service := &taskCountingService{fakeService: fakeService{}}
 	registry := NewRegistry(fakeInspector{}, "")
 	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
 		t.Fatal(err)
@@ -52,147 +36,68 @@ func setupTaskServer(t *testing.T) (*Server, *taskFakeService) {
 	return server, service
 }
 
-func TestTaskPreviewStrictBrowserAuthRunsNoPreflightBeforeAuth(t *testing.T) {
+func assertTaskExecutionDisabled(t *testing.T, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	if recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "task-execution-disabled") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "machine-readable contract") || strings.Contains(recorder.Body.String(), "read-only guaranteed") {
+		t.Fatalf("disabled explanation = %s", recorder.Body.String())
+	}
+}
+
+func TestTaskPreviewIsStablyDisabledWithoutTouchingRoboRev(t *testing.T) {
 	server, service := setupTaskServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(`{"repositoryIdentity":"e:\\repo","task":"inspect"}`))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
+	assertTaskExecutionDisabled(t, recorder)
+	if service.installationCalls != 0 || service.metadataCalls != 0 {
+		t.Fatalf("service was consulted by disabled preview: installation=%d metadata=%d", service.installationCalls, service.metadataCalls)
+	}
+}
+
+func TestTaskStartWithoutCSRFIsRejectedBeforeDisabledResponse(t *testing.T) {
+	server, service := setupTaskServer(t)
+	body := `{"repositoryIdentity":"e:\\repo","task":"inspect","previewToken":"x"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(body))
+	req.Host = "example.com"
+	req.Header.Set("Origin", "http://example.com")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("status = %d", recorder.Code)
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if service.taskCalls != 0 {
-		t.Fatal("task adapter was called before browser authorization")
-	}
-	if service.preflightCalls != 0 {
-		t.Fatal("preflight ran before browser authorization")
+	if service.installationCalls != 0 || service.metadataCalls != 0 {
+		t.Fatal("mutation authorization must fail before any adapter work")
 	}
 }
 
-func TestTaskPreviewStrictBrowserAuthMatrix(t *testing.T) {
-	tests := []struct {
-		name       string
-		origin     []string
-		fetchSite  []string
-		fetchMode  string
-		fetchDest  string
-		wantStatus int
-	}{
-		{name: "exact origin", origin: []string{"http://example.com"}, wantStatus: http.StatusOK},
-		{name: "native fetch metadata", fetchSite: []string{"same-origin"}, fetchMode: "cors", fetchDest: "empty", wantStatus: http.StatusOK},
-		{name: "foreign origin", origin: []string{"https://evil.example"}, wantStatus: http.StatusForbidden},
-		{name: "null origin", origin: []string{"null"}, wantStatus: http.StatusForbidden},
-		{name: "duplicate origin", origin: []string{"http://example.com", "http://example.com"}, wantStatus: http.StatusForbidden},
-		{name: "missing metadata", wantStatus: http.StatusForbidden},
-		{name: "duplicate metadata", fetchSite: []string{"same-origin", "same-origin"}, fetchMode: "cors", fetchDest: "empty", wantStatus: http.StatusForbidden},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			server, service := setupTaskServer(t)
-			body, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": "inspect"})
-			req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(string(body)))
-			req.Host = "example.com"
-			for _, value := range test.origin {
-				req.Header.Add("Origin", value)
-			}
-			for _, value := range test.fetchSite {
-				req.Header.Add("Sec-Fetch-Site", value)
-			}
-			if test.fetchMode != "" {
-				req.Header.Set("Sec-Fetch-Mode", test.fetchMode)
-			}
-			if test.fetchDest != "" {
-				req.Header.Set("Sec-Fetch-Dest", test.fetchDest)
-			}
-			recorder := httptest.NewRecorder()
-			server.Handler().ServeHTTP(recorder, req)
-			if recorder.Code != test.wantStatus {
-				t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
-			}
-			if test.wantStatus != http.StatusOK && service.preflightCalls != 0 {
-				t.Fatalf("preflight calls = %d for unauthorized request", service.preflightCalls)
-			}
-		})
-	}
-}
-
-func TestTaskPreviewAndStartRequireAuthAndUseExactTask(t *testing.T) {
-	server, service := setupTaskServer(t)
-	taskText := "한글\nquotes ' \" & | $(echo no)"
-	body, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": taskText})
-	req := httptest.NewRequest(http.MethodPost, "/api/tasks/preview", strings.NewReader(string(body)))
-	req.Host = "example.com"
-	req.Header.Set("Origin", "http://example.com")
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("preview status = %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	var preview struct {
-		PreviewToken string `json:"previewToken"`
-		Command      struct {
-			Args  []string `json:"args"`
-			Stdin string   `json:"stdin"`
-		} `json:"command"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &preview); err != nil {
-		t.Fatal(err)
-	}
-	if preview.PreviewToken == "" || preview.Command.Stdin != taskText || strings.Join(preview.Command.Args, " ") != "run --agent codex --json" {
-		t.Fatalf("preview = %#v", preview)
-	}
-
-	startBody, _ := json.Marshal(map[string]string{"repositoryIdentity": `e:\repo`, "task": taskText, "previewToken": preview.PreviewToken})
-	post := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(string(startBody)))
-	post.Host = "example.com"
-	post.Header.Set("Origin", "http://example.com")
-	post.Header.Set("X-CSRF-Token", server.csrfToken)
-	postRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(postRecorder, post)
-	if postRecorder.Code != http.StatusAccepted {
-		t.Fatalf("start status = %d body=%s", postRecorder.Code, postRecorder.Body.String())
-	}
-	if service.taskCalls != 1 {
-		t.Fatalf("task calls = %d", service.taskCalls)
-	}
-	if service.preflightCalls != 2 {
-		t.Fatalf("preflight calls = %d", service.preflightCalls)
-	}
-}
-
-func TestTaskStartRejectsMissingCSRFBeforeAdapter(t *testing.T) {
+func TestTaskStartWithValidMutationAuthIsStablyDisabled(t *testing.T) {
 	server, service := setupTaskServer(t)
 	body := `{"repositoryIdentity":"e:\\repo","task":"inspect","previewToken":"x"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(body))
 	req.Host = "example.com"
 	req.Header.Set("Origin", "http://example.com")
-	recorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden || service.taskCalls != 0 || service.preflightCalls != 0 {
-		t.Fatalf("status=%d taskCalls=%d preflightCalls=%d", recorder.Code, service.taskCalls, service.preflightCalls)
-	}
-}
-
-func TestTaskStartRejectsForeignOriginBeforeAdapter(t *testing.T) {
-	server, service := setupTaskServer(t)
-	body := `{"repositoryIdentity":"e:\\repo","task":"inspect","previewToken":"x"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/tasks", strings.NewReader(body))
-	req.Host = "example.com"
-	req.Header.Set("Origin", "https://evil.example")
 	req.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusForbidden || service.taskCalls != 0 || service.preflightCalls != 0 {
-		t.Fatalf("status=%d taskCalls=%d preflightCalls=%d", recorder.Code, service.taskCalls, service.preflightCalls)
+	assertTaskExecutionDisabled(t, recorder)
+	if service.installationCalls != 0 || service.metadataCalls != 0 {
+		t.Fatalf("disabled start reached RoboRev: installation=%d metadata=%d", service.installationCalls, service.metadataCalls)
 	}
 }
 
 func TestTaskPreviewGETIsNotAllowed(t *testing.T) {
-	server, service := setupTaskServer(t)
+	server, _ := setupTaskServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/preview", nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusMethodNotAllowed || service.preflightCalls != 0 {
-		t.Fatalf("status=%d preflightCalls=%d", recorder.Code, service.preflightCalls)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d", recorder.Code)
 	}
 }
 

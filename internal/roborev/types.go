@@ -23,7 +23,6 @@ type Capabilities struct {
 	PromptLazyLoad     bool `json:"promptLazyLoad"`
 	RawLog             bool `json:"rawLog"`
 	StreamEvents       bool `json:"streamEvents"`
-	TaskRun            bool `json:"taskRun"`
 	// AnalyzeIntrospection reports only the supported v0.64 catalog/prompt
 	// inspection surface. v0.64 analysis enqueue is intentionally not exposed
 	// by the Dashboard because upstream runs those jobs in agentic mode.

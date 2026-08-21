@@ -473,3 +473,94 @@ func TestStartRejectsPreviewMismatchWithoutLaunchingFix(t *testing.T) {
 		t.Fatalf("leases after stale preview = %#v", snapshot)
 	}
 }
+
+type gatedPreflightService struct {
+	fakeService
+	armMu    sync.Mutex
+	blocked  bool
+	fixCalls int
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (s *gatedPreflightService) TerminalJobMetadata(ctx context.Context, id int64) (roborev.JobMetadata, error) {
+	s.armMu.Lock()
+	blocked := s.blocked
+	s.blocked = false
+	s.armMu.Unlock()
+	if blocked {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return roborev.JobMetadata{}, ctx.Err()
+		}
+	}
+	return s.fakeService.TerminalJobMetadata(ctx, id)
+}
+
+func (s *gatedPreflightService) Fix(context.Context, roborev.FixRequest) error {
+	s.armMu.Lock()
+	s.fixCalls++
+	s.armMu.Unlock()
+	return nil
+}
+
+// The preflight of an unaccepted Start must not register work that Shutdown's
+// wait misses: once Shutdown has closed acceptance, a Start that is still in
+// validation is rejected and never launches Fix.
+func TestShutdownRejectsStartStillInPreflightAndLaunchesNoFix(t *testing.T) {
+	registry := &fakeRegistry{repo: gitx.Repository{Path: `C:\repo`, Branch: "main", Head: "old-head"}}
+	closed := false
+	service := &gatedPreflightService{
+		fakeService: fakeService{registry: registry, job: roborev.JobMetadata{ID: 42, RepoPath: registry.repo.Path, GitRef: "old-head", Branch: "main", JobType: "review", Status: "done", Verdict: "F", Closed: &closed}},
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	manager, _ := NewManager(Dependencies{Registry: registry, RoboRev: service, Binary: `C:\tools\roborev.exe`, Gate: operation.NewGate()})
+	request := Request{RepositoryIdentity: registry.repo.Path, TargetJobID: 42, Agent: "codex"}
+	preview, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	service.armMu.Lock()
+	service.blocked = true
+	service.armMu.Unlock()
+	startErr := make(chan error, 1)
+	go func() {
+		_, err := manager.Start(context.Background(), StartRequest{Request: request, PreviewToken: preview.PreviewToken})
+		startErr <- err
+	}()
+	select {
+	case <-service.entered:
+	case <-time.After(time.Second):
+		t.Fatal("Start never entered preflight validation")
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown with no accepted work: %v", err)
+	}
+	close(service.release)
+	select {
+	case err := <-startErr:
+		var typedErr *Error
+		if !errors.As(err, &typedErr) || typedErr.Kind != ErrorConflict || !strings.Contains(err.Error(), "shutting down") {
+			t.Fatalf("preflight Start after shutdown = %v; want shutdown conflict", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start never returned after shutdown closed acceptance")
+	}
+	service.armMu.Lock()
+	fixCalls := service.fixCalls
+	service.armMu.Unlock()
+	if fixCalls != 0 {
+		t.Fatalf("Fix calls after shutdown = %d", fixCalls)
+	}
+	if snapshot := manager.gate.SnapshotDetailed(); snapshot.Fixes != 0 || snapshot.RepositoryLeases != 0 {
+		t.Fatalf("leases after rejected Start = %#v", snapshot)
+	}
+	if _, err := manager.Start(context.Background(), StartRequest{Request: request, PreviewToken: preview.PreviewToken}); err == nil || !strings.Contains(err.Error(), "shutting down") {
+		t.Fatalf("Start after shutdown = %v; want shutdown conflict", err)
+	}
+}

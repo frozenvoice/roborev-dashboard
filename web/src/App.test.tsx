@@ -78,10 +78,9 @@ afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers();
 
 describe('App review workflow', () => {
   it('opens the Tasks workspace from the sidebar without Soon or roadmap placeholder', async () => {
-    const taskBootstrap = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, taskRun: true } } }
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
-      if (path === '/api/bootstrap') return response(taskBootstrap)
+      if (path === '/api/bootstrap') return response(bootstrap)
       if (path.startsWith('/api/reviews?')) return response([])
       return response({ success: true })
     }))
@@ -91,6 +90,7 @@ describe('App review workflow', () => {
     await userEvent.click(tasksButton)
     expect(await screen.findByRole('heading', { name: 'Custom Task' })).toBeInTheDocument()
     expect(screen.queryByText('Checkpoint roadmap')).not.toBeInTheDocument()
+    expect(screen.queryByText('Read-only')).not.toBeInTheDocument()
   })
 
   it('keeps Review HEAD distinct from frozen rerun', async () => {

@@ -19,7 +19,6 @@ type Gate struct {
 	refine             int
 	mutations          int
 	fixes              int
-	tasks              int
 	repositories       map[string]uint64
 	repositorySequence uint64
 }
@@ -32,7 +31,7 @@ func (g *Gate) AcquireSetup() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.tasks > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.setup = true
@@ -53,7 +52,7 @@ func (g *Gate) AcquireMutation() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.fixes > 0 || g.tasks > 0 {
+	if g.setup || g.runtime || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.mutations++
@@ -74,7 +73,7 @@ func (g *Gate) AcquireRefine() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.fixes > 0 || g.tasks > 0 {
+	if g.setup || g.runtime || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.refine++
@@ -99,7 +98,7 @@ func (g *Gate) AcquireFix() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.tasks > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.fixes++
@@ -110,65 +109,6 @@ func (g *Gate) AcquireFix() (func(), error) {
 		if !released {
 			released = true
 			g.fixes--
-		}
-	}, nil
-}
-
-// AcquireTask reserves the global task enqueue slot.  A task is accepted only
-// when no process-scoped lifecycle or repository operation is active.  The
-// lease is deliberately non-blocking; callers should return a conflict to the
-// browser and let it retry after the authoritative state has changed.
-func (g *Gate) AcquireTask() (func(), error) {
-	if g == nil {
-		return nil, ErrBusy
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.tasks > 0 || len(g.repositories) > 0 {
-		return nil, ErrBusy
-	}
-	g.tasks++
-	released := false
-	return func() {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		if !released {
-			released = true
-			g.tasks--
-		}
-	}, nil
-}
-
-// AcquireTaskRepository atomically reserves the task's global enqueue slot
-// and its selected repository.  Keeping this as one gate operation closes the
-// gap between the global quota check and repository switch/mutation checks.
-func (g *Gate) AcquireTaskRepository(identity string) (func(), error) {
-	if g == nil || identity == "" {
-		return nil, ErrBusy
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.repositories == nil {
-		g.repositories = make(map[string]uint64)
-	}
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.tasks > 0 || len(g.repositories) > 0 {
-		return nil, ErrBusy
-	}
-	g.tasks++
-	g.repositorySequence++
-	owner := g.repositorySequence
-	g.repositories[identity] = owner
-	released := false
-	return func() {
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		if released {
-			return
-		}
-		released = true
-		g.tasks--
-		if g.repositories[identity] == owner {
-			delete(g.repositories, identity)
 		}
 	}, nil
 }
@@ -185,7 +125,7 @@ func (g *Gate) AcquireRepository(identity string) (func(), error) {
 	if g.repositories == nil {
 		g.repositories = make(map[string]uint64)
 	}
-	if g.tasks > 0 || g.repositories[identity] != 0 {
+	if g.repositories[identity] != 0 {
 		return nil, ErrBusy
 	}
 	g.repositorySequence++
@@ -215,7 +155,7 @@ func (g *Gate) AcquireRuntimeControl() (func(), error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 || g.tasks > 0 {
+	if g.setup || g.runtime || g.refine > 0 || g.mutations > 0 || g.fixes > 0 {
 		return nil, ErrBusy
 	}
 	g.runtime = true
@@ -247,7 +187,6 @@ type DetailedSnapshot struct {
 	Refine           int
 	Mutations        int
 	Fixes            int
-	Tasks            int
 	RepositoryLeases int
 }
 
@@ -257,5 +196,5 @@ func (g *Gate) SnapshotDetailed() DetailedSnapshot {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return DetailedSnapshot{Setup: g.setup, RuntimeControl: g.runtime, Refine: g.refine, Mutations: g.mutations, Fixes: g.fixes, Tasks: g.tasks, RepositoryLeases: len(g.repositories)}
+	return DetailedSnapshot{Setup: g.setup, RuntimeControl: g.runtime, Refine: g.refine, Mutations: g.mutations, Fixes: g.fixes, RepositoryLeases: len(g.repositories)}
 }

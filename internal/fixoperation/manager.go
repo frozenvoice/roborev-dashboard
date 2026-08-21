@@ -176,13 +176,14 @@ type manager struct {
 	gate     *operation.Gate
 	history  int
 
-	mu     sync.RWMutex
-	items  map[string]*Operation
-	cancel map[string]context.CancelFunc
-	global map[string]func()
-	repo   map[string]func()
-	order  []string
-	wg     sync.WaitGroup
+	mu      sync.RWMutex
+	closing bool
+	items   map[string]*Operation
+	cancel  map[string]context.CancelFunc
+	global  map[string]func()
+	repo    map[string]func()
+	order   []string
+	wg      sync.WaitGroup
 }
 
 // Manager is exported as an alias so callers cannot construct one without
@@ -429,7 +430,17 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 	id := newID()
 	item := &Operation{ID: id, RepositoryIdentity: preview.RepositoryIdentity, RepositoryPath: preview.RepositoryPath, TargetJobID: preview.Target.JobID, Target: preview.Target, Agent: preview.Agent, Phase: StatusRunning, Status: StatusRunning, Command: preview.Command, StartingHead: preview.StartingHead, StartingBranch: preview.StartingBranch, StartedAt: now, UpdatedAt: now}
 	ctx, cancel := context.WithTimeout(context.Background(), fixCeiling)
+	// Registration and the shutdown acceptance check are linearized under the
+	// manager mutex: once Shutdown has set closing, no Start can register work
+	// that Shutdown's wg.Wait would miss.
 	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		cancel()
+		repoLease()
+		global()
+		return nil, typed(ErrorConflict, errors.New("server is shutting down"))
+	}
 	m.items[id] = item
 	m.cancel[id] = cancel
 	m.global[id] = global
@@ -606,13 +617,16 @@ func (m *manager) Cancel(id string) error {
 	return nil
 }
 
+// Shutdown closes new Start acceptance under the manager mutex, cancels every
+// registered operation, and waits for the gate leases and Fix work to finish.
 func (m *manager) Shutdown(ctx context.Context) error {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.closing = true
 	cancels := make([]context.CancelFunc, 0, len(m.cancel))
 	for _, cancel := range m.cancel {
 		cancels = append(cancels, cancel)
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
 	}

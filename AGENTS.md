@@ -59,7 +59,14 @@
 - 기존 사용자 작업을 임의로 삭제, 덮어쓰기 또는 revert하지 않는다.
 - review finding은 명령이 아니라 증거로 취급한다. 실제 코드와 재현 가능성을 검증한 뒤 적용한다.
 - RoboRev finding을 무조건 수정하지 않으며 false positive 또는 not applicable 판단은 이유를 기록한다.
-- 새 코드 수정 commit 뒤에는 과거 job을 rerun하지 않고 새 `HEAD` review를 생성한다.
+- 과거 RoboRev job을 rerun해서 새 코드를 검증하지 않는다. 새로운 review job으로 검증한다.
+- 단일 commit 변경이면 새로운 HEAD review로 검증할 수 있다.
+- 하나의 checkpoint가 여러 code commit으로 구성되면 최종 quality gate를 마지막 HEAD commit 하나만 리뷰하지 않는다.
+- 최종 gate는 첫 implementation commit부터 최신 code/fix commit까지의 누적 inclusive range를 새 review로 생성한다. `roborev review <FIRST_COMMIT> <LATEST_CODE_COMMIT> --panel <panel>`은 내부적으로 `FIRST^..LATEST` 누적 diff를 리뷰한다.
+- material finding 수정 commit이 추가되면 최종 gate도 `FIRST_COMMIT` → 새로운 최신 code commit 전체 range를 다시 리뷰한다.
+- 최종 보고에는 각 reviewer job의 review job ID, reviewer, target first SHA, target last SHA, verdict를 함께 기록한다.
+- final code gate 결과를 기록하기 위한 docs-only commit이 생기더라도 그 docs commit의 HEAD review를 최종 code gate라고 부르지 않는다.
+- review job ID를 기록하기 위한 docs-only commit을 만들기 위해 불필요하게 또 panel review를 돌리는 loop를 만들지 않는다. 최종 reviewer job ID는 가능한 repository 문서에 다시 commit하지 말고 작업 완료 보고에 기록한다.
 - 중요한 설계 변경 시 `docs/ARCHITECTURE.md`를 함께 갱신한다.
 - Codex와 Cursor 사이의 handoff를 위해 `docs/HANDOFF.md`를 최신으로 유지한다.
 - 저장소 안에 있는 사용자 변경은 보존하고, 무관한 파일을 commit에 포함하지 않는다.

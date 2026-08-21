@@ -83,9 +83,6 @@ func DecodePanelEnqueueResponse(raw json.RawMessage, request ReviewRequest) (Pan
 
 type Client struct {
 	Runner proc.Runner
-	// TaskConfigPath is an optional test/deployment seam for the global
-	// RoboRev TOML file. Empty uses the upstream default resolution.
-	TaskConfigPath string
 	// StreamRunner is injectable for deterministic tests.  A nil value uses
 	// the same ExecRunner implementation as short-lived commands.
 	StreamRunner      proc.StreamRunner
@@ -254,7 +251,7 @@ func decodeRaw(output string) (json.RawMessage, error) {
 
 func capabilities(version string) Capabilities {
 	v64 := roborevcompat.IsSupportedVersion(version)
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, TaskRun: v64, AnalyzeIntrospection: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {

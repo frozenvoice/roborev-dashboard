@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1176,4 +1178,58 @@ func TestManagerStartRejectsOfflineOrMalformedInstallationSynchronously(t *testi
 			}
 		})
 	}
+}
+
+// A Start that is still in validation when Shutdown runs must not register a
+// run afterwards: acceptance closes under the manager mutex before Shutdown
+// waits, so no Panel Refine work can outlive server shutdown.
+func TestShutdownRejectsStartStillValidatingAndEnqueuesNothing(t *testing.T) {
+	service := &fakeReviewService{verdicts: []string{"P"}}
+	manager, registry := newTestManager(t, service)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var armed int32 = 1
+	registry.inspectHook = func(int, *gitx.Repository) {
+		if !atomic.CompareAndSwapInt32(&armed, 1, 0) {
+			return
+		}
+		close(entered)
+		<-release
+	}
+	startErr := make(chan error, 1)
+	go func() {
+		_, err := manager.Start(context.Background(), StartRequest{RepoPath: `C:\repo`, Panel: "cross"})
+		startErr <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("Start never entered repository validation")
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown with no accepted run: %v", err)
+	}
+	close(release)
+	select {
+	case err := <-startErr:
+		var typedErr *StartError
+		if !errors.As(err, &typedErr) || typedErr.Kind != StartConflict || !strings.Contains(err.Error(), "shutting down") {
+			t.Fatalf("validating Start after shutdown = %v; want shutdown conflict", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start never returned after shutdown closed acceptance")
+	}
+	service.mu.Lock()
+	reviewCount := service.reviewCount
+	service.mu.Unlock()
+	if reviewCount != 0 {
+		t.Fatalf("ReviewPanel calls after shutdown = %d", reviewCount)
+	}
+	refineLease, err := manager.gate.AcquireRefine()
+	if err != nil {
+		t.Fatalf("gate lease was not released after rejected Start: %v", err)
+	}
+	refineLease()
 }

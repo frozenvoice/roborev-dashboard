@@ -26,8 +26,6 @@ export type Installation = {
     panelMembersApi: boolean
     promptLazyLoad: boolean
     rawLog: boolean
-    /** v0.64 run --json task capability, optional for older bootstrap responses. */
-    taskRun?: boolean
     /** Optional because older bootstrap responses predate the stream relay. */
     streamEvents?: boolean
   }
