@@ -580,7 +580,23 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	raw, err := s.RoboRev.List(r.Context(), repo, 100)
+	// The upstream contract supports bounded limits (1..200). Ordinary polling
+	// keeps the small default; the lazy Tasks history view may raise it once
+	// per repository switch so older task rows are not silently truncated.
+	limit := 100
+	if values := r.URL.Query()["limit"]; len(values) > 0 {
+		if len(values) != 1 {
+			writeError(w, http.StatusBadRequest, "limit must appear at most once", "request")
+			return
+		}
+		parsed, err := strconv.Atoi(strings.TrimSpace(values[0]))
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 200", "request")
+			return
+		}
+		limit = parsed
+	}
+	raw, err := s.RoboRev.List(r.Context(), repo, limit)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error(), "list")
 		return

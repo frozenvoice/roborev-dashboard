@@ -71,7 +71,7 @@ function validatePanelMemberDetail(value: unknown, expected: { id: number; panel
   if (expected.panelName && job.panel_name !== expected.panelName) throw new Error('Panel member detail panel mismatch')
   return value as ReviewJob
 }
-function isRunning(job: ReviewJob) { return ['queued', 'running'].includes(String(job.status).toLowerCase()) }
+function isRunning(job: ReviewJob) { return ['queued', 'running'].includes(jobStatus(job)) }
 function isPanelRefineActive(run: PanelRefineRun | null) { return Boolean(run && ['starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing'].includes(run.phase)) }
 function isClosed(job: ReviewJob) { return Boolean(job.addressed || job.closed) }
 function isFinding(job: ReviewJob) { return !isRunning(job) && ['f', 'fail', 'finding', 'failed_review'].includes(statusOf(job)) }
@@ -441,6 +441,14 @@ export function App() {
   const [reviewPollError, setReviewPollError] = useState('')
   const [runtimePollError, setRuntimePollError] = useState('')
   const [loadedReviewIdentity, setLoadedReviewIdentity] = useState('')
+  // Tasks history is a lazy, repository-scoped slice with a raised bounded
+  // limit so older task rows are not silently truncated by the polling list.
+  const [taskJobs, setTaskJobs] = useState<ReviewJob[]>([])
+  const [loadedTaskIdentity, setLoadedTaskIdentity] = useState('')
+  const [taskHistoryError, setTaskHistoryError] = useState('')
+  const [taskReloadEpoch, setTaskReloadEpoch] = useState(0)
+  const tasksVisibleRef = useRef(false)
+  const loadedTaskIdentityRef = useRef('')
   const [panelConfiguration, setPanelConfiguration] = useState<PanelConfiguration | null>(null)
   const [panelLoading, setPanelLoading] = useState(false)
   const [panelError, setPanelError] = useState('')
@@ -532,6 +540,21 @@ export function App() {
         setLoadedReviewIdentity(identity)
       }
       return []
+    }
+  }, [])
+  const loadTaskHistory = useCallback(async (repoPath: string, identity: string) => {
+    try {
+      const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repoPath)}&limit=200`))
+      if (loadedTaskIdentityRef.current !== identity && loadedTaskIdentityRef.current !== '') return
+      setTaskJobs(next)
+      loadedTaskIdentityRef.current = identity
+      setLoadedTaskIdentity(identity)
+      setTaskHistoryError('')
+    } catch (error) {
+      // A failed history load keeps the previous slice scoped to its own
+      // repository; the screen shows the error with retry instead of an
+      // unscoped empty state.
+      setTaskHistoryError((error as Error).message)
     }
   }, [])
   const loadBootstrap = useCallback(async () => {
@@ -779,6 +802,10 @@ export function App() {
       setJobs([])
       setReviewPollError('')
       setLoadedReviewIdentity('')
+      setTaskJobs([])
+      loadedTaskIdentityRef.current = ''
+      setLoadedTaskIdentity('')
+      setTaskHistoryError('')
       return
     }
     const repoPath = bootstrap?.selectedRepository
@@ -808,6 +835,9 @@ export function App() {
       authoritativeInFlight = true
       try {
         await loadReviews(repoPath, repoIdentity, effectEpoch)
+        // While the Tasks screen is visible, its raised-limit history slice
+        // follows the same invalidation signals as the review list.
+        if (tasksVisibleRef.current && loadedTaskIdentityRef.current === repoIdentity) void loadTaskHistory(repoPath, repoIdentity)
       } finally {
         authoritativeInFlight = false
         if (!cancelled && refreshPending) {
@@ -1127,6 +1157,12 @@ export function App() {
     setPanelLoading(true)
     setJobs([])
     setSelected(null)
+    // Task history is scoped to one repository; a switch must not show the
+    // previous repository's rows or its empty state while reloading.
+    setTaskJobs([])
+    loadedTaskIdentityRef.current = ''
+    setLoadedTaskIdentity('')
+    setTaskHistoryError('')
     let selectError: Error | null = null
     try {
       try {
@@ -1171,6 +1207,10 @@ export function App() {
   const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? t('panel.unavailableNotInstalled') : !daemonRunning ? t('panel.unavailableDaemonOffline') : !bootstrap.roborev.capabilities.panelReview ? t('panel.versionNoPanel') : !bootstrap.roborev.capabilities.fixCommand ? t('panel.versionNoFix') : !panelOutputStatusAvailable ? t('panel.versionNoStatus') : ''
   const reviewsReady = !canPollReviews || !selectedRepositoryIdentity || loadedReviewIdentity === selectedRepositoryIdentity
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
+  // The Tasks screen renders only a history slice loaded for the exact
+  // current repository; until then it shows the page skeleton instead of an
+  // unscoped empty state.
+  const tasksReady = !canPollReviews || !selectedRepositoryIdentity || (loadedTaskIdentity === selectedRepositoryIdentity && !taskHistoryError)
   const prepareFix = (job: ReviewJob) => {
     const id = idOf(job)
     if (!isFixTarget(job) || !Number.isSafeInteger(id) || id <= 0) return
@@ -1187,6 +1227,18 @@ export function App() {
     setPanelRefineReloadEpoch(epoch => epoch + 1)
     await Promise.allSettled([loadReviews(selectedRepo.path, selectedRepo.identity), loadPanels(selectedRepo.path, selectedRepo.identity)])
   }, [loadBootstrap, loadPanels, loadReviews])
+  // Mirror for the review polling effect, which must not re-subscribe SSE on
+  // navigation changes just to learn whether the Tasks slice is visible.
+  tasksVisibleRef.current = activeNav === 'Tasks'
+  const loadedTaskHistoryForScope = loadedTaskIdentity === selectedRepositoryIdentity && !taskHistoryError
+  useEffect(() => {
+    if (activeNav !== 'Tasks' || repoSwitching) return
+    const identity = selectedRepositoryIdentity
+    const path = repo?.path
+    if (!identity || !path) return
+    if (loadedTaskHistoryForScope) return
+    void loadTaskHistory(path, identity)
+  }, [activeNav, repo?.path, selectedRepositoryIdentity, loadedTaskHistoryForScope, taskReloadEpoch, repoSwitching, loadTaskHistory])
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>{t('brand.dashboard')}</span></div></div><nav>{navigation.map(([label, Icon]) => { const key = navigationLabelKeys[label]; return <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{t(key)}{!['Overview', 'Reviews', 'Fix & Refine', 'Analyze', 'Tasks', 'Repositories', 'Agents & Setup'].includes(label) && <small>{t('nav.soon')}</small>}</button> })}</nav><div className="sidebar-foot"><LanguageSelector /><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? t('status.daemonOnline') : t('status.daemonOffline')}</strong><span>{bootstrap?.roborev?.version || t('status.setupRequired')}</span></div></div></aside>
     <main className="main"><header className="topbar"><button className="icon-button mobile-menu" aria-label={t('nav.openMenu')} onClick={() => setMenu(old => !old)}><Menu /></button><div className="repo-switch"><span>{t('repo.repository')}</span><select aria-label={t('repo.currentAria')} value={selectedRepositoryIdentity} disabled={repoSwitching || setupOperationActive} onChange={event => switchRepo(event.target.value)}>{bootstrap?.repositories.map(item => <option value={item.identity} key={item.identity}>{item.name} · {item.branch}</option>)}</select></div>{repo && <div className="repo-meta"><span><GitBranch size={15} />{repo.branch}</span><span><GitCommit size={15} />{repo.headShort}</span>{repo.dirty && <span className="dirty"><AlertTriangle size={14} />{t('status.dirty')}</span>}</div>}<div className="top-spacer" /><div className="panel-control"><span>{t('review.mode')}</span><select aria-label={t('review.panelAria')} value={panelSelectionValue} disabled={busy || setupOperationActive || repoSwitching || panelLoading || Boolean(panelError) || !repo} onChange={event => selectPanel(event.target.value)}>{!panelSelectionValue && <option value="">{t('review.selectPanel')}</option>}{panelConfiguration?.panels.map(panel => <option key={panel.name} value={panel.name} disabled={!panel.valid}>{panelLabel(panel, t)}</option>)}</select><small>{panelMode}</small></div><span className="running"><Activity size={15} />{t('review.runningCount', { count: runningCount })}</span><button className="button primary review-head" disabled={busy || setupOperationActive || repoSwitching || panelRefineActive || panelRefineLoading || !reviewsReady || !panelReady || !repo || !bootstrap?.roborev?.installed || !daemonRunning || !reviewSupported} onClick={reviewHead}><Play size={17} />{t('review.reviewHead')}</button></header>
@@ -1194,7 +1246,7 @@ export function App() {
       {!loading && bootstrap && !setupState && (!bootstrap.roborev?.installed || !daemonRunning || !reviewSupported) && <section className="setup-banner"><Server /><div><strong>{!bootstrap.roborev?.installed ? t('setup.notInstalled') : !reviewSupported ? t('setup.upgradeRequired') : t('setup.daemonStopped')}</strong><p>{setupError || bootstrap.roborev?.error || (!reviewSupported ? t('setup.metadataContractUnavailable') : bootstrap.roborev?.installed ? t('setup.startDaemonHint') : t('setup.configureBinaryHint'))}</p></div>{bootstrap.roborev?.installed && reviewSupported && !daemonRunning && <button className="button" disabled={busy || setupOperationActive} onClick={() => runDaemonAction('start')}>{t('setup.daemonStart')}</button>}</section>}
       {panelError && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>{t('panel.configurationUnavailable')}</strong><p>{panelError}</p></div>{repo && <button className="button" disabled={panelLoading} onClick={() => loadPanels(repo.path, repo.identity)}>{t('panel.retryDiscovery')}</button>}</section>}
       {(reviewPollError || runtimePollError) && <section className="setup-banner" role="alert"><AlertTriangle /><div><strong>{t('error.backgroundRefresh')}</strong><p>{reviewPollError || runtimePollError}</p></div></section>}
-      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <>{activeNav === 'Reviews' && panelRefineRun && (panelRefineActive || panelRefineRun.phase === 'needs_attention') && <PanelRefineSummary run={panelRefineRun} onOpen={() => { setActiveNav('Fix & Refine'); setMenu(false) }} />}<ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Analyze' ? <Analyze repoIdentity={selectedRepositoryIdentity} /> : activeNav === 'Tasks' ? <Tasks key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} repository={repo ?? null} jobs={jobs} onOpenReview={openReviewById} /> : activeNav === 'Fix & Refine' ? <FixRefine key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} jobs={jobs} selectedJobId={fixTargetJobId} onSelectedJobIdChange={setFixTargetJobId} onOpenReview={openReviewById} onTerminal={refreshAfterFix} onToast={toast} panelRefine={{ repoPath: repo?.path ?? '', panelConfiguration, options: panelRefineOptions, run: panelRefineRun, available: panelRefineAvailable, disabledReason: panelRefineDisabledReason, loading: panelRefineLoading, error: panelRefineError, busy: busy || setupOperationActive || repoSwitching, onStart: startPanelRefine, onCancel: cancelPanelRefine, onOpenReview: openReviewById }} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} state={setupState} busy={busy || setupOperationActive || repoSwitching} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={loadedAgentsIdentity === selectedRepositoryIdentity ? agents : null} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { if (selectedRepositoryIdentity) await loadAgents(selectedRepositoryIdentity) }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">{t('roadmap.title')}</span><h1>{navigationLabel(activeNav, t)}</h1><p>{t('roadmap.body')}</p></section>}
+      {loading || (reviewPageActive && !reviewsReady) ? <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div> : reviewPageActive ? <>{activeNav === 'Reviews' && panelRefineRun && (panelRefineActive || panelRefineRun.phase === 'needs_attention') && <PanelRefineSummary run={panelRefineRun} onOpen={() => { setActiveNav('Fix & Refine'); setMenu(false) }} />}<ReviewList jobs={jobs} selected={selected ? idOf(selected) : undefined} onSelect={setSelected} /></> : activeNav === 'Analyze' ? <Analyze repoIdentity={selectedRepositoryIdentity} /> : activeNav === 'Tasks' ? (tasksReady ? <Tasks key={`${selectedRepositoryIdentity}:ready`} repository={repo ?? null} jobs={taskJobs} historyError={taskHistoryError} onRetryHistory={() => { setTaskHistoryError(''); setTaskReloadEpoch(epoch => epoch + 1) }} onOpenReview={openReviewById} /> : <div className="page-loading"><div className="skeleton" /><div className="skeleton tall" /></div>) : activeNav === 'Fix & Refine' ? <FixRefine key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} jobs={jobs} selectedJobId={fixTargetJobId} onSelectedJobIdChange={setFixTargetJobId} onOpenReview={openReviewById} onTerminal={refreshAfterFix} onToast={toast} panelRefine={{ repoPath: repo?.path ?? '', panelConfiguration, options: panelRefineOptions, run: panelRefineRun, available: panelRefineAvailable, disabledReason: panelRefineDisabledReason, loading: panelRefineLoading, error: panelRefineError, busy: busy || setupOperationActive || repoSwitching, onStart: startPanelRefine, onCancel: cancelPanelRefine, onOpenReview: openReviewById }} /> : activeNav === 'Repositories' ? <Repositories bootstrap={bootstrap} mutate={mutate} busy={busy || setupOperationActive} /> : activeNav === 'Agents & Setup' ? <Setup key={`${selectedRepositoryIdentity}:${repoSwitching ? 'switching' : 'ready'}`} state={setupState} busy={busy || setupOperationActive || repoSwitching} onInstall={() => setupMutation('/api/setup/roborev/install')} onRetry={() => setupMutation('/api/setup/roborev/retry')} onStartDaemon={() => runDaemonAction('start')} agents={loadedAgentsIdentity === selectedRepositoryIdentity ? agents : null} agentsLoading={agentsLoading} agentsError={agentsError} onRefreshAgents={async () => { if (selectedRepositoryIdentity) await loadAgents(selectedRepositoryIdentity) }} onCheckAgent={runAgentCheck} runtimeControl={runtimeControl} runtimeLoading={runtimeControlLoading} runtimeError={runtimeControlError} onRefreshRuntime={async () => { await loadRuntimeControl() }} onDaemonAction={runDaemonAction} onQueueAction={runQueueAction} panelRefineActive={panelRefineActive || panelRefineLoading} /> : <section className="coming"><TerminalSquare /><span className="eyebrow">{t('roadmap.title')}</span><h1>{navigationLabel(activeNav, t)}</h1><p>{t('roadmap.body')}</p></section>}
     </main>
     {selected && <ReviewDetail key={idOf(selected)} job={selected} jobs={jobs} close={() => setSelected(null)} mutate={mutate} busy={busy || setupOperationActive || !canPollReviews} canRerun={Boolean(bootstrap?.roborev?.capabilities?.frozenRerunApi) && !setupOperationActive && !panelRefineActive && !panelRefineLoading} canLoadMembers={Boolean(bootstrap?.roborev?.capabilities?.panelMembersApi && selected.panel_run_uuid)} repoPath={repo?.path ?? ''} repoIdentity={repo?.identity ?? ''} toast={toast} onPrepareFix={prepareFix} />}
     {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}

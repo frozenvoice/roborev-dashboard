@@ -2,13 +2,73 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
+
+type listLimitService struct {
+	fakeService
+	mu     sync.Mutex
+	limits []int
+}
+
+func (f *listLimitService) List(_ context.Context, _ string, limit int) (json.RawMessage, error) {
+	f.mu.Lock()
+	f.limits = append(f.limits, limit)
+	f.mu.Unlock()
+	return json.RawMessage(`[]`), nil
+}
+
+// The Tasks history view raises the bounded list limit once per repository;
+// ordinary polling keeps the default and invalid limits fail closed.
+func TestListReviewsAcceptsBoundedLimitOnly(t *testing.T) {
+	service := &listLimitService{}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		query      string
+		want       int
+		wantStatus int
+	}{
+		{query: "", want: 100, wantStatus: http.StatusOK},
+		{query: "&limit=200", want: 200, wantStatus: http.StatusOK},
+		{query: "&limit=1", want: 1, wantStatus: http.StatusOK},
+		{query: "&limit=0", wantStatus: http.StatusBadRequest},
+		{query: "&limit=201", wantStatus: http.StatusBadRequest},
+		{query: "&limit=abc", wantStatus: http.StatusBadRequest},
+		{query: "&limit=2&limit=3", wantStatus: http.StatusBadRequest},
+	}
+	for _, testCase := range cases {
+		request := httptest.NewRequest(http.MethodGet, "/api/reviews?repo="+url.QueryEscape(`E:\repo`)+testCase.query, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != testCase.wantStatus {
+			t.Fatalf("%s: status = %d body=%s", testCase.query, recorder.Code, recorder.Body.String())
+		}
+		if testCase.wantStatus != http.StatusOK {
+			continue
+		}
+		service.mu.Lock()
+		got := service.limits[len(service.limits)-1]
+		service.mu.Unlock()
+		if got != testCase.want {
+			t.Fatalf("%s: limit = %d, want %d", testCase.query, got, testCase.want)
+		}
+	}
+}
 
 // taskCountingService proves that the disabled endpoints never reach the
 // RoboRev adapter or registry inspection machinery.
