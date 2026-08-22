@@ -231,10 +231,9 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     if (hadScope) setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review')
   }, [canLoadMembers, id, job.panel_run_uuid, repoIdentity])
   useEffect(() => {
-    const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
+    const wasRunning = isRunning({ status: previousStatus.current } as ReviewJob)
     previousStatus.current = job.status
     if (!wasRunning || isRunning(job)) return
-    detailPollGeneration.current++
     const detailRequest = ++detailGeneration.current
     setDetailLoading(true)
     const refreshDetail = async (attempt: number): Promise<void> => {
@@ -310,7 +309,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
           setMemberDetailLoading(false)
         } else if (selectedMember && selectedMemberIdRef.current === selectedId) {
           const previousStatus = memberSnapshot.current.get(selectedId!)
-          if (previousStatus && ['queued', 'running'].includes(previousStatus) && !isRunning(selectedMember)) void loadMemberDetail(selectedMember, false)
+          if (previousStatus && isRunning({ status: previousStatus } as ReviewJob) && !isRunning(selectedMember)) void loadMemberDetail(selectedMember, false)
         }
         memberSnapshot.current = new Map(next.map(member => [idOf(member), String(member.status || '').toLowerCase()]))
         setMemberJobs(next)
@@ -362,16 +361,26 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const currentRunning = isRunning(current)
   useEffect(() => {
     if (!currentRunning || job.panel_run_uuid) return
-    const generation = ++detailPollGeneration.current
-    const timer = setInterval(() => {
-      void request<ReviewJob>(`/api/reviews/${id}`).then(value => {
-        if (generation === detailPollGeneration.current) {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      if (cancelled) return
+      const generation = ++detailGeneration.current
+      try {
+        const value = await request<ReviewJob>(`/api/reviews/${id}`)
+        if (!cancelled && generation === detailGeneration.current) {
           setDetail({ ...value, id, job_id: id })
           setDetailError('')
         }
-      }).catch(() => { /* transient transport errors keep the last good detail */ })
-    }, 4000)
-    return () => { clearInterval(timer); detailPollGeneration.current++ }
+      } catch {
+        /* transient transport errors keep the last good detail */
+      }
+      if (!cancelled) timer = setTimeout(poll, 4000)
+    }
+    // Serialized polling with a shared monotonic generation ensures an older
+    // initial or poll response cannot overtake a newer terminal reconciliation.
+    timer = setTimeout(poll, 4000)
+    return () => { cancelled = true; if (timer) clearTimeout(timer); detailGeneration.current++ }
   }, [currentRunning, id, job.panel_run_uuid])
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
@@ -843,6 +852,8 @@ export function App() {
       loadedTaskIdentityRef.current = ''
       setLoadedTaskIdentity('')
       setTaskHistoryError('')
+      lastTaskSliceEpoch.current = -1
+      lastTaskSliceIdentity.current = ''
       return
     }
     const repoPath = bootstrap?.selectedRepository
@@ -1199,6 +1210,8 @@ export function App() {
     // previous repository's rows or its empty state while reloading, and any
     // in-flight history request for the old repository is invalidated.
     taskHistoryGeneration.current++
+    lastTaskSliceEpoch.current = -1
+    lastTaskSliceIdentity.current = ''
     setTaskJobs([])
     loadedTaskIdentityRef.current = ''
     setLoadedTaskIdentity('')
