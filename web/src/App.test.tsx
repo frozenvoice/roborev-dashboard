@@ -1025,28 +1025,73 @@ describe('App review workflow', () => {
     expect(screen.getByText(selected.path)).toBeInTheDocument()
   })
 
-  it('does not let delayed registration bootstrap overwrite a later repository switch', async () => {
+  it('restores repository controls and preserves input after registration failures', async () => {
+    const postFailurePath = 'E:\\failed-post'
+    const bootstrapFailurePath = 'E:\\failed-bootstrap'
+    let bootstrapCount = 0
+    let postCount = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') {
+        bootstrapCount += 1
+        return bootstrapCount === 1 ? response(bootstrap) : response({ error: 'registration bootstrap failed' }, 502)
+      }
+      if (path === '/api/repos' && init?.method === 'POST') {
+        postCount += 1
+        return postCount === 1 ? response({ error: 'registration failed' }, 502) : response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Repositories' }))
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+
+    await userEvent.type(input, postFailurePath)
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }))
+    await waitFor(() => expect(postCount).toBe(1))
+    await waitFor(() => expect(selector).toBeEnabled())
+    expect(input).toHaveValue(postFailurePath)
+
+    await userEvent.clear(input)
+    await userEvent.type(input, bootstrapFailurePath)
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }))
+    await waitFor(() => expect(postCount).toBe(2))
+    await waitFor(() => expect(bootstrapCount).toBe(2))
+    await waitFor(() => expect(selector).toBeEnabled())
+    expect(input).toHaveValue(bootstrapFailurePath)
+  })
+
+  it('disables repository switching during registration and applies its authoritative bootstrap', async () => {
     const repoA = bootstrap.repositories[0]
     const repoB = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
     const repoC = { identity: 'repo-3', name: 'new', path: 'E:\\new', branch: 'main', head: '333333333333', headShort: '33333333', commitSubject: 'New', dirty: false, hasConfig: true }
     const initial = { ...bootstrap, repositories: [repoA, repoB] }
     let selectedIdentity = repoA.identity
-    let deferRegistrationBootstrap = false
-    let registrationBootstrapStarted = false
-    const registrationBootstrap = deferred<Response>()
+    let registrationPostCount = 0
+    let selectPostCount = 0
+    let registrationPostStarted = false
+    let bootstrapCount = 0
+    const registrationPost = deferred<Response>()
+    const order: string[] = []
     const bootstrapFor = (identity: string) => ({ ...initial, selectedRepository: identity === repoA.identity ? repoA.path : repoB.path, selectedRepositoryIdentity: identity, repositories: identity === repoA.identity ? [repoA, repoB, repoC] : [repoA, repoB] })
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') {
-        if (deferRegistrationBootstrap) {
-          deferRegistrationBootstrap = false
-          registrationBootstrapStarted = true
-          return registrationBootstrap.promise
-        }
-        return response(bootstrapFor(selectedIdentity))
+        bootstrapCount += 1
+        order.push(`bootstrap-${bootstrapCount}`)
+        return response(bootstrapCount === 1 ? initial : bootstrapFor(selectedIdentity))
       }
-      if (path === '/api/repos' && init?.method === 'POST') { deferRegistrationBootstrap = true; return response({ success: true }) }
+      if (path === '/api/repos' && init?.method === 'POST') {
+        registrationPostCount += 1
+        registrationPostStarted = true
+        order.push('post')
+        return registrationPost.promise
+      }
       if (path === '/api/repos/select' && init?.method === 'POST') {
+        selectPostCount += 1
         selectedIdentity = repoB.identity
         return response({ success: true })
       }
@@ -1059,17 +1104,26 @@ describe('App review workflow', () => {
     const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
     await userEvent.type(input, repoC.path)
     await userEvent.click(screen.getByRole('button', { name: 'Register' }))
-    await waitFor(() => expect(registrationBootstrapStarted).toBe(true))
+    await waitFor(() => expect(registrationPostStarted).toBe(true))
 
     const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    expect(selector).toBeDisabled()
+    expect(selector).toHaveValue(repoA.identity)
     await userEvent.selectOptions(selector, repoB.identity)
-    await waitFor(() => expect(selector).toHaveValue(repoB.identity))
-    registrationBootstrap.resolve(new Response(JSON.stringify(bootstrapFor(repoA.identity)), { status: 200, headers: { 'Content-Type': 'application/json' } }))
-    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(selector).toHaveValue(repoA.identity)
+    expect(selectPostCount).toBe(0)
+    expect(bootstrapCount).toBe(1)
+    expect(order.indexOf('post')).toBeGreaterThan(order.indexOf('bootstrap-1'))
 
-    expect(selector).toHaveValue(repoB.identity)
-    expect(screen.getByText(repoB.path)).toBeInTheDocument()
-    expect(input).toHaveValue(repoC.path)
+    registrationPost.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.getByText(repoC.path)).toBeInTheDocument())
+    expect(registrationPostCount).toBe(1)
+    expect(selectPostCount).toBe(0)
+    expect(bootstrapCount).toBe(2)
+    expect(order.indexOf('bootstrap-2')).toBeGreaterThan(order.indexOf('post'))
+    expect(selector).toBeEnabled()
+    expect(selector).toHaveValue(repoA.identity)
+    expect(input).toHaveValue('')
   })
 
   it('uses opaque identity for case-varied selected paths and updates an existing repository without duplication', async () => {

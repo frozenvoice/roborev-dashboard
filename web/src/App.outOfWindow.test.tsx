@@ -286,7 +286,9 @@ describe('out-of-window selected review mutation', () => {
     void userEvent.click(screen.getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(freshAStarted).toBe(true))
 
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Current repository' }), repoB.identity)
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    expect(selector).toBeDisabled()
+    fireEvent.change(selector, { target: { value: repoB.identity } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(repoB.identity))
     freshADeferred.resolve(new Response(JSON.stringify({ ...taskA, closed: true, output: '# Task A closed', review: { output: '# Task A closed' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -348,7 +350,9 @@ describe('out-of-window selected review mutation', () => {
     void userEvent.click(screen.getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(mutationBootstrapStarted).toBe(true))
 
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Current repository' }), repoB.identity)
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    expect(selector).toBeDisabled()
+    fireEvent.change(selector, { target: { value: repoB.identity } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(repoB.identity))
     await waitFor(() => expect(screen.getByText(/#50/)).toBeInTheDocument())
 
