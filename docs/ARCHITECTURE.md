@@ -64,7 +64,7 @@ v0.64.0에는 effective review panel을 열거하는 machine-readable CLI나 dae
 
 ### process 실행
 
-외부 process는 shell 없이 executable과 argument slice로 실행한다. stdout/stderr는 분리하고 각각 상한을 적용한다. request cancellation과 timeout을 전달하고 `WaitDelay`로 pipe 대기를 제한한다. Windows에서는 child를 kill-on-close Job Object에 넣어 timeout/cancellation 시 descendant까지 종료한다. daemon start만 background daemon 생존을 위해 이 tree ownership을 명시적으로 제외한다. audit metadata에는 executable basename, args, duration, exit code, truncation 여부만 기록하며 환경 변수 전체를 남기지 않는다.
+외부 process는 shell 없이 executable과 argument slice로 실행한다. stdout/stderr는 분리하고 각각 상한을 적용한다. request cancellation과 timeout을 전달하고 `WaitDelay`로 pipe 대기를 제한한다. Windows에서는 child를 kill-on-close Job Object에 넣어 timeout/cancellation 시 descendant까지 종료한다. daemon start만 background daemon 생존을 위해 이 tree ownership을 명시적으로 제외한다. audit metadata에는 executable basename, args, duration, exit code, truncation 여부만 기록하며 환경 변수 전체를 남기지 않는다. `Command.Stdin`/`StdinLimit`/`DefaultStdinLimit`은 사용처가 없어 의도적으로 제거되었다; 향후 bounded stdin이 필요한 프로토콜은 별도 검토된 typed 계약으로만 재도입한다.
 
 ### Live event relay
 

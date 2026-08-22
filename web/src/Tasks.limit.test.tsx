@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { I18nProvider } from './i18n'
+import { I18nProvider, ko } from './i18n'
 import { Tasks } from './Tasks'
 import { App } from './App'
 import { TASK_HISTORY_LIMIT } from './api'
@@ -15,8 +15,9 @@ describe('Tasks bounded history wording', () => {
     expect(screen.getAllByText(new RegExp(`${TASK_HISTORY_LIMIT}`)).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText(/^Custom Tasks found in the latest 200 repository jobs\.$/)).toBeInTheDocument()
     expect(screen.getByText(/^No Custom Tasks found in the latest 200 repository jobs\.$/)).toBeInTheDocument()
-    // Korean also contains limit when switched – verify placeholder interpolation works
-    // Switch to Korean via localStorage would require reload; just ensure English already covers limit constant
+    expect(ko['tasks.historyDescription']).toContain('{limit}')
+    expect(ko['tasks.historyDescription'].replace('{limit}', '200')).toContain('200')
+    expect(ko['tasks.noHistory']).toContain('{limit}')
     const historyJob = { id: 50, uuid: '550e8400-e29b-41d4-a716-446655440050', job_type: 'task', git_ref: 'run', status: 'done' }
     rerender(<I18nProvider><Tasks repository={repository} jobs={[historyJob as any]} onOpenReview={() => {}} /></I18nProvider>)
     expect(screen.getByText(/^Custom Tasks found in the latest 200 repository jobs\.$/)).toBeInTheDocument()
