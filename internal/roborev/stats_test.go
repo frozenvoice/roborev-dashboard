@@ -3,11 +3,13 @@ package roborev
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
@@ -232,6 +234,65 @@ func TestClientStatsRejectsHealthFailuresOutputBoundsBindingAndIdentity(t *testi
 			}
 			if !test.wantStats && statsCommands != 0 {
 				t.Fatalf("stats command ran before gate: %d", statsCommands)
+			}
+		})
+	}
+}
+
+func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		daemonURL string
+		transport http.RoundTripper
+		want      DaemonHealthProbeState
+		running   bool
+	}{
+		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true}`, want: DaemonHealthOnline, running: true},
+		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, running: false},
+		{name: "HTTP error", status: http.StatusInternalServerError, body: `server error`, want: DaemonHealthInvalid},
+		{name: "malformed JSON", status: http.StatusOK, body: `{`, want: DaemonHealthInvalid},
+		{name: "trailing JSON", status: http.StatusOK, body: `{"healthy":true}{}`, want: DaemonHealthInvalid},
+		{name: "unknown field", status: http.StatusOK, body: `{"healthy":true,"unexpected":true}`, want: DaemonHealthInvalid},
+		{name: "invalid schema", status: http.StatusOK, body: `{"$schema":null,"healthy":true}`, want: DaemonHealthInvalid},
+		{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), want: DaemonHealthInvalid},
+		{name: "generic transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: errors.New("banana")}, want: DaemonHealthInvalid},
+		{name: "generic timeout transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: genericTimeoutError{}}, want: DaemonHealthInvalid},
+		{name: "wrapped deadline transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", context.DeadlineExceeded)}, want: DaemonHealthInvalid},
+		{name: "connection refused", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", syscall.Errno(10061))}, want: DaemonHealthOffline},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var health *httptest.Server
+			daemonURL := test.daemonURL
+			if daemonURL == "" {
+				health = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(test.status)
+					_, _ = w.Write([]byte(test.body))
+				}))
+				defer health.Close()
+				daemonURL = health.URL
+			}
+			runner := &statsRecordingRunner{version: "v0.64.0"}
+			client, err := NewClient("roborev", runner, daemonURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.transport != nil {
+				client.HTTP = &http.Client{Transport: test.transport}
+			}
+			installation := client.Installation(context.Background())
+			if installation.DaemonHealth != test.want {
+				t.Fatalf("health state=%q want %q error=%q", installation.DaemonHealth, test.want, installation.Error)
+			}
+			status := string(installation.Status)
+			wantRunning := `"running":false`
+			if test.running {
+				wantRunning = `"running":true`
+			}
+			if !strings.Contains(status, wantRunning) {
+				t.Fatalf("status=%s want substring %s", status, wantRunning)
 			}
 		})
 	}

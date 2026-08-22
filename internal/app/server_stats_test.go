@@ -21,6 +21,9 @@ type statsHTTPService struct {
 	summaryCaps   bool
 	costCaps      bool
 	running       bool
+	healthState   roborev.DaemonHealthProbeState
+	healthError   string
+	status        json.RawMessage
 	installations int
 	summaryCalls  int
 	costCalls     int
@@ -33,6 +36,22 @@ type statsHTTPService struct {
 
 func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 	s.installations++
+	healthState := s.healthState
+	if healthState == "" {
+		healthState = roborev.DaemonHealthOffline
+		if s.running {
+			healthState = roborev.DaemonHealthOnline
+		}
+	}
+	status := s.status
+	if status == nil {
+		status = func() json.RawMessage {
+			if s.running {
+				return json.RawMessage(`{"running":true}`)
+			}
+			return json.RawMessage(`{"running":false}`)
+		}()
+	}
 	return roborev.Installation{
 		Installed: s.version != "",
 		Version:   s.version,
@@ -40,12 +59,9 @@ func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 			SummaryStats: s.summaryCaps,
 			CostStats:    s.costCaps,
 		},
-		Status: func() json.RawMessage {
-			if s.running {
-				return json.RawMessage(`{"running":true}`)
-			}
-			return json.RawMessage(`{"running":false}`)
-		}(),
+		Status:       status,
+		Error:        s.healthError,
+		DaemonHealth: healthState,
 	}
 }
 
@@ -313,5 +329,46 @@ func TestStatsCapabilityDaemonAndErrorsAreIndependentAndStable(t *testing.T) {
 	server.Handler().ServeHTTP(response, nativeStatsRequest("/api/stats/summary?repositoryIdentity="+statsIdentityQuery(identity)+"&window=7d&branchScope=all"))
 	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "secret protocol detail") {
 		t.Fatalf("malformed health status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testing.T) {
+	service := &statsHTTPService{version: "v0.64.0", summaryCaps: true, costCaps: true, running: false}
+	server, identity := setupStatsServer(t, service, nil)
+	summaryTarget := "/api/stats/summary?repositoryIdentity=" + statsIdentityQuery(identity) + "&window=7d&branchScope=all"
+	costTarget := "/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=all"
+
+	for _, test := range []struct {
+		name  string
+		state roborev.DaemonHealthProbeState
+		error string
+		want  int
+	}{
+		{name: "offline state wins over malformed-looking error", state: roborev.DaemonHealthOffline, error: "malformed RoboRev daemon health: offline", want: http.StatusServiceUnavailable},
+		{name: "invalid state ignores banana error", state: roborev.DaemonHealthInvalid, error: "banana", want: http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service.healthState = test.state
+			service.healthError = test.error
+			for _, target := range []string{summaryTarget, costTarget} {
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, nativeStatsRequest(target))
+				if response.Code != test.want || service.summaryCalls != 0 || service.costCalls != 0 {
+					t.Fatalf("target=%s status=%d summaryCalls=%d costCalls=%d body=%s", target, response.Code, service.summaryCalls, service.costCalls, response.Body.String())
+				}
+			}
+		})
+	}
+
+	// Missing/invalid browser status is also a safe protocol error once the
+	// typed probe says the endpoint was reachable.
+	service.healthState = roborev.DaemonHealthOnline
+	service.healthError = "banana"
+	service.status = json.RawMessage(`{"running":`)
+	service.running = true
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, nativeStatsRequest(summaryTarget))
+	if response.Code != http.StatusBadGateway || service.summaryCalls != 0 {
+		t.Fatalf("malformed status=%d calls=%d body=%s", response.Code, service.summaryCalls, response.Body.String())
 	}
 }

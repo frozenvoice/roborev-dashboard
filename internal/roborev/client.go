@@ -263,12 +263,18 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	if err != nil {
 		return Installation{Installed: false, Binary: binary, Error: err.Error(), FailureCode: probeFailureCode(err)}
 	}
-	installation := Installation{Installed: true, Binary: binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`)}
+	installation := Installation{Installed: true, Binary: binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`), DaemonHealth: DaemonHealthUnknown}
 	if installation.Capabilities.ReviewEnqueueAPI {
-		if health, healthErr := c.health(ctx); healthErr == nil {
-			status, _ := json.Marshal(map[string]any{"running": true, "known": true, "health": health})
+		if health, healthErr := c.healthStatus(ctx); healthErr == nil {
+			installation.DaemonHealth = DaemonHealthOnline
+			status, _ := json.Marshal(map[string]any{"running": health.Healthy, "known": true, "health": health})
 			installation.Status = status
 		} else {
+			if ctx.Err() != nil || !isUnreachableHealthError(healthErr) {
+				installation.DaemonHealth = DaemonHealthInvalid
+			} else {
+				installation.DaemonHealth = DaemonHealthOffline
+			}
 			installation.Status = json.RawMessage(`{"running":false,"known":true}`)
 			installation.Error = "RoboRev daemon health check failed: " + healthErr.Error()
 		}
@@ -380,27 +386,6 @@ func (c *Client) generationCurrent(generation uint64) bool {
 	c.bindingMu.RLock()
 	defer c.bindingMu.RUnlock()
 	return c.binding.generation == generation
-}
-
-func (c *Client) health(ctx context.Context) (json.RawMessage, error) {
-	_, daemonURL, _ := c.snapshot()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+"/api/health", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("health endpoint returned %d", resp.StatusCode)
-	}
-	return decodeRaw(string(data))
 }
 
 func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMessage, error) {

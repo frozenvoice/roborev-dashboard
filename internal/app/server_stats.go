@@ -156,14 +156,22 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 		writeError(w, http.StatusServiceUnavailable, "Stats require RoboRev v0.64.0", "stats")
 		return nil, false
 	}
+	if installation.DaemonHealth == roborev.DaemonHealthOffline {
+		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be online.", "stats")
+		return nil, false
+	}
+	if installation.DaemonHealth != roborev.DaemonHealthOnline {
+		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
+		return nil, false
+	}
 	var status struct {
 		Running bool `json:"running"`
 	}
-	if len(installation.Status) == 0 || json.Unmarshal(installation.Status, &status) != nil || !status.Running {
-		if statsInstallationHealthMalformed(installation) {
-			writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
-			return nil, false
-		}
+	if len(installation.Status) == 0 || json.Unmarshal(installation.Status, &status) != nil {
+		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
+		return nil, false
+	}
+	if !status.Running {
 		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be online.", "stats")
 		return nil, false
 	}
@@ -174,12 +182,6 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 	}
 	return service, true
 }
-
-func statsInstallationHealthMalformed(installation roborev.Installation) bool {
-	errorText := strings.ToLower(installation.Error)
-	return strings.Contains(errorText, "malformed") || strings.Contains(errorText, "health returned") || strings.Contains(errorText, "health endpoint returned")
-}
-
 func writeStatsError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	message := errStatsUnavailable.Error()

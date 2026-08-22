@@ -21,6 +21,7 @@ const summary = {
 }
 const cost = { repositoryIdentity: identity, branchScope: 'all', cost: { total_usd: 0, jobs_with_cost: 4, jobs_total: 7, complete: false } }
 function response(value: unknown, status = 200) { return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })) }
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(resolvePromise => { resolve = resolvePromise }); return { promise, resolve } }
 function renderStats(props: Partial<React.ComponentProps<typeof StatsInsights>> = {}) { return render(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning {...props} /></I18nProvider>) }
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
 
@@ -138,10 +139,18 @@ describe('StatsInsights', () => {
   it('disables controls while suspended without refetching on suspend or resume', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/cost?') ? response(cost) : response(summary))
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = renderStats()
+    const { rerender } = renderStats({ suspended: true })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning /></I18nProvider>)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
     await screen.findByText('codex')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
     const count = fetchMock.mock.calls.length
     rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning suspended /></I18nProvider>)
+    expect(screen.getByText('codex')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Window' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Branch scope' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
@@ -150,6 +159,63 @@ describe('StatsInsights', () => {
     expect(screen.getByRole('combobox', { name: 'Window' })).toBeEnabled()
     expect(screen.getByRole('combobox', { name: 'Branch scope' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    expect(fetchMock.mock.calls.length).toBe(count)
+  })
+
+  it('aborts in-flight requests on suspension, ignores late results, and only refreshes explicitly after resume', async () => {
+    const summaryDeferred = deferred<Response>()
+    const costDeferred = deferred<Response>()
+    let summaryFirst = true
+    let costFirst = true
+    let summarySignal: AbortSignal | null | undefined
+    let costSignal: AbortSignal | null | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/cost?')) {
+        costSignal = init?.signal
+        if (costFirst) { costFirst = false; return costDeferred.promise }
+        return response(cost)
+      }
+      summarySignal = init?.signal
+      if (summaryFirst) { summaryFirst = false; return summaryDeferred.promise }
+      return response(summary)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = renderStats()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning suspended /></I18nProvider>)
+    await waitFor(() => {
+      expect(summarySignal?.aborted).toBe(true)
+      expect(costSignal?.aborted).toBe(true)
+    })
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    summaryDeferred.resolve(new Response(JSON.stringify(summary), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    costDeferred.resolve(new Response(JSON.stringify(cost), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByText('summary unavailable')).not.toBeInTheDocument()
+    expect(screen.queryByText('cost unavailable')).not.toBeInTheDocument()
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning /></I18nProvider>)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await screen.findByText('codex')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('disables both Retry actions during suspension without allowing retry clicks or resume to fetch', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => response({ error: String(input).includes('/cost?') ? 'cost unavailable' : 'summary unavailable' }, 503))
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = renderStats()
+    expect(await screen.findByText('summary unavailable')).toBeInTheDocument()
+    expect(await screen.findByText('cost unavailable')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2)
+    const count = fetchMock.mock.calls.length
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning suspended /></I18nProvider>)
+    const retries = screen.getAllByRole('button', { name: 'Retry' })
+    expect(retries).toHaveLength(2)
+    retries.forEach(button => expect(button).toBeDisabled())
+    await userEvent.click(retries[0])
+    await userEvent.click(retries[1])
+    expect(fetchMock.mock.calls.length).toBe(count)
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning /></I18nProvider>)
     expect(fetchMock.mock.calls.length).toBe(count)
   })
 

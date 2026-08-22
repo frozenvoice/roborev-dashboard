@@ -10,7 +10,20 @@ type Installation struct {
 	Error        string          `json:"error,omitempty"`
 	FailureCode  string          `json:"failureCode,omitempty"`
 	Capabilities Capabilities    `json:"capabilities"`
+	// DaemonHealth is an internal typed probe result. It is intentionally
+	// hidden from bootstrap JSON; browser callers consume the bounded Status
+	// summary instead.
+	DaemonHealth DaemonHealthProbeState `json:"-"`
 }
+
+type DaemonHealthProbeState string
+
+const (
+	DaemonHealthUnknown DaemonHealthProbeState = "unknown"
+	DaemonHealthOnline  DaemonHealthProbeState = "online"
+	DaemonHealthOffline DaemonHealthProbeState = "offline"
+	DaemonHealthInvalid DaemonHealthProbeState = "invalid"
+)
 
 type Capabilities struct {
 	ReviewEnqueueAPI   bool `json:"reviewEnqueueApi"`
