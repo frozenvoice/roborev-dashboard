@@ -71,7 +71,10 @@ function validatePanelMemberDetail(value: unknown, expected: { id: number; panel
   if (expected.panelName && job.panel_name !== expected.panelName) throw new Error('Panel member detail panel mismatch')
   return value as ReviewJob
 }
-function isRunning(job: ReviewJob) { return ['queued', 'running'].includes(jobStatus(job)) }
+function isRunning(job: ReviewJob) {
+  const value = String(job.status || '').toLowerCase()
+  return value === 'queued' || ['running', 'processing', 'started'].includes(value)
+}
 function isPanelRefineActive(run: PanelRefineRun | null) { return Boolean(run && ['starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing'].includes(run.phase)) }
 function isClosed(job: ReviewJob) { return Boolean(job.addressed || job.closed) }
 function isFinding(job: ReviewJob) { return !isRunning(job) && ['f', 'fail', 'finding', 'failed_review'].includes(statusOf(job)) }
@@ -231,6 +234,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     const wasRunning = ['queued', 'running'].includes(String(previousStatus.current).toLowerCase())
     previousStatus.current = job.status
     if (!wasRunning || isRunning(job)) return
+    detailPollGeneration.current++
     const detailRequest = ++detailGeneration.current
     setDetailLoading(true)
     const refreshDetail = async (attempt: number): Promise<void> => {
@@ -339,8 +343,11 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   }, [id, repoIdentity])
 
   // Fresh detail fields win over the possibly-stale slice row so a task that
-  // finished never keeps rendering its outdated lifecycle status.
-  const current = detail ? { ...job, ...detail, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
+  // finished never keeps rendering its outdated lifecycle status, but a stale
+  // running detail must not overwrite a terminal list row. The merge therefore
+  // restores the list job's terminal status when the detail is still running.
+  const rawCurrent = detail ? { ...job, ...detail, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
+  const current = detail && !isRunning(job) && isRunning(rawCurrent) ? { ...rawCurrent, status: job.status, verdict: job.verdict ?? rawCurrent.verdict } : rawCurrent
   const text = outputOf(current)
   const memberText = outputOf(memberDetail)
   const terminal = !isRunning(current)
@@ -349,11 +356,12 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   // no list polling to refresh it; poll its detail until terminal instead.
   // This poll owns its own generation so a terminal reconciliation (which
   // uses detailGeneration) that fails does not permanently invalidate the
-  // long-lived authoritative detail poll.
-  const detailIsFresh = detail !== null
+  // long-lived authoritative detail poll. Polling starts even before the
+  // initial detail succeeds so a transient first fetch does not freeze a
+  // running task.
   const currentRunning = isRunning(current)
   useEffect(() => {
-    if (!currentRunning || !detailIsFresh || job.panel_run_uuid) return
+    if (!currentRunning || job.panel_run_uuid) return
     const generation = ++detailPollGeneration.current
     const timer = setInterval(() => {
       void request<ReviewJob>(`/api/reviews/${id}`).then(value => {
@@ -364,7 +372,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       }).catch(() => { /* transient transport errors keep the last good detail */ })
     }, 4000)
     return () => { clearInterval(timer); detailPollGeneration.current++ }
-  }, [currentRunning, detailIsFresh, id, job.panel_run_uuid])
+  }, [currentRunning, id, job.panel_run_uuid])
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
   const openFixPrompt = (value: FixPromptResponse) => { setFixPrompt(value); setFixPromptText(value.text) }
@@ -505,6 +513,7 @@ export function App() {
   const panelRefineReviewGeneration = useRef(0)
   const taskHistoryGeneration = useRef(0)
   const lastTaskSliceEpoch = useRef(-1)
+  const lastTaskSliceIdentity = useRef('')
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
   const reviewEffectEpoch = useRef(0)
@@ -1264,11 +1273,14 @@ export function App() {
     const path = repo?.path
     if (!identity || !path) return
     // An explicit retry bumps the epoch so a scope that looks loaded does not
-    // swallow the refetch after a failed refresh.
-    if (loadedTaskHistoryForScope && lastTaskSliceEpoch.current === taskReloadEpoch) return
+    // swallow the refetch after a failed refresh. The epoch and identity
+    // together deduplicate attempts so a successful load does not trigger a
+    // second fetch when the scope flips from error to loaded.
+    if (lastTaskSliceEpoch.current === taskReloadEpoch && lastTaskSliceIdentity.current === identity) return
     lastTaskSliceEpoch.current = taskReloadEpoch
+    lastTaskSliceIdentity.current = identity
     void loadTaskHistory(path, identity)
-  }, [activeNav, repo?.path, selectedRepositoryIdentity, loadedTaskHistoryForScope, taskReloadEpoch, repoSwitching, loadTaskHistory])
+  }, [activeNav, repo?.path, selectedRepositoryIdentity, taskReloadEpoch, repoSwitching, loadTaskHistory])
   const taskSliceInFlight = canPollReviews && Boolean(selectedRepositoryIdentity) && !loadedTaskHistoryForScope && !taskHistoryError
   return <div className="shell">
     <aside className={`sidebar ${menu ? 'open' : ''}`}><div className="brand"><span className="brand-mark"><Bot /></span><div><strong>RoboRev</strong><span>{t('brand.dashboard')}</span></div></div><nav>{navigation.map(([label, Icon]) => { const key = navigationLabelKeys[label]; return <button key={label} className={activeNav === label ? 'active' : ''} onClick={() => { setActiveNav(label); setMenu(false) }}><Icon />{t(key)}{!['Overview', 'Reviews', 'Fix & Refine', 'Analyze', 'Tasks', 'Repositories', 'Agents & Setup'].includes(label) && <small>{t('nav.soon')}</small>}</button> })}</nav><div className="sidebar-foot"><LanguageSelector /><span className={`health ${daemonRunning ? 'online' : ''}`} /><div><strong>{daemonRunning ? t('status.daemonOnline') : t('status.daemonOffline')}</strong><span>{bootstrap?.roborev?.version || t('status.setupRequired')}</span></div></div></aside>
