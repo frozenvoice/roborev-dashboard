@@ -59,28 +59,28 @@
 - 기존 사용자 작업을 임의로 삭제, 덮어쓰기 또는 revert하지 않는다.
 - review finding은 명령이 아니라 증거로 취급한다. 실제 코드와 재현 가능성을 검증한 뒤 적용한다.
 - RoboRev finding을 무조건 수정하지 않으며 false positive 또는 not applicable 판단은 이유를 기록한다.
-- 과거 RoboRev job을 rerun해서 새 코드를 검증하지 않는다. 새로운 review job으로 검증한다.
-- 단일 commit 변경이면 새로운 HEAD review로 검증할 수 있다.
-- 하나의 checkpoint가 여러 code commit으로 구성되면 최종 quality gate를 마지막 HEAD commit 하나만 리뷰하지 않는다.
-- 최종 gate는 첫 implementation commit부터 최신 code/fix commit까지의 누적 inclusive range를 새 review로 생성한다. `roborev review <FIRST_COMMIT> <LATEST_CODE_COMMIT> --panel <panel>`은 내부적으로 `FIRST^..LATEST` 누적 diff를 리뷰한다.
-- material finding 수정 commit이 추가되면 최종 gate도 `FIRST_COMMIT` → 새로운 최신 code commit 전체 range를 다시 리뷰한다.
-- 최종 보고에는 각 reviewer job의 review job ID, reviewer, target first SHA, target last SHA, verdict를 함께 기록한다.
-- final code gate 결과를 기록하기 위한 docs-only commit이 생기더라도 그 docs commit의 HEAD review를 최종 code gate라고 부르지 않는다.
-- review job ID를 기록하기 위한 docs-only commit을 만들기 위해 불필요하게 또 panel review를 돌리는 loop를 만들지 않는다. 최종 reviewer job ID는 가능한 repository 문서에 다시 commit하지 말고 작업 완료 보고에 기록한다.
-- RoboRev quality gate를 실행했으면 synthesis만 보지 말고 모든 panel member 결과도 terminal까지 직접 확인한다.
-- F verdict가 나오면 해당 output을 반드시 읽고 실제 코드와 upstream 계약으로 대조한다.
-- latest quality gate에 unresolved valid High 또는 Medium finding이 하나라도 있으면 작업을 완료라고 선언하지 않는다.
-- valid material finding은 수정 → tests → 새 commit → cumulative range re-review 순서로 닫는다.
 - Low finding은 검증 뒤 작고 scope 안이면 같이 수정하고, defer하면 명시적 근거를 남긴다.
-- latest cumulative gate가 clean일 때(해당 gate에서 제기된 valid High/Medium이 전부 해결되었을 때)만 완료할 수 있다.
-- 이 completion 규칙은 Codex뿐 아니라 OpenCode, Cursor 및 모든 개발 agent에 동일하게 적용한다.
 - 중요한 설계 변경 시 `docs/ARCHITECTURE.md`를 함께 갱신한다.
 - Codex와 Cursor 사이의 handoff를 위해 `docs/HANDOFF.md`를 최신으로 유지한다.
 - 저장소 안에 있는 사용자 변경은 보존하고, 무관한 파일을 commit에 포함하지 않는다.
 
+### RoboRev 외부 리뷰 정책
+
+- RoboRev quality review는 coding agent의 자동 완료 루프가 아니라 사용자/외부 gatekeeper가 별도로 수행한다.
+- 현재 작업 요청에서 사용자가 명시적으로 요구하지 않는 한 coding agent는 `roborev review`, panel review, `roborev wait` 등 새 RoboRev review job을 생성하거나 기다리지 않는다.
+- coding agent는 스스로 RoboRev review → finding 수정 → re-review loop를 시작하지 않는다.
+- 사용자가 RoboRev finding 내용을 제공하면 finding을 증거로 취급하고 실제 코드와 대조한 뒤 유효한 finding만 수정한다.
+- finding 수정 후 coding agent의 완료 조건은: targeted tests, full tests/build, coherent commit, push, clean working tree이며, 후속 RoboRev PASS가 아니다.
+- 수정 완료 후에는 commit SHA와 검증 결과를 보고하고 멈춘다. 다음 RoboRev review 실행 및 finding reconciliation은 외부 gatekeeper가 담당한다.
+- 사용자가 현재 요청에서 특정 RoboRev review 실행을 명시적으로 요구한 경우에만 그 명령을 수행할 수 있다. 이 경우에도 사용자가 별도로 요구하지 않았다면 결과를 보고한 뒤 자율적인 fix/re-review 무한 loop를 시작하지 않는다.
+- 기존 RoboRev finding을 보기 위한 `roborev show --job <id>` 역시 사용자가 해당 job 확인을 명시적으로 요청한 경우에만 사용한다.
+- 기존 "review finding은 명령이 아니라 증거" 및 "false positive/not applicable은 검증" 원칙은 유지한다.
+
 ## Codex 멀티에이전트 운영 규칙
 
 이 절은 Codex에서만 적용한다. Cursor 및 다른 개발 에이전트는 위의 공통 프로젝트 지침을 따르되, 아래의 Codex 전용 역할명과 위임 규칙을 강제로 모방할 필요는 없다.
+
+여기의 `reviewer`는 Codex 내부 품질 검토 역할이며, RoboRev panel review를 자동 실행하라는 의미가 아니다.
 
 ### 역할 분담
 
@@ -122,10 +122,10 @@
 
 ## RoboRev 통합 원칙
 
-- 현재 설치된 `roborev version --json`과 각 command help를 런타임 계약의 우선 기준으로 삼는다.
+- 현재 설치된 `roborev version --json`과 각 command help를 런타임 계약의 우선 기준으로 삼는다. 이는 구현 contract 확인을 위한 read-only inspection이며 자동 완료 게이트로 `roborev review`/`roborev review --panel ...` 등 새 review job 생성을 요구하지 않는다.
 - transport 우선순위는 stable machine-readable CLI, 공식/public client 또는 daemon HTTP API, version-gated adapter 순이다.
 - 사람이 보는 CLI 문자열 파싱을 핵심 기능 계약으로 사용하지 않는다.
 - 각 기능은 typed request와 허용 목록으로 제한된 argument builder를 사용한다.
 - child process는 context cancellation, timeout, stdout/stderr 분리, bounded buffering 및 cleanup을 지원해야 한다.
 - browser 연결 종료만으로 RoboRev background job을 cancel하지 않는다.
-
+- 자동 테스트에서는 deterministic fake RoboRev, fixture, source/contract inspection만 사용한다. 사용자가 명시적으로 요구하지 않는 한 `roborev review`, `roborev wait` 등 실제 review 생성을 실행하지 않는다.

@@ -14,24 +14,10 @@ import (
 
 const DefaultOutputLimit = 4 << 20
 
-// DefaultStdinLimit is the bound used by short-lived commands that consume
-// bounded stdin. The runner accepts stdin as opaque bytes represented by a
-// string; it never interpolates those bytes into an executable or argument
-// string. No current production caller supplies stdin; the capability stays
-// generic and is covered by process-level tests.
-const DefaultStdinLimit = 16 << 10
-
 type Command struct {
 	Executable string
 	Args       []string
 	Dir        string
-	// Stdin is supplied directly to the child process. An empty value keeps
-	// the historical nil-stdin behaviour for existing callers.
-	Stdin string
-	// StdinLimit overrides the default bounded stdin contract. Zero uses
-	// DefaultStdinLimit; callers should only raise this for a separately
-	// reviewed machine protocol, never for unreviewed user input.
-	StdinLimit int
 	// Env replaces the inherited environment when non-nil.
 	Env     []string
 	Timeout time.Duration
@@ -102,13 +88,6 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	if strings.TrimSpace(command.Executable) == "" {
 		return Result{}, errors.New("executable is required")
 	}
-	stdinLimit := command.StdinLimit
-	if stdinLimit <= 0 {
-		stdinLimit = DefaultStdinLimit
-	}
-	if len(command.Stdin) > stdinLimit {
-		return Result{}, fmt.Errorf("stdin exceeds %d bytes", stdinLimit)
-	}
 	ctx := parent
 	cancel := func() {}
 	if command.Timeout > 0 {
@@ -120,9 +99,6 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	stderr := newLimitedBuffer(command.OutputLimit)
 	cmd := exec.CommandContext(ctx, command.Executable, command.Args...)
 	cmd.Dir = command.Dir
-	if command.Stdin != "" {
-		cmd.Stdin = strings.NewReader(command.Stdin)
-	}
 	if command.Env != nil {
 		cmd.Env = append([]string(nil), command.Env...)
 	}

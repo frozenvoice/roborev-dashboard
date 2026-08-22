@@ -2,54 +2,12 @@ package process
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
-
-func TestExecRunnerStdinHelperProcess(t *testing.T) {
-	if os.Getenv("ROBOREV_STDIN_HELPER") == "1" {
-		data, _ := io.ReadAll(os.Stdin)
-		_, _ = os.Stdout.Write(data)
-		os.Exit(0)
-	}
-	payload := "한글\nquotes \" ' & | ; $(literal) `literal`\tend"
-	env := append(os.Environ(), "ROBOREV_STDIN_HELPER=1")
-	result, err := (ExecRunner{}).Run(context.Background(), Command{
-		Executable: os.Args[0],
-		Args:       []string{"-test.run=^TestExecRunnerStdinHelperProcess$"},
-		Env:        env,
-		Stdin:      payload,
-		Timeout:    time.Second,
-	})
-	if err != nil || result.Stdout != payload || !result.Started {
-		t.Fatalf("stdin result=%#v err=%v", result, err)
-	}
-}
-
-func TestExecRunnerRejectsOversizedStdinBeforeStarting(t *testing.T) {
-	result, err := (ExecRunner{}).Run(context.Background(), Command{
-		Executable: "definitely-not-started",
-		Stdin:      strings.Repeat("x", DefaultStdinLimit+1),
-	})
-	if err == nil || !strings.Contains(err.Error(), "stdin exceeds") {
-		t.Fatalf("expected bounded stdin error, result=%#v err=%v", result, err)
-	}
-}
-
-func TestExecRunnerStdinLimitCanBeSetForASeparateProtocol(t *testing.T) {
-	if _, err := (ExecRunner{}).Run(context.Background(), Command{
-		Executable: "definitely-not-started",
-		Stdin:      strings.Repeat("x", DefaultStdinLimit+1),
-		StdinLimit: DefaultStdinLimit + 1,
-	}); err == nil || !strings.Contains(err.Error(), "start process") {
-		t.Fatalf("expected process start error after custom bound, err=%v", err)
-	}
-}
 
 func TestExecRunnerSeparatesArgsAndBoundsOutput(t *testing.T) {
 	if runtime.GOOS != "windows" {

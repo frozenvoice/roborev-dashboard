@@ -1,3 +1,5 @@
+export const TASK_HISTORY_LIMIT = 200
+
 export type Repository = {
   identity: string
   name: string

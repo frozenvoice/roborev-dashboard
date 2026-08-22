@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeRuntimeControl, normalizeSetupState, parseReviewInvalidationEvent, reviewEventsURL, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeSetupState, normalizeRuntimeControl, parseReviewInvalidationEvent, reviewEventsURL, TASK_HISTORY_LIMIT, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { jobStatus, jobStatusLabel } from './jobStatus'
 import { FixRefine, PanelRefineSummary, isFixTarget } from './FixRefine'
@@ -549,6 +549,8 @@ export function App() {
   const currentRepositoryIdentity = useRef('')
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
   const repo = bootstrap?.repositories.find(item => item.identity === selectedRepositoryIdentity)
+  const selectedRef = useRef<ReviewJob | null>(null)
+  const selectedGeneration = useRef(0)
 
   useEffect(() => {
     currentRepositoryIdentity.current = selectedRepositoryIdentity
@@ -559,6 +561,11 @@ export function App() {
       if (hadPreviousSelection) agentsRepositoryEpoch.current++
     }
   }, [selectedRepositoryIdentity])
+
+  useEffect(() => {
+    selectedRef.current = selected
+    selectedGeneration.current++
+  }, [selected])
 
   useEffect(() => {
     // Repository-scoped agent discovery must be invalidated before a new
@@ -602,7 +609,7 @@ export function App() {
     // the success and failure paths.
     const generation = ++taskHistoryGeneration.current
     try {
-      const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repoPath)}&limit=200`))
+      const next = jobsFromPayload(await request<unknown>(`/api/reviews?repo=${encodeURIComponent(repoPath)}&limit=${TASK_HISTORY_LIMIT}`))
       if (generation !== taskHistoryGeneration.current || identity !== currentRepositoryIdentity.current) return
       setTaskJobs(next)
       setLoadedTaskIdentity(identity)
@@ -1001,12 +1008,28 @@ export function App() {
   }, [initialized])
 
   const mutate = useCallback(async (path: string, body?: unknown) => {
+    const mutateSelectedId = selectedRef.current ? idOf(selectedRef.current) : null
+    const mutateSelectedIdentity = currentRepositoryIdentity.current
+    const mutateGeneration = selectedGeneration.current
     setBusy(true)
     try {
       await request(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
       toast('success', path.includes('comment-close') ? t('review.commentClosed') : t('review.stateUpdated'))
       const data = await loadBootstrap()
-      await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
+      const nextJobs = await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
+      if (mutateSelectedId !== null && mutateSelectedIdentity === data.selectedRepositoryIdentity && mutateSelectedIdentity === currentRepositoryIdentity.current) {
+        const existsInList = nextJobs.some(job => idOf(job) === mutateSelectedId)
+        if (!existsInList) {
+          try {
+            const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}`)
+            if (mutateGeneration === selectedGeneration.current && mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && idOf(selectedRef.current) === mutateSelectedId) {
+              setSelected({ ...fresh, id: mutateSelectedId, job_id: mutateSelectedId } as ReviewJob)
+            }
+          } catch {
+            // Fresh selected fetch is best effort; stale selected stays until the next successful poll.
+          }
+        }
+      }
     } catch (error) {
       const apiError = error as APIError
       toast('error', apiError.phase === 'close' ? t('review.partialSuccess', { error: apiError.message }) : apiError.message)
