@@ -342,22 +342,34 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   }, [id, repoIdentity])
 
   // Fresh detail fields win over the possibly-stale slice row so a task that
-  // finished never keeps rendering its outdated lifecycle status, but a stale
-  // running detail must not overwrite a terminal list row. The merge therefore
-  // restores the list job's terminal status when the detail is still running.
-  const rawCurrent = detail ? { ...job, ...detail, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
-  const current = detail && !isRunning(job) && isRunning(rawCurrent) ? { ...rawCurrent, status: job.status, verdict: job.verdict ?? rawCurrent.verdict } : rawCurrent
+  // Fresh detail wins for lazy fields, but the authoritative list row wins
+  // for lifecycle/closure fields so a Close/Reopen mutation does not get
+  // reverted by a stale detail. A stale running detail also must not
+  // overwrite a terminal list row.
+  const current = (() => {
+    if (!detail) return job
+    const merged = { ...job, ...detail, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } as ReviewJob
+    if (!isRunning(job) && isRunning(merged)) {
+      merged.status = job.status
+      merged.verdict = (job.verdict ?? merged.verdict) as ReviewJob['verdict']
+    }
+    // Closure state is authoritative from the list after mutation; stale
+    // detail must not keep a Close button visible after a successful close.
+    if (job.closed !== undefined) merged.closed = job.closed
+    if (job.addressed !== undefined) merged.addressed = job.addressed
+    return merged
+  })()
   const text = outputOf(current)
   const memberText = outputOf(memberDetail)
   const terminal = !isRunning(current)
   const isTaskResult = current.job_type === 'task' || current.git_ref === 'run'
   // A running single job whose row lives only in the Tasks history slice has
   // no list polling to refresh it; poll its detail until terminal instead.
-  // This poll owns its own generation so a terminal reconciliation (which
-  // uses detailGeneration) that fails does not permanently invalidate the
-  // long-lived authoritative detail poll. Polling starts even before the
-  // initial detail succeeds so a transient first fetch does not freeze a
-  // running task.
+  // This poll owns its own generation (detailPollGeneration) so a slow
+  // initial fetch does not get its loading flag cleared by a poll tick, and
+  // a terminal reconciliation that fails does not permanently invalidate the
+  // long-lived authoritative poll. Polling starts even before the initial
+  // detail succeeds so a transient first fetch does not freeze a running task.
   const currentRunning = isRunning(current)
   useEffect(() => {
     if (!currentRunning || job.panel_run_uuid) return
@@ -365,10 +377,10 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async () => {
       if (cancelled) return
-      const generation = ++detailGeneration.current
+      const generation = ++detailPollGeneration.current
       try {
         const value = await request<ReviewJob>(`/api/reviews/${id}`)
-        if (!cancelled && generation === detailGeneration.current) {
+        if (!cancelled && generation === detailPollGeneration.current) {
           setDetail({ ...value, id, job_id: id })
           setDetailError('')
         }
@@ -377,10 +389,8 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       }
       if (!cancelled) timer = setTimeout(poll, 4000)
     }
-    // Serialized polling with a shared monotonic generation ensures an older
-    // initial or poll response cannot overtake a newer terminal reconciliation.
     timer = setTimeout(poll, 4000)
-    return () => { cancelled = true; if (timer) clearTimeout(timer); detailGeneration.current++ }
+    return () => { cancelled = true; if (timer) clearTimeout(timer); detailPollGeneration.current++ }
   }, [currentRunning, id, job.panel_run_uuid])
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
