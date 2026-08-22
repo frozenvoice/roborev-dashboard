@@ -64,7 +64,7 @@ synthesis_model = "opencode/muse-spark-1.2-contributor-free"
 synthesis_backup_agent = "opencode"
 synthesis_backup_model = "opencode/x-preview-f-free"
 
-# Final deep gate: Ox + Muse + Grok maximum. OpenCode itself has no v0.64
+# Final deep gate: Ox + Muse + Grok (thorough). OpenCode itself has no v0.64
 # reasoning passthrough, so Ox/Muse depth comes from the stronger prompt/time budget.
 [review.panels.dashboard_opencode_high]
 members = ["ox_high", "muse_high", "grok"]
