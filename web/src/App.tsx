@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
 import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeSetupState, normalizeRuntimeControl, parseReviewInvalidationEvent, reviewEventsURL, TASK_HISTORY_LIMIT, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
@@ -562,7 +562,7 @@ export function App() {
     }
   }, [selectedRepositoryIdentity])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     selectedRef.current = selected
     selectedGeneration.current++
   }, [selected])
@@ -1028,7 +1028,7 @@ export function App() {
               setSelected({ ...fresh, id: mutateSelectedId, job_id: mutateSelectedId } as ReviewJob)
             }
           } catch {
-            // Fresh selected fetch is best effort; stale selected stays until the next successful poll.
+            // Fresh selected fetch is best effort for terminal out-of-window jobs; no subsequent self-healing poll exists, so stale selection persists until the user re-selects.
           }
         }
       }
