@@ -32,6 +32,8 @@ type Capabilities struct {
 	// Raw or sensitive config editing is intentionally not exposed.
 	ConfigIntrospection bool `json:"configIntrospection"`
 	ConfigMutation      bool `json:"configMutation"`
+	SummaryStats        bool `json:"summaryStats"`
+	CostStats           bool `json:"costStats"`
 }
 
 type JobMetadata struct {

@@ -1,0 +1,198 @@
+package roborev
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/stats"
+)
+
+const statsSummaryFixture = `{"since":"2026-08-22T00:00:00Z","repo_path":"E:\\한글 프로젝트\\repo","branch":"main","overview":{"total":0,"queued":0,"running":0,"done":0,"failed":0,"canceled":0,"applied":0,"rebased":0},"verdicts":{"total":0,"passed":0,"failed":0,"addressed":0,"pass_rate":0,"resolution_rate":0},"agents":null,"duration":{"review_p50_secs":0,"review_p90_secs":0,"review_p99_secs":0,"queue_p50_secs":0,"queue_p90_secs":0,"queue_p99_secs":0},"job_types":null,"failures":{"total":0,"retries":0,"errors":{}},"cost":{"total_usd":0,"jobs_with_cost":0,"jobs_total":0,"complete":false}}`
+
+type statsRecordingRunner struct {
+	mu              sync.Mutex
+	commands        []proc.Command
+	version         string
+	summaryOutput   string
+	costOutput      string
+	stdoutTruncated bool
+	stderrTruncated bool
+	onSummary       func()
+}
+
+func (r *statsRecordingRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.mu.Lock()
+	r.commands = append(r.commands, proc.Command{Executable: command.Executable, Args: append([]string(nil), command.Args...), Dir: command.Dir, Timeout: command.Timeout, OutputLimit: command.OutputLimit})
+	r.mu.Unlock()
+	if len(command.Args) > 0 && command.Args[0] == "version" {
+		return proc.Result{Stdout: `{"name":"roborev","version":"` + r.version + `"}`}, nil
+	}
+	if len(command.Args) > 0 && command.Args[0] == "summary" {
+		if r.onSummary != nil {
+			r.onSummary()
+		}
+		output := r.summaryOutput
+		if output == "" {
+			output = statsSummaryFixture
+		}
+		return proc.Result{Stdout: output, StdoutTruncated: r.stdoutTruncated, StderrTruncated: r.stderrTruncated}, nil
+	}
+	output := r.costOutput
+	if output == "" {
+		output = `{"total_usd":0,"jobs_with_cost":0,"jobs_total":0,"complete":false}`
+	}
+	return proc.Result{Stdout: output, StdoutTruncated: r.stdoutTruncated, StderrTruncated: r.stderrTruncated}, nil
+}
+
+func statsHealthServer(healthy bool, version string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":` + map[bool]string{true: "true", false: "false"}[healthy] + `,"version":"` + version + `"}`))
+	}))
+}
+
+func (r *statsRecordingRunner) snapshot() []proc.Command {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proc.Command(nil), r.commands...)
+}
+
+func TestStatsArgsUseExactV064OrderAndAllowlist(t *testing.T) {
+	if got, err := SummaryArgs(`E:\한글 프로젝트\repo`, "", "7d"); err != nil || !reflect.DeepEqual(got, []string{"summary", "--repo", `E:\한글 프로젝트\repo`, "--since", "7d", "--json"}) {
+		t.Fatalf("summary all args=%#v err=%v", got, err)
+	}
+	if got, err := SummaryArgs(`E:\한글 프로젝트\repo`, "main", "30d"); err != nil || !reflect.DeepEqual(got, []string{"summary", "--repo", `E:\한글 프로젝트\repo`, "--branch", "main", "--since", "30d", "--json"}) {
+		t.Fatalf("summary current args=%#v err=%v", got, err)
+	}
+	if got, err := CostArgs(`E:\한글 프로젝트\repo`, "main"); err != nil || !reflect.DeepEqual(got, []string{"cost", "--repo", `E:\한글 프로젝트\repo`, "--branch", "main", "--json"}) {
+		t.Fatalf("cost args=%#v err=%v", got, err)
+	}
+	for _, window := range []string{"1 year ago", "../../secret", ""} {
+		if _, err := SummaryArgs("repo", "", window); err == nil {
+			t.Fatalf("window %q was accepted", window)
+		}
+	}
+}
+
+func TestClientStatsPreflightsAndUsesCanonicalDir(t *testing.T) {
+	health := statsHealthServer(true, "v0.64.0")
+	defer health.Close()
+	runner := &statsRecordingRunner{version: "v0.64.0"}
+	client, err := NewClient(`C:\tools\roborev.exe`, runner, health.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const repo = `E:\한글 프로젝트\repo`
+	if _, err := client.Summary(context.Background(), repo, "main", "30d"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Cost(context.Background(), repo, ""); err != nil {
+		t.Fatal(err)
+	}
+	commands := runner.snapshot()
+	if len(commands) != 3 { // version, summary, cost; health is HTTP, not a process.
+		t.Fatalf("commands=%d: %#v", len(commands), commands)
+	}
+	wantSummary := []string{"summary", "--repo", repo, "--branch", "main", "--since", "30d", "--json"}
+	if !reflect.DeepEqual(commands[1].Args, wantSummary) || commands[1].Dir != repo || commands[1].OutputLimit != stats.SummaryOutputLimit || commands[1].Timeout.Seconds() != 15 {
+		t.Fatalf("summary command=%#v", commands[1])
+	}
+	wantCost := []string{"cost", "--repo", repo, "--json"}
+	if !reflect.DeepEqual(commands[2].Args, wantCost) || commands[2].Dir != repo || commands[2].OutputLimit != stats.CostOutputLimit {
+		t.Fatalf("cost command=%#v", commands[2])
+	}
+}
+
+func TestClientStatsRejectsUnsupportedAndOfflineBeforeStatsCommand(t *testing.T) {
+	unsupportedHealth := statsHealthServer(true, "v0.65.0")
+	defer unsupportedHealth.Close()
+	unsupportedRunner := &statsRecordingRunner{version: "v0.65.0"}
+	unsupported, err := NewClient("roborev", unsupportedRunner, unsupportedHealth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unsupported.Summary(context.Background(), "repo", "", "7d"); err == nil {
+		t.Fatal("unsupported version was accepted")
+	}
+	if commands := unsupportedRunner.snapshot(); len(commands) != 1 || commands[0].Args[0] != "version" {
+		t.Fatalf("unsupported commands=%#v", commands)
+	}
+	offline := &statsRecordingRunner{version: "v0.64.0"}
+	client, err := NewClient("roborev", offline, "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Cost(context.Background(), "repo", ""); err == nil {
+		t.Fatal("offline daemon was accepted")
+	}
+	for _, command := range offline.snapshot() {
+		if len(command.Args) > 0 && command.Args[0] == "cost" {
+			t.Fatal("cost command ran while daemon was offline")
+		}
+	}
+}
+
+func TestClientStatsRejectsHealthFailuresOutputBoundsBindingAndIdentity(t *testing.T) {
+	cases := []struct {
+		name      string
+		health    bool
+		healthVer string
+		want      error
+		wantStats bool
+		mutate    func(*statsRecordingRunner, *Client)
+	}{
+		{name: "unhealthy daemon", health: false, healthVer: "v0.64.0", want: ErrStatsUnhealthy},
+		{name: "daemon version mismatch", health: true, healthVer: "v0.65.0", want: ErrUnsupportedStats},
+		{name: "stdout truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stdoutTruncated = true }},
+		{name: "stderr truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stderrTruncated = true }},
+		{name: "response repository mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) {
+			r.summaryOutput = strings.Replace(statsSummaryFixture, `E:\\한글 프로젝트\\repo`, `E:\\other`, 1)
+		}},
+		{name: "response branch mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) {
+			r.summaryOutput = strings.Replace(statsSummaryFixture, `"branch":"main"`, `"branch":"other"`, 1)
+		}},
+		{name: "binding changed", health: true, healthVer: "v0.64.0", want: ErrBindingChanged, wantStats: true, mutate: func(r *statsRecordingRunner, client *Client) {
+			r.onSummary = func() { client.bindingMu.Lock(); client.binding.generation++; client.bindingMu.Unlock() }
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			health := statsHealthServer(test.health, test.healthVer)
+			defer health.Close()
+			runner := &statsRecordingRunner{version: "v0.64.0"}
+			client, err := NewClient("roborev", runner, health.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.mutate != nil {
+				test.mutate(runner, client)
+			}
+			_, err = client.Summary(context.Background(), `E:\한글 프로젝트\repo`, "main", "7d")
+			if err == nil || !errors.Is(err, test.want) {
+				t.Fatalf("error=%v want=%v", err, test.want)
+			}
+			statsCommands := 0
+			for _, command := range runner.snapshot() {
+				if len(command.Args) > 0 && command.Args[0] == "summary" {
+					statsCommands++
+				}
+			}
+			if test.wantStats && statsCommands != 1 {
+				t.Fatalf("stats commands=%d want one", statsCommands)
+			}
+			if !test.wantStats && statsCommands != 0 {
+				t.Fatalf("stats command ran before gate: %d", statsCommands)
+			}
+		})
+	}
+}
+
+var _ StatsService = (*Client)(nil)
+var _ = stats.Cost{}

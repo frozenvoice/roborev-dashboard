@@ -44,6 +44,39 @@ export type Bootstrap = {
   roborev: Installation
 }
 
+export type StatsWindow = '24h' | '7d' | '30d' | '90d'
+export type StatsBranchScope = 'all' | 'current'
+export type StatsSummaryResponse = {
+  repositoryIdentity: string
+  window: StatsWindow
+  branchScope: StatsBranchScope
+  summary: {
+    $schema?: string
+    since: string
+    repo_path?: string
+    branch?: string
+    repos?: Array<{ name: string; path: string; total: number; passed: number; failed: number; addressed: number }>
+    overview: { total: number; queued: number; running: number; done: number; failed: number; canceled: number; applied: number; rebased: number }
+    verdicts: { total: number; passed: number; failed: number; addressed: number; pass_rate: number; resolution_rate: number }
+    duration: { review_p50_secs: number; review_p90_secs: number; review_p99_secs: number; queue_p50_secs: number; queue_p90_secs: number; queue_p99_secs: number }
+    agents: Array<{ agent: string; total: number; passed: number; failed: number; errors: number; pass_rate: number; median_duration_secs: number }>
+    job_types: Array<{ type: string; count: number; applied?: number; rebased?: number }>
+    failures: { total: number; retries: number; errors: Record<string, number> }
+    cost: { total_usd: number; jobs_with_cost: number; jobs_total: number; complete: boolean }
+  }
+}
+export type StatsCostResponse = {
+  repositoryIdentity: string
+  branchScope: StatsBranchScope
+  cost: {
+    $schema?: string
+    total_usd: number
+    jobs_with_cost: number
+    jobs_total: number
+    complete: boolean
+  }
+}
+
 export type SetupPhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'binding' | 'starting_daemon' | 'waiting_for_daemon' | 'ready' | 'failed' | 'blocked' | 'unsupported' | 'canceled'
 
 export type SetupState = {

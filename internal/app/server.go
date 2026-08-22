@@ -209,6 +209,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
 	s.mux.HandleFunc("GET /api/configuration", s.configurationSnapshot)
+	s.mux.HandleFunc("GET /api/stats/summary", s.statsSummary)
+	s.mux.HandleFunc("GET /api/stats/cost", s.statsCost)
 	s.mux.HandleFunc("POST /api/configuration/preview", s.mutationAuth(s.configurationPreview))
 	s.mux.HandleFunc("POST /api/configuration/set", s.mutationAuth(s.configurationSet))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))

@@ -93,6 +93,21 @@ describe('App review workflow', () => {
     expect(screen.queryByText('Read-only')).not.toBeInTheDocument()
   })
 
+  it('opens Stats & Insights as a workspace without a Soon badge', async () => {
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }))
+    render(<App />)
+    const statsButton = await screen.findByRole('button', { name: 'Stats & Insights' })
+    expect(within(statsButton).queryByText('Soon')).not.toBeInTheDocument()
+    await userEvent.click(statsButton)
+    expect(await screen.findByRole('heading', { name: 'Stats & Insights' })).toBeInTheDocument()
+    expect(within(statsButton).queryByText('Soon')).not.toBeInTheDocument()
+  })
+
   it('keeps Review HEAD distinct from frozen rerun', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)

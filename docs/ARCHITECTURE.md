@@ -181,6 +181,25 @@ flow는 preview → explicit confirmation → set이다. `POST /api/configuratio
 
 GET `/api/configuration`과 preview/set authorization은 Analyze/SSE와 동일한 strict browser read / same-origin+CSRF 정책을 공유하며 authorization 실패 시 process를 시작하기 전에 거부한다. snapshot handler도 service 구현에 의존하지 않고 exact v0.64 introspection capability를 직접 확인한 뒤에만 `ConfigList`를 호출한다. frontend는 snapshot과 preview에 별도 generation/ownership을 두어 repo switch, capability disable, draft value/scope 변경, Cancel과 unmount에서 pending/open preview를 무효화하고 stale `finally`가 새 preparing state를 지우지 못하게 한다. confirm double click은 정확히 한 POST가 되게 보장하며 locale 전환은 config GET/preview/set을 재실행하지 않는다.
 
+### Stats & Insights
+
+Stats v1은 현재 선택된 registered repository 하나의 read-only aggregate workspace다. exact v0.64.0의 `summaryStats`/`costStats` capability와 already-online healthy daemon이 모두 확인될 때만 동작하며 Dashboard가 daemon을 자동 시작하거나 재시도 polling을 만들지 않는다. Browser는 opaque `repositoryIdentity`, allowlisted window(`24h`, `7d`, `30d`, `90d`), semantic branch scope(`all`, `current`)만 전송한다. raw path, branch name, arbitrary since expression과 all-repositories aggregate는 지원하지 않는다.
+
+backend는 strict browser read authorization을 query/registry/process보다 먼저 적용한다. `all` scope는 identity를 registered canonical root로 resolve하고, `current`는 fresh repository inspection으로 canonical root와 authoritative branch를 다시 얻는다. detached/empty branch는 fail closed한다. exact typed argv는 다음과 같으며 shell을 사용하지 않는다.
+
+```text
+summary all:     roborev summary --repo <canonical-root> --since <window> --json
+summary current: roborev summary --repo <canonical-root> --branch <fresh-branch> --since <window> --json
+cost all:        roborev cost --repo <canonical-root> --json
+cost current:    roborev cost --repo <canonical-root> --branch <fresh-branch> --json
+```
+
+`GET /api/stats/summary`와 `GET /api/stats/cost`는 독립 endpoint와 failure state를 갖는다. 실행 전 CLI/daemon version이 exact v0.64.0으로 일치하는지 확인하며 unsupported/offline이면 Stats subprocess를 시작하지 않는다. process는 context cancellation, timeout, 분리된 bounded stdout/stderr를 사용한다. Summary parser는 256 KiB, Cost parser는 64 KiB 한도에서 UTF-8, exactly one JSON value, recursive duplicate key, unknown field(known optional bounded string `$schema`만 허용), required object, 배열·문자열·map bound, JS-safe nonnegative count, finite rate/duration/cost와 count-derived rate를 포함한 upstream semantic invariant를 fail-closed하게 검증한다. 실제 v0.64 zero-data의 `agents:null`과 `job_types:null`은 stable empty arrays로 정규화한다.
+
+Summary의 embedded `cost`는 선택한 window의 approximate cost이고 standalone Cost는 같은 repository/branch scope의 all-time approximate cost다. 둘을 비교하거나 합치지 않는다. UI는 항상 reported jobs의 lower bound와 `jobs_with_cost / jobs_total` coverage를 함께 표시한다. `jobs_total == 0`만 empty이고, eligible/reported job이 있으면서 `total_usd == 0`인 free aggregate는 데이터가 있는 `$0`로 표시한다. provider invoice 또는 실제 청구액이라고 표현하지 않는다.
+
+Frontend Stats workspace는 Summary와 Cost 각각의 AbortController, generation과 captured scope를 소유한다. 페이지 진입, scope 변경, explicit Refresh에서만 조회하고 review 4초 polling/SSE에는 연결하지 않는다. window 변경은 Summary만, branch 변경과 Refresh는 두 endpoint를 독립 갱신한다. late window/branch/repository 응답은 폐기하며 locale 전환은 subprocess를 유발하지 않는다. Overview, Timing, Agents, Job types, Failure categories와 Window/All-time Cost를 cards/tables로 표시하고 새 chart dependency는 추가하지 않는다. `insights --json` adapter/API/button 및 LLM invocation은 이 checkpoint에 존재하지 않으며 화면에는 Guideline Insights가 아직 활성화되지 않았음을 명시한다.
+
 ## 확장 원칙
 
 각 RoboRev 기능은 service method, typed request, command builder, capability, HTTP route, confirmation 정책과 테스트를 함께 추가한다. CLI help에서 확인되지 않은 flag를 추측해 만들지 않는다. 중요한 변경은 이 문서와 coverage matrix를 함께 갱신한다.
