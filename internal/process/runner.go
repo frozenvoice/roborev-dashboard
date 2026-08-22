@@ -106,7 +106,7 @@ func (ExecRunner) Run(parent context.Context, command Command) (Result, error) {
 	if stdinLimit <= 0 {
 		stdinLimit = DefaultStdinLimit
 	}
-	if len([]byte(command.Stdin)) > stdinLimit {
+	if len(command.Stdin) > stdinLimit {
 		return Result{}, fmt.Errorf("stdin exceeds %d bytes", stdinLimit)
 	}
 	ctx := parent

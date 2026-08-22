@@ -336,11 +336,30 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     return () => { fixPromptGeneration.current++ }
   }, [id, repoIdentity])
 
-  const current = detail ? { ...detail, ...job, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
+  // Fresh detail fields win over the possibly-stale slice row so a task that
+  // finished never keeps rendering its outdated lifecycle status.
+  const current = detail ? { ...job, ...detail, output: detail.output ?? job.output, review: detail.review ?? job.review, id, job_id: id } : job
   const text = outputOf(current)
   const memberText = outputOf(memberDetail)
   const terminal = !isRunning(current)
   const isTaskResult = current.job_type === 'task' || current.git_ref === 'run'
+  // A running single job whose row lives only in the Tasks history slice has
+  // no list polling to refresh it; poll its detail until terminal instead.
+  const detailIsFresh = detail !== null
+  const currentRunning = isRunning(current)
+  useEffect(() => {
+    if (!currentRunning || !detailIsFresh || job.panel_run_uuid) return
+    const generation = ++detailGeneration.current
+    const timer = setInterval(() => {
+      void request<ReviewJob>(`/api/reviews/${id}`).then(value => {
+        if (generation === detailGeneration.current) {
+          setDetail({ ...value, id, job_id: id })
+          setDetailError('')
+        }
+      }).catch(() => { /* transient transport errors keep the last good detail */ })
+    }, 4000)
+    return () => clearInterval(timer)
+  }, [currentRunning, detailIsFresh, id, job.panel_run_uuid])
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
   const openFixPrompt = (value: FixPromptResponse) => { setFixPrompt(value); setFixPromptText(value.text) }

@@ -504,7 +504,9 @@ describe('App review workflow', () => {
     expect(screen.getByText('Stable member')).toBeInTheDocument()
     expect(document.querySelector('.member-list-loading')).not.toBeInTheDocument()
     terminalRefresh.resolve(new Response(JSON.stringify({ jobs: [terminalMember] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
-    expect(await screen.findByText('Pass')).toBeInTheDocument()
+    const memberRow = screen.getByText('Stable member').closest('article')!
+    // The row renders Pass in both its pill and its verdict facts field.
+    expect((await within(memberRow).findAllByText('Pass')).length).toBeGreaterThanOrEqual(1)
   })
 
   it('copies and opens a finding member fix prompt across a routine member refresh', async () => {
