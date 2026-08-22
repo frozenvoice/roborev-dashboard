@@ -45,7 +45,7 @@ function outputOf(job: ReviewJob | null) {
   return String(job.review?.output || job.output || '')
 }
 function idOf(job: ReviewJob) { return Number(job.id || job.job_id) }
-function positiveJobId(value: unknown) {
+export function positiveJobId(value: unknown) {
   const id = typeof value === 'number' || typeof value === 'string' && value.trim() ? Number(value) : NaN
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
@@ -1008,7 +1008,7 @@ export function App() {
   }, [initialized])
 
   const mutate = useCallback(async (path: string, body?: unknown) => {
-    const mutateSelectedId = selectedRef.current ? idOf(selectedRef.current) : null
+    const mutateSelectedId = selectedRef.current ? positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) : null
     const mutateSelectedIdentity = currentRepositoryIdentity.current
     const mutateGeneration = selectedGeneration.current
     setBusy(true)
@@ -1018,11 +1018,13 @@ export function App() {
       const data = await loadBootstrap()
       const nextJobs = await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
       if (mutateSelectedId !== null && mutateSelectedIdentity === data.selectedRepositoryIdentity && mutateSelectedIdentity === currentRepositoryIdentity.current) {
-        const existsInList = nextJobs.some(job => idOf(job) === mutateSelectedId)
+        const existsInList = nextJobs.some(job => positiveJobId(job.id ?? job.job_id) === mutateSelectedId)
         if (!existsInList) {
           try {
             const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}`)
-            if (mutateGeneration === selectedGeneration.current && mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && idOf(selectedRef.current) === mutateSelectedId) {
+            const freshId = positiveJobId((fresh as unknown as { id?: unknown; job_id?: unknown }).id ?? (fresh as unknown as { job_id?: unknown }).job_id)
+            if (freshId !== mutateSelectedId) return
+            if (mutateGeneration === selectedGeneration.current && mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) === mutateSelectedId) {
               setSelected({ ...fresh, id: mutateSelectedId, job_id: mutateSelectedId } as ReviewJob)
             }
           } catch {

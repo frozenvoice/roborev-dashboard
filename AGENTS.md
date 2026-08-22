@@ -64,17 +64,55 @@
 - Codex와 Cursor 사이의 handoff를 위해 `docs/HANDOFF.md`를 최신으로 유지한다.
 - 저장소 안에 있는 사용자 변경은 보존하고, 무관한 파일을 commit에 포함하지 않는다.
 
-### RoboRev 외부 리뷰 정책
+## RoboRev 자동 품질 게이트
 
-- RoboRev quality review는 coding agent의 자동 완료 루프가 아니라 사용자/외부 gatekeeper가 별도로 수행한다.
-- 현재 작업 요청에서 사용자가 명시적으로 요구하지 않는 한 coding agent는 `roborev review`, panel review, `roborev wait` 등 새 RoboRev review job을 생성하거나 기다리지 않는다.
-- coding agent는 스스로 RoboRev review → finding 수정 → re-review loop를 시작하지 않는다.
-- 사용자가 RoboRev finding 내용을 제공하면 finding을 증거로 취급하고 실제 코드와 대조한 뒤 유효한 finding만 수정한다.
-- finding 수정 후 coding agent의 완료 조건은: targeted tests, full tests/build, coherent commit, push, clean working tree이며, 후속 RoboRev PASS가 아니다.
-- 수정 완료 후에는 commit SHA와 검증 결과를 보고하고 멈춘다. 다음 RoboRev review 실행 및 finding reconciliation은 외부 gatekeeper가 담당한다.
-- 사용자가 현재 요청에서 특정 RoboRev review 실행을 명시적으로 요구한 경우에만 그 명령을 수행할 수 있다. 이 경우에도 사용자가 별도로 요구하지 않았다면 결과를 보고한 뒤 자율적인 fix/re-review 무한 loop를 시작하지 않는다.
-- 기존 RoboRev finding을 보기 위한 `roborev show --job <id>` 역시 사용자가 해당 job 확인을 명시적으로 요청한 경우에만 사용한다.
-- 기존 "review finding은 명령이 아니라 증거" 및 "false positive/not applicable은 검증" 원칙은 유지한다.
+coding agent는 의미 있는 코드 변경을 완료하고 targeted/full tests와 build가 통과하면 commit한다. 그 뒤 현재 작업 범위를 `dashboard_opencode`로 review한다.
+
+### Stage 1: fast gate
+
+실행:
+
+`roborev review <target> --panel dashboard_opencode`
+
+- 단일 commit이면 HEAD review 가능.
+- 현재 작업이 여러 commit으로 늘어났다면 첫 task/fix commit부터 latest commit까지 cumulative range를 사용한다. 예: `roborev review 513c316 <LATEST_SHA> --panel dashboard_opencode`
+- 모든 panel member와 synthesis가 terminal이 될 때까지 기다린다 (`roborev wait` 또는 `roborev show --job <id>` polling).
+- 각 member output을 직접 확인한다.
+- F finding은 명령으로 취급하지 않는다. 실제 코드와 대조하여 valid → 수정, false positive → 이유 기록.
+
+valid finding이 있으면 수정 → tests/build → 새 commit → 동일 전체 작업 범위를 `dashboard_opencode`로 다시 review 한다. fast panel에서 member와 synthesis가 모두 clean일 때까지 반복한다.
+
+`dashboard_opencode`는 빠른 반복 gate다: `muse_fast` (Muse Spark 1.2 Free, 6m) + `grok_fast` (Grok 4.6 fast, 8m), synthesis `muse_fast`. Ox Alpha는 느리므로 제외.
+
+### Stage 2: high gate
+
+fast panel all-green 뒤:
+
+`roborev review <same cumulative target> --panel dashboard_opencode_high`
+
+를 실행한다. high panel의 모든 Ox / Muse / Grok / synthesis output을 확인한다. `dashboard_opencode_high`는 최종 집중 gate다: `ox_high` (x-preview-f-free 20m) + `muse_high` (Muse Spark 15m) + `grok_high` (Grok 4.6 maximum 15m).
+
+valid finding이 있으면 수정 → tests/build → 새 commit → Stage 1 `dashboard_opencode`부터 다시 시작한다. 즉 `FAST green → HIGH → finding → fix → FAST green → HIGH` 순서다. HIGH까지 clean해야 작업 완료 가능하다.
+
+### review error 정책
+
+review member가 Error / quota / provider failure / tool failure / timeout 이면 PASS로 간주하지 않는다. 같은 panel을 한 번 재시도한다. 동일 infrastructure error가 계속되면 무한 재시도하지 않고 blocker로 보고한다.
+
+### runaway patch loop 방지
+
+동일하거나 실질적으로 같은 root cause finding이 2회 연속 다시 나타나면 임의 patch를 계속 추가하지 않는다. 먼저 call graph, state ownership, generation ownership, lifecycle을 다시 분석하고 deterministic regression test로 재현한 뒤 구조적으로 수정한다. 전체 autonomous review/fix cycle이 6회를 넘기면 무한 patch loop를 중단하고 blocker와 남은 finding을 보고한다. 완료라고 거짓말하지 않는다.
+
+### OpenCode review working-tree invariant
+
+RoboRev v0.64 OpenCode adapter는 non-interactive OpenCode를 사용하므로 review 전에 반드시 working tree가 clean이어야 한다. 각 RoboRev review 직전 `git status --short` → clean 확인, review 종료 직후에도 `git status --short` / `git diff --check` 확인. review 자체가 repository 파일을 수정했다면 그 review 결과를 정상 gate로 간주하지 않고, 수정 내용을 자동 commit하지 않으며, review infrastructure failure로 보고하고, 사용자 변경을 reset/revert하지 않는다.
+
+### OpenCode reasoning 주의
+
+RoboRev v0.64 OpenCode adapter는 `reasoning` level을 `opencode run` CLI에 전달하지 않는다. 따라서 Ox/Muse high의 깊이는 stronger instructions + longer timeout으로 만들며, 실제 `reasoning = "maximum"` override는 high panel에서 Grok에만 효과적이다. 이 사실은 `.roborev.toml` 주석에도 명시한다.
+
+### paid panels
+
+기존 `dashboard_cross` / `dashboard_deep` (codex/claude + grok)는 수동 fallback / 비교 검증용으로 보존한다. coding agent가 사용자 지시 없이 자동으로 실행하면 안 되며, Codex/Claude 비용을 자동 loop에서 소비하지 않는다.
 
 ## Codex 멀티에이전트 운영 규칙
 
@@ -122,10 +160,10 @@
 
 ## RoboRev 통합 원칙
 
-- 현재 설치된 `roborev version --json`과 각 command help를 런타임 계약의 우선 기준으로 삼는다. 이는 구현 contract 확인을 위한 read-only inspection이며 자동 완료 게이트로 `roborev review`/`roborev review --panel ...` 등 새 review job 생성을 요구하지 않는다.
+- 현재 설치된 `roborev version --json`과 각 command help를 런타임 계약의 우선 기준으로 삼는다.
 - transport 우선순위는 stable machine-readable CLI, 공식/public client 또는 daemon HTTP API, version-gated adapter 순이다.
 - 사람이 보는 CLI 문자열 파싱을 핵심 기능 계약으로 사용하지 않는다.
 - 각 기능은 typed request와 허용 목록으로 제한된 argument builder를 사용한다.
 - child process는 context cancellation, timeout, stdout/stderr 분리, bounded buffering 및 cleanup을 지원해야 한다.
 - browser 연결 종료만으로 RoboRev background job을 cancel하지 않는다.
-- 자동 테스트에서는 deterministic fake RoboRev, fixture, source/contract inspection만 사용한다. 사용자가 명시적으로 요구하지 않는 한 `roborev review`, `roborev wait` 등 실제 review 생성을 실행하지 않는다.
+- 자동 테스트에서는 deterministic fake RoboRev, fixture, source/contract inspection만 사용한다. `roborev review` / `roborev wait` 등 실제 review 생성은 `## RoboRev 자동 품질 게이트`의 2-stage gate에서 수행한다.

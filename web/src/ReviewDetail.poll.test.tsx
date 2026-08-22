@@ -117,16 +117,18 @@ describe('ReviewDetail poll generation isolation', () => {
     await vi.advanceTimersByTimeAsync(4100)
     await waitFor(() => expect(detailCalls).toBe(2))
 
-    // Unmount before poll resolves – timer should be cleaned and generation invalidated
+    // Capture count before unmount, then unmount and ensure no new timer re-schedules
+    const callsBeforeUnmount = detailCalls
     unmount()
-    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
 
-    // Late poll response should not cause state update or error
     pollDeferred.resolve(new Response(JSON.stringify({ ...job, output: 'Late poll output' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await vi.advanceTimersByTimeAsync(0)
     await new Promise(resolve => setTimeout(resolve, 0))
-    // No error thrown, no component to update – just ensure timers cleaned
-    expect(true).toBe(true)
+
+    // Advance far beyond the 4s interval – no new poll should have been scheduled after unmount
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(detailCalls).toBe(callsBeforeUnmount)
+    expect(document.querySelector('.skeleton.tall')).not.toBeInTheDocument()
   })
 
   it('C2. switching selected review cancels previous poll and ignores its late response', async () => {

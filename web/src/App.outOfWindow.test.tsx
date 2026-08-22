@@ -76,31 +76,20 @@ describe('out-of-window selected review mutation', () => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrapBase)
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) {
-        // history slice contains the old task
         return response([{ ...taskJob, closed: taskClosed }])
       }
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) {
-        // recent 100 does NOT contain the task
         return response([recentReview])
-      }
-      if (path === '/api/reviews/91') {
-        return response({ ...taskJob, closed: taskClosed, output: '# Task finding', review: { output: '# Task finding' } })
       }
       if (path === '/api/reviews/91/close' && init?.method === 'POST') {
         taskClosed = true
         return response({ success: true })
       }
-      // detail for 91 after close returns closed:true
-      if (path === '/api/reviews/91' && taskClosed) {
-        return response({ ...taskJob, closed: true, output: '# Task finding', review: { output: '# Task finding' } })
+      if (path === '/api/reviews/91') {
+        return response({ ...taskJob, closed: taskClosed, output: '# Task finding', review: { output: '# Task finding' } })
       }
       return response({ success: true })
     }))
-
-    // Need to handle the extra GET for fresh selected after mutation:
-    // Our global handler above already handles /api/reviews/91 GET returning closed:true after taskClosed flips.
-    // But we need to distinguish pre-close vs post-close: the post-close fetch should return closed:true.
-    // We'll make GET always return current taskClosed value.
 
     render(<I18nProvider><App /></I18nProvider>)
 
@@ -205,5 +194,83 @@ describe('out-of-window selected review mutation', () => {
     expect(screen.queryByText('Task A closed')).not.toBeInTheDocument()
     // B's detail should not have been switched to closed state of A
     expect(screen.getAllByRole('heading', { name: 'Review B' }).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('E. invalid selected IDs are rejected by positiveJobId helper', async () => {
+    const { positiveJobId } = await import('./App')
+    expect(positiveJobId(undefined)).toBeNull()
+    expect(positiveJobId(null)).toBeNull()
+    expect(positiveJobId('')).toBeNull()
+    expect(positiveJobId(NaN)).toBeNull()
+    expect(positiveJobId(0)).toBeNull()
+    expect(positiveJobId(-1)).toBeNull()
+    expect(positiveJobId(-5)).toBeNull()
+    expect(positiveJobId(Number.MAX_SAFE_INTEGER + 1)).toBeNull()
+    expect(positiveJobId('abc')).toBeNull()
+    expect(positiveJobId('   ')).toBeNull()
+    expect(positiveJobId(42)).toBe(42)
+    expect(positiveJobId('42')).toBe(42)
+    expect(positiveJobId(' 42 ')).toBe(42)
+    // fresh fetch guard integration: App's mutate would skip these, so verify no NaN fetch occurs via direct helper check
+  })
+
+  it('E2. fresh response ID mismatch is ignored', async () => {
+    const taskJob = { id: 96, job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', closed: false, branch: 'main', review: { output: '# Task' } }
+    const recent = { id: 42, git_ref: 'abcdef123456', status: 'done', verdict: 'P', closed: false }
+    let taskClosed = false
+    let detailCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrapBase)
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskJob, closed: taskClosed }])
+      if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
+      if (path === '/api/reviews/96/close' && init?.method === 'POST') { taskClosed = true; return response({ success: true }) }
+      if (path === '/api/reviews/96') {
+        detailCalls++
+        if (detailCalls === 1) {
+          return response({ ...taskJob, closed: false, output: '# Task', review: { output: '# Task' } })
+        }
+        return response({ ...taskJob, id: 999, job_id: 999, closed: true, output: '# Mismatched', review: { output: '# Mismatched' } })
+      }
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#42/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    const viewButton = await screen.findByRole('button', { name: 'View result' })
+    await userEvent.click(viewButton)
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(await screen.findByText('Task')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await new Promise(resolve => setTimeout(resolve, 500))
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(screen.queryByText('Mismatched')).not.toBeInTheDocument()
+  })
+
+  it('F. valid positive ID still triggers authoritative fetch when out-of-window', async () => {
+    const validJob = { id: 95, job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', closed: false, branch: 'main', review: { output: '# Valid' } }
+    const recent = { id: 42, git_ref: 'abcdef123456', status: 'done', verdict: 'P', closed: false }
+    let validClosed = false
+    const calls: string[] = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === '/api/bootstrap') return response(bootstrapBase)
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...validJob, closed: validClosed }])
+      if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
+      if (path === '/api/reviews/95/close' && init?.method === 'POST') { validClosed = true; return response({ success: true }) }
+      if (path === '/api/reviews/95') return response({ ...validJob, closed: validClosed, output: '# Valid', review: { output: '# Valid' } })
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#42/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    const viewButton = await screen.findByRole('button', { name: 'View result' })
+    await userEvent.click(viewButton)
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    calls.length = 0
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
+    expect(calls.some(c => c === '/api/reviews/95')).toBe(true)
   })
 })

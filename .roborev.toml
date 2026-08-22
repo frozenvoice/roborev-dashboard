@@ -18,8 +18,8 @@ agent = "grok"
 model = "grok-4.6"
 reasoning = "fast"
 review_type = "default"
-timeout = "12m"
-instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
+timeout = "8m"
+instructions = "Perform a fast independent regression gate. Prioritize concrete Critical/High/Medium correctness, security, async lifecycle, command/process safety, Windows behavior, and RoboRev compatibility problems. Report Low findings only when they are obvious, actionable regressions. Do not speculate. Write human-readable review results and explanations in Korean while preserving code identifiers, paths, API/CLI commands, JSON keys, original errors, and direct quotations in their original language."
 
 [review.subagents.grok]
 agent = "grok"
@@ -29,6 +29,59 @@ review_type = "default"
 timeout = "12m"
 instructions = "Independently review this change for correctness, regressions, command/process safety, security boundaries, Windows behavior, RoboRev compatibility, and missing tests. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
+# Fast OpenCode gate. Ox is intentionally excluded because it is much slower in practice.
+# RoboRev v0.64 does not forward reasoning levels to the OpenCode CLI, so this
+# fast/high distinction is driven by reviewer instructions/time budget; Grok's
+# reasoning level is still effective.
+[review.subagents.muse_fast]
+agent = "opencode"
+model = "opencode/muse-spark-1.2-contributor-free"
+review_type = "default"
+timeout = "6m"
+instructions = "Perform a fast independent regression gate. Focus on concrete Critical/High/Medium correctness, security, stale-state/race, command/process safety, Windows, and RoboRev contract regressions. Prefer a small number of high-confidence findings over exhaustive style commentary. Report Low only for an obvious functional regression. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
+
+# Deep OpenCode reviewers. `reasoning` is intentionally omitted because RoboRev
+# v0.64's OpenCode adapter does not pass it through to `opencode run`.
+[review.subagents.ox_high]
+agent = "opencode"
+model = "opencode/x-preview-f-free"
+review_type = "default"
+timeout = "20m"
+instructions = "Perform a deep independent final review. Trace control flow across the full diff and surrounding code. Actively look for subtle async generation/stale-response races, lifecycle ownership errors, security/authorization ordering, process cancellation/shutdown bugs, Windows-specific failures, RoboRev v0.64 contract mismatches, misleading UI state, and tests that pass without proving their stated invariant. Reproduce findings mentally from concrete code paths and report actionable Critical/High/Medium/Low findings only when supported by code evidence. Do not trust commit messages or tests as proof by themselves. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
+
+[review.subagents.muse_high]
+agent = "opencode"
+model = "opencode/muse-spark-1.2-contributor-free"
+review_type = "default"
+timeout = "15m"
+instructions = "Perform a deep independent final review. Trace interactions between changed code and existing lifecycle/state ownership instead of reviewing only local lines. Check async races, stale data, repository identity boundaries, mutation authorization, shutdown/process behavior, Windows compatibility, RoboRev v0.64 semantics, and whether regression tests actually fail when the claimed bug returns. Report only actionable findings grounded in concrete code evidence, including meaningful Low findings. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
+
+[review.subagents.grok_high]
+agent = "grok"
+model = "grok-4.6"
+reasoning = "maximum"
+review_type = "default"
+timeout = "15m"
+instructions = "Perform a deep final regression review of the complete change. Trace cross-file and async interactions, security boundaries, process/shutdown lifecycle, Windows behavior, RoboRev v0.64 compatibility, and test validity. Look specifically for bugs that a local diff-only review can miss. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
+
+# Iterative fast gate: cheap/fast Muse + Grok. Synthesis also uses free OpenCode.
+[review.panels.dashboard_opencode]
+members = ["muse_fast", "grok_fast"]
+synthesis_agent = "opencode"
+synthesis_model = "opencode/muse-spark-1.2-contributor-free"
+synthesis_backup_agent = "opencode"
+synthesis_backup_model = "opencode/x-preview-f-free"
+
+# Final deep gate: Ox + Muse + Grok maximum. OpenCode itself has no v0.64
+# reasoning passthrough, so Ox/Muse depth comes from the stronger prompt/time budget.
+[review.panels.dashboard_opencode_high]
+members = ["ox_high", "muse_high", "grok_high"]
+synthesis_agent = "opencode"
+synthesis_model = "opencode/muse-spark-1.2-contributor-free"
+synthesis_backup_agent = "opencode"
+synthesis_backup_model = "opencode/x-preview-f-free"
+
+# Existing paid/manual panels are retained as fallback/manual gates.
 [review.panels.dashboard_cross]
 members = ["gpt", "claude", "grok_fast"]
 synthesis_agent = "codex"
