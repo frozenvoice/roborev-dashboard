@@ -178,28 +178,130 @@ describe('Configuration workspace', () => {
   })
 
   it('discards a stale snapshot after a repository switch', async () => {
-    const stale = deferred<typeof snapshot>()
+    const stale = deferred<Response>()
     let currentIdentity = 'repo-1'
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       if (String(input).startsWith('/api/configuration?')) {
         if (currentIdentity === 'repo-b') return response({ repositoryIdentity: 'repo-b', settings: snapshot.settings, rows: [{ origin: 'global', key: 'max_workers', value: '8' }] })
-        if (String(input).includes('repo-stale')) return stale.promise
-        return response(snapshot)
+        return stale.promise
       }
       return response({})
     }))
     const { rerender } = render(<I18nProvider><Configuration repositoryIdentity={currentIdentity} configEnabled onToast={vi.fn()} /></I18nProvider>)
-    expect(await screen.findByTestId('value-max_workers')).toHaveTextContent('4')
 
     currentIdentity = 'repo-b'
     rerender(<I18nProvider><Configuration repositoryIdentity={currentIdentity} configEnabled onToast={vi.fn()} /></I18nProvider>)
     expect(await screen.findByTestId('value-max_workers')).toHaveTextContent('8')
 
-    // The stale repo-1 response must never replace repo-b's rows.
-    stale.resolve(snapshot)
+    // The stale repo-1 response must never replace repo-b's rows. This
+    // deferred is the initial request, so the race is real rather than a
+    // response that was never pending.
+    stale.resolve(await response(snapshot))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(screen.getByTestId('value-max_workers')).toHaveTextContent('8')
     expect(screen.queryByText('****abcd')).not.toBeInTheDocument()
+  })
+
+  it('invalidates a pending preview when the repository changes', async () => {
+    const pendingPreview = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/configuration/preview') return pendingPreview.promise
+      if (path.startsWith('/api/configuration?') && path.includes('repo-b')) {
+        return response({ repositoryIdentity: 'repo-b', settings: snapshot.settings, rows: [{ origin: 'global', key: 'max_workers', value: '8' }] })
+      }
+      return response(snapshot)
+    }))
+    const user = userEvent.setup()
+    const { view } = renderConfiguration()
+    const card = await screen.findByTestId('setting-review_reasoning')
+    await user.selectOptions(card.querySelector('select') as HTMLSelectElement, 'thorough')
+    await user.click(screen.getAllByRole('button', { name: 'Prepare change' }).find(button => (button as HTMLButtonElement).closest('.setting-card') === card) as HTMLButtonElement)
+
+    view.rerender(<I18nProvider><Configuration repositoryIdentity='repo-b' configEnabled onToast={vi.fn()} /></I18nProvider>)
+    expect(await screen.findByTestId('value-max_workers')).toHaveTextContent('8')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    pendingPreview.resolve(await response(preview))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('invalidates a pending preview when the draft changes', async () => {
+    const firstPreview = deferred<Response>()
+    const secondPreview = deferred<Response>()
+    let previewCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/configuration/preview') return (++previewCalls === 1 ? firstPreview.promise : secondPreview.promise)
+      return response(snapshot)
+    }))
+    const user = userEvent.setup()
+    renderConfiguration()
+    const card = await screen.findByTestId('setting-review_reasoning')
+    const select = card.querySelector('select') as HTMLSelectElement
+    const prepare = () => screen.getAllByRole('button', { name: 'Prepare change' }).find(button => (button as HTMLButtonElement).closest('.setting-card') === card) as HTMLButtonElement
+    await user.selectOptions(select, 'thorough')
+    await user.click(prepare())
+    await user.selectOptions(select, 'medium')
+    await user.click(prepare())
+
+    firstPreview.resolve(await response(preview))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    secondPreview.resolve(await response({ ...preview, newValue: 'medium', command: { ...preview.command, args: ['config', 'set', 'review_reasoning', 'medium', '--local'] } }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('closes an open preview when the repository changes', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/configuration/preview') return response(preview)
+      if (path.startsWith('/api/configuration?') && path.includes('repo-b')) {
+        return response({ repositoryIdentity: 'repo-b', settings: snapshot.settings, rows: [{ origin: 'global', key: 'max_workers', value: '8' }] })
+      }
+      return response(snapshot)
+    }))
+    const user = userEvent.setup()
+    const { view } = renderConfiguration()
+    const card = await screen.findByTestId('setting-review_reasoning')
+    await user.selectOptions(card.querySelector('select') as HTMLSelectElement, 'thorough')
+    await user.click(screen.getAllByRole('button', { name: 'Prepare change' }).find(button => (button as HTMLButtonElement).closest('.setting-card') === card) as HTMLButtonElement)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    view.rerender(<I18nProvider><Configuration repositoryIdentity='repo-b' configEnabled onToast={vi.fn()} /></I18nProvider>)
+    expect(await screen.findByTestId('value-max_workers')).toHaveTextContent('8')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps a newer preparing state when an older request finishes', async () => {
+    const firstPreview = deferred<Response>()
+    const secondPreview = deferred<Response>()
+    let previewCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/configuration/preview') return (++previewCalls === 1 ? firstPreview.promise : secondPreview.promise)
+      return response(snapshot)
+    }))
+    const user = userEvent.setup()
+    renderConfiguration()
+    const card = await screen.findByTestId('setting-review_reasoning')
+    const select = card.querySelector('select') as HTMLSelectElement
+    const prepare = () => screen.getAllByRole('button', { name: 'Prepare change' }).find(button => (button as HTMLButtonElement).closest('.setting-card') === card) as HTMLButtonElement
+    await user.selectOptions(select, 'thorough')
+    await user.click(prepare())
+    await user.selectOptions(select, 'medium')
+    await user.click(prepare())
+    expect(prepare()).toBeDisabled()
+
+    firstPreview.resolve(await response(preview))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(prepare()).toBeDisabled()
+
+    secondPreview.resolve(await response({ ...preview, newValue: 'medium', command: { ...preview.command, args: ['config', 'set', 'review_reasoning', 'medium', '--local'] } }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
   })
 
   it('does not re-run configuration requests when the language changes', async () => {

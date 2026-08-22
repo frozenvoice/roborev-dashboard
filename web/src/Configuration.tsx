@@ -5,6 +5,14 @@ import { useI18n, type MessageKey } from './i18n'
 
 type Draft = { scope: ConfigScope; value: boolean | number | string }
 
+type PreviewRequestOwner = {
+  id: number
+  repositoryIdentity: string
+  key: string
+  scope: ConfigScope
+  valueToken: string
+}
+
 const configKey = (suffix: string) => `config.${suffix}` as MessageKey
 
 export type ConfigurationProps = {
@@ -16,6 +24,19 @@ export type ConfigurationProps = {
 
 function severityOptions(values: string[] | undefined) {
   return values ?? []
+}
+
+function canonicalDraftValue(value: Draft['value']) {
+  return `${typeof value}:${String(value)}`
+}
+
+function defaultDraftForSnapshot(spec: ConfigurationSettingSpec, currentSnapshot: ConfigurationSnapshot | null): Draft {
+  const raw = currentSnapshot?.rows.find(row => row.key === spec.key)?.value ?? ''
+  let value: boolean | number | string
+  if (spec.valueType === 'boolean') value = raw === 'true'
+  else if (spec.valueType === 'integer') value = raw === '' ? '' : Number(raw)
+  else value = raw
+  return { scope: spec.scopes[spec.scopes.length - 1], value }
 }
 
 /**
@@ -33,12 +54,66 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
   const [preview, setPreview] = useState<ConfigurationPreview | null>(null)
   const [preparingKey, setPreparingKey] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
+  const repositoryIdentityRef = useRef(repositoryIdentity)
+  const configEnabledRef = useRef(configEnabled)
+  const contextRef = useRef({ repositoryIdentity, configEnabled })
+  const snapshotRef = useRef(snapshot)
+  const draftsRef = useRef(drafts)
+  repositoryIdentityRef.current = repositoryIdentity
+  configEnabledRef.current = configEnabled
+  snapshotRef.current = snapshot
+  draftsRef.current = drafts
+
+  // Preview requests are deliberately owned separately from snapshot loading:
+  // a user edit, repository switch, or disable must invalidate both a pending
+  // response and an already-open preview. The request id also makes a stale
+  // finally unable to clear a newer request's preparing state.
+  const previewGeneration = useRef(0)
+  const activePreviewRequest = useRef<PreviewRequestOwner | null>(null)
+  const invalidatePreview = useCallback((clearState = true) => {
+    previewGeneration.current += 1
+    activePreviewRequest.current = null
+    if (clearState) {
+      setPreview(null)
+      setPreparingKey(null)
+    }
+  }, [])
+
   // A generation counter discards stale snapshot responses after a repository
   // switch so repo A data can never land in repo B's UI.
   const generation = useRef(0)
   // Reload must be state, not a ref: a ref bump never re-renders, so the
   // snapshot effect below would not re-run.
   const [refreshEpoch, setRefreshEpoch] = useState(0)
+
+  // Locale changes must not invalidate configuration requests. The provider's
+  // translator is ref-backed, so this ref keeps error messages current without
+  // adding `t` to the data-loading effect dependencies.
+  const translateRef = useRef(t)
+  translateRef.current = t
+
+  useEffect(() => {
+    const previous = contextRef.current
+    const repositoryChanged = previous.repositoryIdentity !== repositoryIdentity
+    const disabled = !configEnabled
+    contextRef.current = { repositoryIdentity, configEnabled }
+
+    if (repositoryChanged || disabled) {
+      invalidatePreview()
+      setDrafts({})
+      setSnapshot(null)
+      setLoadError('')
+      if (disabled) setLoading(false)
+    }
+  }, [configEnabled, invalidatePreview, repositoryIdentity])
+
+  // Cleanup invalidates ownership only. State updates are intentionally omitted
+  // during unmount, but any promise continuation still sees a dead generation.
+  useEffect(() => () => {
+    previewGeneration.current += 1
+    activePreviewRequest.current = null
+    generation.current += 1
+  }, [])
 
   useEffect(() => {
     if (!configEnabled || !repositoryIdentity) return
@@ -48,7 +123,7 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
       .then(value => {
         if (current !== generation.current) return
         const next = normalizeConfigurationSnapshot(value)
-        if (!next) throw new Error(t('config.malformed'))
+        if (!next || next.repositoryIdentity !== repositoryIdentity) throw new Error(translateRef.current('config.malformed'))
         setSnapshot(next)
         setLoadError('')
       })
@@ -62,27 +137,22 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
         setLoading(false)
       })
     return () => { generation.current++ }
-  }, [configEnabled, repositoryIdentity, refreshEpoch, t])
+  }, [configEnabled, repositoryIdentity, refreshEpoch])
 
   const reload = useCallback(() => { setRefreshEpoch(epoch => epoch + 1) }, [])
 
   const rowFor = useCallback((key: string): ConfigurationRow | undefined => snapshot?.rows.find(row => row.key === key), [snapshot])
-  const defaultDraft = useCallback((spec: ConfigurationSettingSpec): Draft => {
-    const raw = rowFor(spec.key)?.value ?? ''
-    let value: boolean | number | string
-    if (spec.valueType === 'boolean') value = raw === 'true'
-    else if (spec.valueType === 'integer') value = raw === '' ? '' : Number(raw)
-    else value = raw
-    return { scope: spec.scopes[spec.scopes.length - 1], value }
-  }, [rowFor])
+  const defaultDraft = useCallback((spec: ConfigurationSettingSpec): Draft => defaultDraftForSnapshot(spec, snapshot), [snapshot])
   const draftFor = useCallback((spec: ConfigurationSettingSpec): Draft => drafts[spec.key] ?? defaultDraft(spec), [drafts, defaultDraft])
 
   const updateDraft = (spec: ConfigurationSettingSpec, patch: Partial<Draft>) => {
     // Editing any field invalidates an open preview: it no longer matches.
-    setPreview(null)
+    invalidatePreview()
     // A partial edit must never drop the scope default.
     setDrafts(old => ({ ...old, [spec.key]: { ...defaultDraft(spec), ...old[spec.key], ...patch } }))
   }
+
+  const currentDraftFor = (spec: ConfigurationSettingSpec): Draft => draftsRef.current[spec.key] ?? defaultDraftForSnapshot(spec, snapshotRef.current)
 
   const draftValid = (spec: ConfigurationSettingSpec, draft: Draft): boolean => {
     if (typeof draft.value !== spec.valueType && !(spec.valueType === 'integer')) {
@@ -102,16 +172,46 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
     if (preparingKey) return
     const draft = draftFor(spec)
     if (!draftValid(spec, draft)) return
+    const requestId = ++previewGeneration.current
+    const owner: PreviewRequestOwner = {
+      id: requestId,
+      repositoryIdentity,
+      key: spec.key,
+      scope: draft.scope,
+      valueToken: canonicalDraftValue(draft.value),
+    }
+    activePreviewRequest.current = owner
     setPreparingKey(spec.key)
+
+    const isCurrentOwner = (response?: ConfigurationPreview) => {
+      const currentDraft = currentDraftFor(spec)
+      return activePreviewRequest.current?.id === requestId
+        && previewGeneration.current === requestId
+        && configEnabledRef.current
+        && repositoryIdentityRef.current === owner.repositoryIdentity
+        && currentDraft.scope === owner.scope
+        && canonicalDraftValue(currentDraft.value) === owner.valueToken
+        && (!response || (
+          response.key === owner.key
+          && response.scope === owner.scope
+          && response.newValue === String(draft.value)
+        ))
+    }
+
     try {
       const value = await request<unknown>('/api/configuration/preview', { method: 'POST', body: JSON.stringify({ repositoryIdentity, key: spec.key, scope: draft.scope, value: draft.value }) })
       const next = normalizeConfigurationPreview(value)
       if (!next) throw new Error(t('config.malformed'))
-      setPreview(next)
+      if (isCurrentOwner(next)) setPreview(next)
     } catch (error) {
-      onToast('error', (error as Error).message)
+      if (isCurrentOwner()) onToast('error', (error as Error).message)
     } finally {
-      setPreparingKey(null)
+      // A stale request must not clear the preparing state belonging to a
+      // newer request, including a newer request for the same setting key.
+      if (activePreviewRequest.current?.id === requestId) {
+        activePreviewRequest.current = null
+        setPreparingKey(null)
+      }
     }
   }
 
@@ -198,7 +298,7 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
       </dl>
       {preview.warnings.length > 0 && <ul className="warnings" role="note">{preview.warnings.map(warning => <li key={warning}>{t(configKey(`warning.${warning}`))}</li>)}</ul>}
       <footer>
-        <button className="button" onClick={() => setPreview(null)}>{t('common.cancel')}</button>
+        <button className="button" onClick={() => invalidatePreview()}>{t('common.cancel')}</button>
         <button className="button primary" disabled={confirming} onClick={() => void confirmChange()}>{t('config.confirmAction')}</button>
       </footer>
     </section></div>}
