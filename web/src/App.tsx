@@ -1025,7 +1025,8 @@ export function App() {
         if (!existsInList) {
           try {
             const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}`)
-            const freshId = positiveJobId((fresh as unknown as { id?: unknown; job_id?: unknown }).id ?? (fresh as unknown as { job_id?: unknown }).job_id)
+            const freshRaw = fresh as unknown as { id?: unknown; job_id?: unknown; job?: { id?: unknown } }
+            const freshId = positiveJobId(freshRaw.job_id ?? freshRaw.job?.id ?? freshRaw.id)
             if (freshId !== mutateSelectedId) return
             const freshRepoPath = (fresh as unknown as { repo_path?: unknown }).repo_path
             if (typeof freshRepoPath === 'string' && freshRepoPath.trim() && data.selectedRepository) {

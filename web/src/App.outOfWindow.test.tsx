@@ -273,4 +273,36 @@ describe('out-of-window selected review mutation', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
     expect(calls.some(c => c === '/api/reviews/95')).toBe(true)
   })
+
+  it('G. fresh response with id/job_id precedence still applies close', async () => {
+    const taskJob = { id: 97, job_id: 97, job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', closed: false, branch: 'main', review: { output: '# Task' } }
+    const recent = { id: 42, git_ref: 'abcdef123456', status: 'done', verdict: 'P', closed: false }
+    let taskClosed = false
+    let detailCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrapBase)
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskJob, closed: taskClosed }])
+      if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
+      if (path === '/api/reviews/97/close' && init?.method === 'POST') { taskClosed = true; return response({ success: true }) }
+      if (path === '/api/reviews/97') {
+        detailCalls++
+        if (detailCalls === 1) {
+          return response({ ...taskJob, closed: false, output: '# Task', review: { output: '# Task' } })
+        }
+        // Return mismatched top-level id (review row) but correct job_id
+        return response({ id: 12345, job_id: 97, closed: true, output: '# Task closed', review: { output: '# Task closed' }, job: { id: 97 } } as any)
+      }
+      return response({ success: true })
+    }))
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#42/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    const viewButton = await screen.findByRole('button', { name: 'View result' })
+    await userEvent.click(viewButton)
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+  })
 })
