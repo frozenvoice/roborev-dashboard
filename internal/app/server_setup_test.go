@@ -414,8 +414,9 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}()
-	// Prime the setup status so Retry takes the daemon-only path.
-	if state := manager.Status(context.Background()); state.Phase != setup.PhaseReady || state.DaemonRunning {
+	// Prime the setup status so Retry takes the daemon-only path. The initial
+	// HTTP 503 is a typed invalid probe, so setup stays retryable but failed.
+	if state := manager.Status(context.Background()); state.Phase != setup.PhaseFailed || state.DaemonRunning || !state.CanRetry || !state.Retryable {
 		t.Fatalf("initial setup state = %#v", state)
 	}
 	httpServer := httptest.NewServer(server.Handler())

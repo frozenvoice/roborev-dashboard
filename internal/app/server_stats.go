@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -164,15 +163,12 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
 		return nil, false
 	}
-	var status struct {
-		Running bool `json:"running"`
-	}
-	if len(installation.Status) == 0 || json.Unmarshal(installation.Status, &status) != nil {
-		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
+	if installation.DaemonCondition == roborev.DaemonConditionUnhealthy {
+		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be healthy.", "stats")
 		return nil, false
 	}
-	if !status.Running {
-		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be online.", "stats")
+	if installation.DaemonCondition != roborev.DaemonConditionHealthy {
+		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
 		return nil, false
 	}
 	service, ok := s.RoboRev.(roborev.StatsService)

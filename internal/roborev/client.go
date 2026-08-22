@@ -263,10 +263,15 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	if err != nil {
 		return Installation{Installed: false, Binary: binary, Error: err.Error(), FailureCode: probeFailureCode(err)}
 	}
-	installation := Installation{Installed: true, Binary: binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`), DaemonHealth: DaemonHealthUnknown}
+	installation := Installation{Installed: true, Binary: binary, Version: versionValue, Capabilities: capabilities(versionValue), Status: json.RawMessage(`{"running":false,"known":false}`), DaemonHealth: DaemonHealthUnknown, DaemonCondition: DaemonConditionUnknown}
 	if installation.Capabilities.ReviewEnqueueAPI {
 		if health, healthErr := c.healthStatus(ctx); healthErr == nil {
 			installation.DaemonHealth = DaemonHealthOnline
+			if health.Healthy {
+				installation.DaemonCondition = DaemonConditionHealthy
+			} else {
+				installation.DaemonCondition = DaemonConditionUnhealthy
+			}
 			// A valid response proves the daemon is reachable even when its
 			// health payload reports unhealthy components. Stats applies the
 			// typed health result separately and rejects that condition.

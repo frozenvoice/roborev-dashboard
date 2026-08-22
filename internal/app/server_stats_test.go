@@ -18,21 +18,22 @@ import (
 
 type statsHTTPService struct {
 	fakeService
-	version       string
-	summaryCaps   bool
-	costCaps      bool
-	running       bool
-	healthState   roborev.DaemonHealthProbeState
-	healthError   string
-	status        json.RawMessage
-	installations int
-	summaryCalls  int
-	costCalls     int
-	lastRepo      string
-	lastBranch    string
-	lastWindow    string
-	summaryErr    error
-	costErr       error
+	version         string
+	summaryCaps     bool
+	costCaps        bool
+	running         bool
+	healthState     roborev.DaemonHealthProbeState
+	healthCondition roborev.DaemonHealthCondition
+	healthError     string
+	status          json.RawMessage
+	installations   int
+	summaryCalls    int
+	costCalls       int
+	lastRepo        string
+	lastBranch      string
+	lastWindow      string
+	summaryErr      error
+	costErr         error
 }
 
 type statsHealthProductionRunner struct {
@@ -56,6 +57,10 @@ func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 			healthState = roborev.DaemonHealthOnline
 		}
 	}
+	healthCondition := s.healthCondition
+	if healthCondition == "" && healthState == roborev.DaemonHealthOnline {
+		healthCondition = roborev.DaemonConditionHealthy
+	}
 	status := s.status
 	if status == nil {
 		status = func() json.RawMessage {
@@ -72,9 +77,10 @@ func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 			SummaryStats: s.summaryCaps,
 			CostStats:    s.costCaps,
 		},
-		Status:       status,
-		Error:        s.healthError,
-		DaemonHealth: healthState,
+		Status:          status,
+		Error:           s.healthError,
+		DaemonHealth:    healthState,
+		DaemonCondition: healthCondition,
 	}
 }
 
@@ -352,16 +358,21 @@ func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testin
 	costTarget := "/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=all"
 
 	for _, test := range []struct {
-		name  string
-		state roborev.DaemonHealthProbeState
-		error string
-		want  int
+		name      string
+		state     roborev.DaemonHealthProbeState
+		condition roborev.DaemonHealthCondition
+		error     string
+		want      int
 	}{
-		{name: "offline state wins over malformed-looking error", state: roborev.DaemonHealthOffline, error: "malformed RoboRev daemon health: offline", want: http.StatusServiceUnavailable},
-		{name: "invalid state ignores banana error", state: roborev.DaemonHealthInvalid, error: "banana", want: http.StatusBadGateway},
+		{name: "offline state wins over malformed-looking error", state: roborev.DaemonHealthOffline, condition: roborev.DaemonConditionUnknown, error: "malformed RoboRev daemon health: offline", want: http.StatusServiceUnavailable},
+		{name: "invalid state ignores banana error", state: roborev.DaemonHealthInvalid, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
+		{name: "unknown state is unavailable", state: roborev.DaemonHealthUnknown, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
+		{name: "online unknown condition is unavailable", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
+		{name: "unhealthy condition is unavailable", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionUnhealthy, error: "banana", want: http.StatusServiceUnavailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service.healthState = test.state
+			service.healthCondition = test.condition
 			service.healthError = test.error
 			for _, target := range []string{summaryTarget, costTarget} {
 				response := httptest.NewRecorder()
@@ -373,15 +384,16 @@ func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testin
 		})
 	}
 
-	// Missing/invalid browser status is also a safe protocol error once the
-	// typed probe says the endpoint was reachable.
+	// The browser-facing Status JSON is irrelevant to the typed Stats gate once
+	// the probe says the daemon is reachable and healthy.
 	service.healthState = roborev.DaemonHealthOnline
+	service.healthCondition = roborev.DaemonConditionHealthy
 	service.healthError = "banana"
 	service.status = json.RawMessage(`{"running":`)
 	service.running = true
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, nativeStatsRequest(summaryTarget))
-	if response.Code != http.StatusBadGateway || service.summaryCalls != 0 {
+	if response.Code != http.StatusOK || service.summaryCalls != 1 {
 		t.Fatalf("malformed status=%d calls=%d body=%s", response.Code, service.summaryCalls, response.Body.String())
 	}
 }

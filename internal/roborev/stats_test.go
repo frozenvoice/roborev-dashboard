@@ -247,22 +247,23 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 		daemonURL string
 		transport http.RoundTripper
 		want      DaemonHealthProbeState
+		condition DaemonHealthCondition
 		running   bool
 	}{
-		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true}`, want: DaemonHealthOnline, running: true},
-		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, running: true},
-		{name: "HTTP error", status: http.StatusInternalServerError, body: `server error`, want: DaemonHealthInvalid},
-		{name: "malformed JSON", status: http.StatusOK, body: `{`, want: DaemonHealthInvalid},
-		{name: "trailing JSON", status: http.StatusOK, body: `{"healthy":true}{}`, want: DaemonHealthInvalid},
-		{name: "healthy null", status: http.StatusOK, body: `{"healthy":null}`, want: DaemonHealthInvalid},
-		{name: "missing healthy", status: http.StatusOK, body: `{"version":"v0.64.0"}`, want: DaemonHealthInvalid},
-		{name: "unknown field", status: http.StatusOK, body: `{"healthy":true,"unexpected":true}`, want: DaemonHealthInvalid},
-		{name: "invalid schema", status: http.StatusOK, body: `{"$schema":null,"healthy":true}`, want: DaemonHealthInvalid},
-		{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), want: DaemonHealthInvalid},
-		{name: "generic transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: errors.New("banana")}, want: DaemonHealthInvalid},
-		{name: "generic timeout transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: genericTimeoutError{}}, want: DaemonHealthInvalid},
-		{name: "wrapped deadline transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", context.DeadlineExceeded)}, want: DaemonHealthInvalid},
-		{name: "connection refused", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", syscall.Errno(10061))}, want: DaemonHealthOffline},
+		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true}`, want: DaemonHealthOnline, condition: DaemonConditionHealthy, running: true},
+		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, condition: DaemonConditionUnhealthy, running: true},
+		{name: "HTTP error", status: http.StatusInternalServerError, body: `server error`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "malformed JSON", status: http.StatusOK, body: `{`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "trailing JSON", status: http.StatusOK, body: `{"healthy":true}{}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "healthy null", status: http.StatusOK, body: `{"healthy":null}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "missing healthy", status: http.StatusOK, body: `{"version":"v0.64.0"}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "unknown field", status: http.StatusOK, body: `{"healthy":true,"unexpected":true}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "invalid schema", status: http.StatusOK, body: `{"$schema":null,"healthy":true}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "generic transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: errors.New("banana")}, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "generic timeout transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: genericTimeoutError{}}, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "wrapped deadline transport error", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", context.DeadlineExceeded)}, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
+		{name: "connection refused", daemonURL: "127.0.0.1:7373", transport: runtimeErrorRoundTripper{err: fmt.Errorf("wrapped transport failure: %w", syscall.Errno(10061))}, want: DaemonHealthOffline, condition: DaemonConditionUnknown},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -287,6 +288,9 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 			installation := client.Installation(context.Background())
 			if installation.DaemonHealth != test.want {
 				t.Fatalf("health state=%q want %q error=%q", installation.DaemonHealth, test.want, installation.Error)
+			}
+			if installation.DaemonCondition != test.condition {
+				t.Fatalf("health condition=%q want %q", installation.DaemonCondition, test.condition)
 			}
 			status := string(installation.Status)
 			wantRunning := `"running":false`

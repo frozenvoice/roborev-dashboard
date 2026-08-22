@@ -167,6 +167,18 @@ func (a *reachableHealthFailureAdapter) DaemonHealth(context.Context) (bool, err
 	return true, fmt.Errorf("reachable daemon health payload is invalid")
 }
 
+type reachableUnhealthyRestartAdapter struct {
+	*fakeRuntimeAdapter
+	healthCalls int
+}
+
+func (a *reachableUnhealthyRestartAdapter) DaemonHealth(context.Context) (bool, error) {
+	a.mu.Lock()
+	a.healthCalls++
+	a.mu.Unlock()
+	return true, roborev.ErrDaemonUnhealthy
+}
+
 func TestStopDoesNotTreatReachableHealthFailureAsOffline(t *testing.T) {
 	fake := &fakeRuntimeAdapter{online: true}
 	adapter := &reachableHealthFailureAdapter{fakeRuntimeAdapter: fake}
@@ -180,6 +192,34 @@ func TestStopDoesNotTreatReachableHealthFailureAsOffline(t *testing.T) {
 	}
 	if state := m.Status(); state.Result != "failure" {
 		t.Fatalf("reachable health failure stop state = %#v", state)
+	}
+}
+
+func TestRestartReachableUnhealthyHealthEndsInFailure(t *testing.T) {
+	fake := &fakeRuntimeAdapter{online: true}
+	adapter := &reachableUnhealthyRestartAdapter{fakeRuntimeAdapter: fake}
+	m := fastManager(t, adapter, fake, operation.NewGate())
+	state, err := m.Restart(context.Background())
+	if err != nil || !state.Active {
+		t.Fatalf("restart acceptance = %#v, %v", state, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for m.Status().Active && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	state = m.Status()
+	if state.Result != "failure" || state.Result == "success" {
+		t.Fatalf("reachable unhealthy restart state = %#v, want terminal failure", state)
+	}
+	adapter.mu.Lock()
+	healthCalls := adapter.healthCalls
+	restartCalls := adapter.restartCalls
+	adapter.mu.Unlock()
+	if healthCalls < 2 {
+		t.Fatalf("health calls = %d, want bounded retry probes", healthCalls)
+	}
+	if restartCalls != 1 {
+		t.Fatalf("restart calls = %d, want 1", restartCalls)
 	}
 }
 

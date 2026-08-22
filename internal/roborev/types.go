@@ -14,6 +14,9 @@ type Installation struct {
 	// hidden from bootstrap JSON; browser callers consume the bounded Status
 	// summary instead.
 	DaemonHealth DaemonHealthProbeState `json:"-"`
+	// DaemonCondition is the typed health condition for a reachable daemon.
+	// It is intentionally hidden from browser bootstrap JSON.
+	DaemonCondition DaemonHealthCondition `json:"-"`
 }
 
 type DaemonHealthProbeState string
@@ -23,6 +26,20 @@ const (
 	DaemonHealthOnline  DaemonHealthProbeState = "online"
 	DaemonHealthOffline DaemonHealthProbeState = "offline"
 	DaemonHealthInvalid DaemonHealthProbeState = "invalid"
+)
+
+type DaemonHealthCondition string
+
+const (
+	DaemonConditionUnknown   DaemonHealthCondition = "unknown"
+	DaemonConditionHealthy   DaemonHealthCondition = "healthy"
+	DaemonConditionUnhealthy DaemonHealthCondition = "unhealthy"
+
+	// These aliases keep the type-prefixed spelling available to Go callers
+	// while DaemonCondition* remains the concise field-oriented API.
+	DaemonHealthConditionUnknown   = DaemonConditionUnknown
+	DaemonHealthConditionHealthy   = DaemonConditionHealthy
+	DaemonHealthConditionUnhealthy = DaemonConditionUnhealthy
 )
 
 type Capabilities struct {

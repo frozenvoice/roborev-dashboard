@@ -79,10 +79,11 @@ type State struct {
 	CompletedAt           *time.Time `json:"completedAt,omitempty"`
 	Message               string     `json:"message,omitempty"`
 	// Internal aliases retained for Go callers while HTTP uses explicit setup names.
-	InProgress bool   `json:"-"`
-	Progress   int    `json:"-"`
-	Binary     string `json:"-"`
-	Supported  bool   `json:"-"`
+	InProgress      bool                          `json:"-"`
+	Progress        int                           `json:"-"`
+	Binary          string                        `json:"-"`
+	Supported       bool                          `json:"-"`
+	DaemonCondition roborev.DaemonHealthCondition `json:"-"`
 }
 
 func (s State) MarshalJSON() ([]byte, error) {
@@ -239,6 +240,7 @@ func (m *Manager) refresh(ctx context.Context) {
 	compatible := state.Supported
 	state.Compatible = &compatible
 	state.DaemonRunning = daemonRunning(installation.Status)
+	state.DaemonCondition = installation.DaemonCondition
 	panelCompatible := state.Supported && installation.Capabilities.PanelReview && installation.Capabilities.FixCommand && installation.Capabilities.JobOutputStatusAPI
 	state.PanelRefineCompatible = &panelCompatible
 	state.CanStartDaemon = state.Supported && !state.DaemonRunning
@@ -289,6 +291,25 @@ func (m *Manager) refresh(ctx context.Context) {
 		state.Message = "This RoboRev version is not eligible for automatic replacement"
 		state.InstallAvailable = false
 		state.CanInstall = false
+		m.state = state
+		return
+	}
+	// Offline is the concrete stopped-daemon state: retain Ready and the
+	// start affordance. Invalid/unknown probes and reachable unhealthy daemons
+	// must fail closed instead of presenting a false Ready state.
+	if installation.DaemonHealth != roborev.DaemonHealthOffline && !daemonReady(installation) {
+		state.Phase, state.Status = PhaseFailed, PhaseFailed
+		if installation.DaemonHealth == roborev.DaemonHealthOnline {
+			state.Message = "RoboRev is installed, but the daemon is not healthy"
+			state.Error = firstNonEmpty(installation.Error, "RoboRev daemon health is unhealthy")
+		} else {
+			state.Message = "RoboRev is installed, but the daemon health could not be verified"
+			state.Error = firstNonEmpty(installation.Error, "RoboRev daemon health could not be verified")
+		}
+		state.FailureCode = "daemon_start_failed"
+		state.CanStartDaemon = !state.DaemonRunning
+		state.CanRetry, state.Retryable = true, true
+		state.CompletedAt = ptrTime(now)
 		m.state = state
 		return
 	}
@@ -479,7 +500,7 @@ func (m *Manager) completeBoundMode(ctx context.Context, path string, installati
 		m.finishError(ctx, err, path)
 		return err
 	}
-	if !daemonRunning(installation.Status) {
+	if !daemonReady(installation) {
 		if starter, ok := m.client.(daemonStarter); ok {
 			if err := ctx.Err(); err != nil {
 				finishCanceled(err)
@@ -491,16 +512,19 @@ func (m *Manager) completeBoundMode(ctx context.Context, path string, installati
 					finishCanceled(ctx.Err())
 					return ctx.Err()
 				}
-				healthy := m.client.Installation(ctx)
+				healthy, waitErr := m.waitForDaemon(ctx)
+				if waitErr == nil {
+					m.finishReady(path, healthy)
+					return nil
+				}
 				if ctx.Err() != nil {
 					finishCanceled(ctx.Err())
 					return ctx.Err()
 				}
-				if daemonRunning(healthy.Status) {
-					m.finishReady(path, healthy)
-					return nil
+				if healthy.Version == "" {
+					healthy = installation
 				}
-				m.finishDaemonError(path, installation, err)
+				m.finishDaemonError(path, healthy, err)
 				return err
 			}
 			if err := ctx.Err(); err != nil {
@@ -508,27 +532,29 @@ func (m *Manager) completeBoundMode(ctx context.Context, path string, installati
 				return err
 			}
 			m.progress("waiting_for_daemon", 95)
-			if err := m.waitForDaemon(ctx); err != nil {
+			healthy, err := m.waitForDaemon(ctx)
+			if err != nil {
 				if ctx.Err() != nil {
 					finishCanceled(ctx.Err())
 					return ctx.Err()
 				}
-				m.finishDaemonError(path, installation, err)
+				if healthy.Version == "" {
+					healthy = installation
+				}
+				m.finishDaemonError(path, healthy, err)
 				return err
 			}
 			if err := ctx.Err(); err != nil {
 				finishCanceled(err)
 				return err
 			}
-			previous := installation
-			probe := m.client.Installation(ctx)
-			if err := ctx.Err(); err != nil {
-				installation = previous
-				finishCanceled(err)
-				return err
-			}
-			installation = probe
+			installation = healthy
 		}
+	}
+	if !daemonReady(installation) {
+		err := errors.New("daemon health did not become ready")
+		m.finishDaemonError(path, installation, err)
+		return err
 	}
 	m.finishReady(path, installation)
 	return nil
@@ -550,6 +576,7 @@ func (m *Manager) finishReady(path string, installation roborev.Installation) {
 	panelCompatible := installation.Capabilities.PanelReview && installation.Capabilities.FixCommand && installation.Capabilities.JobOutputStatusAPI
 	state.PanelRefineCompatible = &panelCompatible
 	state.DaemonRunning = daemonRunning(installation.Status)
+	state.DaemonCondition = installation.DaemonCondition
 	state.CanStartDaemon = !state.DaemonRunning
 	state.CanRetry = false
 	state.InstallAvailable = false
@@ -560,27 +587,29 @@ func (m *Manager) finishReady(path string, installation roborev.Installation) {
 	m.mu.Unlock()
 }
 
-func (m *Manager) waitForDaemon(ctx context.Context) error {
+func (m *Manager) waitForDaemon(ctx context.Context) (roborev.Installation, error) {
 	wait := m.wait
 	if wait == nil {
 		wait = waitSetupContext
 	}
+	var last roborev.Installation
 	for _, delay := range []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, time.Second} {
 		if err := ctx.Err(); err != nil {
-			return err
+			return last, err
 		}
 		installation := m.client.Installation(ctx)
+		last = installation
 		if err := ctx.Err(); err != nil {
-			return err
+			return last, err
 		}
-		if daemonRunning(installation.Status) {
-			return nil
+		if daemonReady(installation) {
+			return installation, nil
 		}
 		if err := wait(ctx, delay); err != nil {
-			return err
+			return last, err
 		}
 	}
-	return errors.New("daemon health did not become ready")
+	return last, errors.New("daemon health did not become ready")
 }
 
 func waitSetupContext(ctx context.Context, duration time.Duration) error {
@@ -600,11 +629,13 @@ func (m *Manager) finishDaemonError(path string, installation roborev.Installati
 	state := m.newState(PhaseFailed)
 	state.Installed, state.Supported = true, true
 	state.Binary, state.Version = path, installation.Version
-	state.DaemonRunning = false
-	state.CanStartDaemon, state.CanRetry = true, true
+	state.CanRetry = true
 	state.Retryable = true
 	state.Error, state.Message = err.Error(), "RoboRev installed, but the daemon is not ready"
 	state.FailureCode = "daemon_start_failed"
+	state.DaemonCondition = installation.DaemonCondition
+	state.DaemonRunning = daemonRunning(installation.Status)
+	state.CanStartDaemon = !state.DaemonRunning
 	state.CompletedAt = ptrTime(time.Now().UTC())
 	m.state = state
 }
@@ -787,6 +818,10 @@ func daemonRunning(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &status) == nil && status.Running != nil && *status.Running
 }
 
+func daemonReady(installation roborev.Installation) bool {
+	return installation.DaemonHealth == roborev.DaemonHealthOnline && installation.DaemonCondition == roborev.DaemonConditionHealthy
+}
+
 func (m *Manager) stateCopy() State { m.mu.RLock(); defer m.mu.RUnlock(); return m.state }
 
 // Retry resumes the last setup operation. A successfully installed binary
@@ -807,7 +842,7 @@ func (m *Manager) Retry(ctx context.Context) (State, error) {
 		return state, fmt.Errorf("%w: failure is not retryable", ErrIneligible)
 	}
 	if state.Installed && state.Supported {
-		if state.DaemonRunning {
+		if state.DaemonRunning && state.DaemonCondition == roborev.DaemonConditionHealthy {
 			return state, nil
 		}
 		starter, ok := m.client.(daemonStarter)
@@ -927,47 +962,38 @@ func (m *Manager) startDaemonOnly(parent context.Context, starter daemonStarter,
 				m.finishDaemonError(path, installation, ctx.Err())
 				return
 			}
-			previous := installation
-			probe := m.client.Installation(ctx)
-			if ctx.Err() != nil {
-				m.finishDaemonError(path, previous, ctx.Err())
+			healthy, waitErr := m.waitForDaemon(ctx)
+			if waitErr == nil {
+				m.finishReady(path, healthy)
 				return
 			}
-			installation = probe
-			if daemonRunning(installation.Status) {
-				m.finishReady(path, installation)
-				return
-			}
-			m.finishDaemonError(path, installation, err)
-			return
-		}
-		if err := m.waitForDaemon(ctx); err != nil {
 			if ctx.Err() != nil {
 				m.finishDaemonError(path, installation, ctx.Err())
 				return
 			}
-			previous := installation
-			probe := m.client.Installation(ctx)
+			if healthy.Version == "" {
+				healthy = installation
+			}
+			m.finishDaemonError(path, healthy, err)
+			return
+		}
+		healthy, waitErr := m.waitForDaemon(ctx)
+		if waitErr != nil {
 			if ctx.Err() != nil {
-				m.finishDaemonError(path, previous, ctx.Err())
+				m.finishDaemonError(path, installation, ctx.Err())
 				return
 			}
-			installation = probe
-			m.finishDaemonError(path, installation, err)
+			if healthy.Version == "" {
+				healthy = installation
+			}
+			m.finishDaemonError(path, healthy, waitErr)
 			return
 		}
 		if err := ctx.Err(); err != nil {
 			m.finishDaemonError(path, installation, err)
 			return
 		}
-		previous := installation
-		probe := m.client.Installation(ctx)
-		if err := ctx.Err(); err != nil {
-			m.finishDaemonError(path, previous, err)
-			return
-		}
-		installation = probe
-		m.finishReady(path, installation)
+		m.finishReady(path, healthy)
 	})
 }
 
