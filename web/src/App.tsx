@@ -47,7 +47,8 @@ function outputOf(job: ReviewJob | null) {
 }
 function idOf(job: ReviewJob) { return Number(job.id || job.job_id) }
 export function positiveJobId(value: unknown) {
-  const id = typeof value === 'number' || typeof value === 'string' && value.trim() ? Number(value) : NaN
+  const numeric = typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')
+  const id = numeric ? Number(value) : NaN
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 function memberIdOf(job: ReviewJob) { return positiveJobId(job.id ?? job.job_id) }
@@ -551,7 +552,6 @@ export function App() {
   const selectedRepositoryIdentity = bootstrap?.selectedRepositoryIdentity ?? ''
   const repo = bootstrap?.repositories.find(item => item.identity === selectedRepositoryIdentity)
   const selectedRef = useRef<ReviewJob | null>(null)
-  const selectedGeneration = useRef(0)
 
   useEffect(() => {
     currentRepositoryIdentity.current = selectedRepositoryIdentity
@@ -565,7 +565,6 @@ export function App() {
 
   useLayoutEffect(() => {
     selectedRef.current = selected
-    selectedGeneration.current++
   }, [selected])
 
   useEffect(() => {
@@ -623,6 +622,13 @@ export function App() {
   }, [])
   const loadBootstrap = useCallback(async () => {
     const data = await request<Bootstrap>('/api/bootstrap'); setCSRF(data.csrfToken); setBootstrap(data)
+    return data
+  }, [])
+  const loadBootstrapForIdentity = useCallback(async (expectedIdentity: string) => {
+    if (!expectedIdentity || expectedIdentity !== currentRepositoryIdentity.current) return null
+    const data = await request<Bootstrap>('/api/bootstrap')
+    if (data.selectedRepositoryIdentity !== expectedIdentity || currentRepositoryIdentity.current !== expectedIdentity) return null
+    setCSRF(data.csrfToken); setBootstrap(data)
     return data
   }, [])
   const loadSetup = useCallback(async (signal?: AbortSignal) => {
@@ -1011,12 +1017,12 @@ export function App() {
   const mutate = useCallback(async (path: string, body?: unknown) => {
     const mutateSelectedId = selectedRef.current ? positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) : null
     const mutateSelectedIdentity = currentRepositoryIdentity.current
-    const mutateGeneration = selectedGeneration.current
     setBusy(true)
     try {
       await request(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
       toast('success', path.includes('comment-close') ? t('review.commentClosed') : t('review.stateUpdated'))
-      const data = await loadBootstrap()
+      const data = await loadBootstrapForIdentity(mutateSelectedIdentity)
+      if (!data) return
       const nextJobs = await loadReviews(data.selectedRepository, data.selectedRepositoryIdentity)
       if (tasksVisibleRef.current && data.selectedRepository && data.selectedRepositoryIdentity && data.selectedRepositoryIdentity === mutateSelectedIdentity && data.selectedRepositoryIdentity === currentRepositoryIdentity.current) {
         try { await loadTaskHistory(data.selectedRepository, data.selectedRepositoryIdentity) } catch {}
@@ -1025,16 +1031,11 @@ export function App() {
         const existsInList = nextJobs.some(job => positiveJobId(job.id ?? job.job_id) === mutateSelectedId)
         if (!existsInList) {
           try {
-            const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}`)
+            const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}?repositoryIdentity=${encodeURIComponent(mutateSelectedIdentity)}`)
             const freshRaw = fresh as unknown as { id?: unknown; job_id?: unknown; job?: { id?: unknown } }
             const freshId = positiveJobId(freshRaw.job_id ?? freshRaw.job?.id ?? freshRaw.id)
             if (freshId !== mutateSelectedId) return
-            const freshRepoPath = (fresh as unknown as { repo_path?: unknown }).repo_path
-            if (typeof freshRepoPath === 'string' && freshRepoPath.trim() && data.selectedRepository) {
-              const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase()
-              if (normalize(freshRepoPath) !== normalize(data.selectedRepository)) return
-            }
-            if (mutateGeneration === selectedGeneration.current && mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) === mutateSelectedId) {
+            if (mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) === mutateSelectedId) {
               setSelected({ ...fresh, id: mutateSelectedId, job_id: mutateSelectedId } as ReviewJob)
             }
           } catch {
@@ -1047,7 +1048,7 @@ export function App() {
       toast('error', apiError.phase === 'close' ? t('review.partialSuccess', { error: apiError.message }) : apiError.message)
       throw error
     } finally { setBusy(false) }
-  }, [loadBootstrap, loadReviews, loadTaskHistory, toast])
+  }, [loadBootstrapForIdentity, loadReviews, loadTaskHistory, toast])
   const setupMutation = useCallback(async (path: string) => {
     await mutate(path)
     setSetupReloadEpoch(epoch => epoch + 1)

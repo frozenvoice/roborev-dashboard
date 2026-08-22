@@ -616,8 +616,31 @@ func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.authorizeJob(w, r, id) {
-		return
+	query := r.URL.Query()
+	if len(query) == 0 && r.URL.RawQuery == "" {
+		if !s.authorizeJob(w, r, id) {
+			return
+		}
+	} else {
+		identities, hasIdentity := query["repositoryIdentity"]
+		if len(query) != 1 || !hasIdentity || len(identities) != 1 || strings.TrimSpace(identities[0]) == "" {
+			writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
+			return
+		}
+		resolved, err := s.Registry.ResolveIdentity(strings.TrimSpace(identities[0]))
+		if err != nil {
+			writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
+			return
+		}
+		metadata, err := s.RoboRev.JobMetadata(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "job not found", "job")
+			return
+		}
+		if metadata.ID != id || !gitx.SameRepositoryPath(metadata.RepoPath, resolved) {
+			writeError(w, http.StatusForbidden, "job belongs to a different repository", "repository")
+			return
+		}
 	}
 	raw, err := s.RoboRev.Show(r.Context(), id)
 	if err != nil {

@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -18,26 +20,37 @@ import (
 // deterministic configuration surface for handler tests.
 type fakeConfigService struct {
 	*fakeService
-	mu        sync.Mutex
-	listCalls int
-	listRows  []roborev.ConfigRow
-	getCalls  int
-	getQueue  []string
-	setCalls  int
-	setKeys   []string
-	setValues []string
-	setScopes []roborev.ConfigScope
-	version   string
+	mu           sync.Mutex
+	listCalls    int
+	listRows     []roborev.ConfigRow
+	listErrors   []error
+	getCalls     int
+	getQueue     []string
+	setCalls     int
+	setKeys      []string
+	setValues    []string
+	setScopes    []roborev.ConfigScope
+	version      string
+	capabilities *roborev.Capabilities
 }
 
 func (f *fakeConfigService) Installation(context.Context) roborev.Installation {
-	return roborev.Installation{Installed: true, Version: f.version, Capabilities: roborev.Capabilities{ReviewEnqueueAPI: true, JobListAPI: true, ConfigIntrospection: true, ConfigMutation: true}, Status: json.RawMessage(`{"running":true,"known":true}`)}
+	caps := roborev.Capabilities{ReviewEnqueueAPI: true, JobListAPI: true, ConfigIntrospection: true, ConfigMutation: true}
+	if f.capabilities != nil {
+		caps = *f.capabilities
+	}
+	return roborev.Installation{Installed: true, Version: f.version, Capabilities: caps, Status: json.RawMessage(`{"running":true,"known":true}`)}
 }
 
 func (f *fakeConfigService) ConfigList(_ context.Context, _ string) ([]roborev.ConfigRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.listCalls++
+	if len(f.listErrors) > 0 {
+		err := f.listErrors[0]
+		f.listErrors = f.listErrors[1:]
+		return append([]roborev.ConfigRow(nil), f.listRows...), err
+	}
 	return append([]roborev.ConfigRow(nil), f.listRows...), nil
 }
 
@@ -157,9 +170,9 @@ func TestConfigurationSnapshotReturnsTypedRowsAndAllowlist(t *testing.T) {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
 	var snapshot struct {
-		RepositoryIdentity string               `json:"repositoryIdentity"`
-		Settings           []map[string]any     `json:"settings"`
-		Rows               []roborev.ConfigRow  `json:"rows"`
+		RepositoryIdentity string              `json:"repositoryIdentity"`
+		Settings           []map[string]any    `json:"settings"`
+		Rows               []roborev.ConfigRow `json:"rows"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &snapshot); err != nil {
 		t.Fatal(err)
@@ -211,6 +224,35 @@ func TestConfigurationSnapshotRejectsMissingFetchMetadata(t *testing.T) {
 	}
 	if service.listCalls != 0 {
 		t.Fatalf("list calls = %d, want 0", service.listCalls)
+	}
+}
+
+func TestConfigurationSnapshotRejectsUnsupportedCapabilityBeforeList(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*fakeConfigService)
+	}{
+		{name: "unsupported version", setup: func(service *fakeConfigService) {
+			service.version = "v0.65.0"
+		}},
+		{name: "introspection unavailable", setup: func(service *fakeConfigService) {
+			service.capabilities = &roborev.Capabilities{ReviewEnqueueAPI: true, JobListAPI: true, ConfigMutation: true}
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server, service, _, identity := newConfigTestServer(t)
+			testCase.setup(service)
+			recorder := configGetRequest(t, server, identity, func(request *http.Request) {
+				request.Header.Set("Origin", "http://example.com")
+			})
+			if recorder.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d body=%s, want 502", recorder.Code, recorder.Body.String())
+			}
+			if service.listCalls != 0 {
+				t.Fatalf("list calls = %d, want 0 before capability rejection", service.listCalls)
+			}
+		})
 	}
 }
 
@@ -360,6 +402,33 @@ func TestConfigurationSetReportsUnverifiedInsteadOfClaimingUnchanged(t *testing.
 	}
 }
 
+func TestConfigurationSetReportsUnverifiedWhenRefreshListFails(t *testing.T) {
+	server, service, _, identity := newConfigTestServer(t)
+	preview := preparePreview(t, server, identity)
+	refreshErr := errors.New("refresh list failed")
+	// The first list belongs to the fresh precondition check. The second is
+	// the post-write authoritative refresh and must make the result ambiguous.
+	service.listErrors = []error{nil, refreshErr}
+
+	recorder := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result configurationSetDTO
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "unverified" {
+		t.Fatalf("status = %q, want unverified: %+v", result.Status, result)
+	}
+	if !strings.Contains(result.Message, refreshErr.Error()) {
+		t.Fatalf("message = %q, want refresh error", result.Message)
+	}
+	if service.setCalls != 1 {
+		t.Fatalf("set calls = %d, want exactly one", service.setCalls)
+	}
+}
+
 func preparePreviewWithValues(t *testing.T, server *Server, identity string, key string, scope string, value any) configurationPreviewDTO {
 	t.Helper()
 	recorder := configPostRequest(t, server, "/api/configuration/preview", map[string]any{
@@ -449,6 +518,88 @@ func TestConfigurationSetRespectsExclusiveOperationGate(t *testing.T) {
 	}
 	if service.setCalls != 1 {
 		t.Fatalf("bogus token executed a set: %d calls", service.setCalls)
+	}
+}
+
+func TestConfigurationSetRestoresTokenWhenLocalRepositoryLeaseBusy(t *testing.T) {
+	server, service, _, identity := newConfigTestServer(t)
+	preview := preparePreview(t, server, identity)
+
+	releaseRepo, err := server.Gate.AcquireRepository(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
+	if busy.Code != http.StatusConflict {
+		t.Fatalf("busy status = %d body=%s, want 409", busy.Code, busy.Body.String())
+	}
+	if service.setCalls != 0 {
+		t.Fatalf("busy repository executed %d sets", service.setCalls)
+	}
+	releaseRepo()
+
+	retry := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry status = %d body=%s, want the same token to succeed", retry.Code, retry.Body.String())
+	}
+	var result configurationSetDTO
+	if err := json.Unmarshal(retry.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || service.setCalls != 1 {
+		t.Fatalf("result=%+v setCalls=%d, want one successful set", result, service.setCalls)
+	}
+}
+
+func TestConfigurationSetConcurrentDuplicateExecutesExactlyOnce(t *testing.T) {
+	server, service, _, identity := newConfigTestServer(t)
+	preview := preparePreview(t, server, identity)
+
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	for range 2 {
+		go func() {
+			defer workers.Done()
+			<-start
+			recorder := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
+			statuses <- recorder.Code
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(statuses)
+
+	statusCounts := map[int]int{}
+	for status := range statuses {
+		statusCounts[status]++
+	}
+	if statusCounts[http.StatusOK] != 1 || statusCounts[http.StatusConflict] != 1 {
+		t.Fatalf("statuses = %#v, want one 200 and one 409", statusCounts)
+	}
+	if service.setCalls != 1 {
+		t.Fatalf("set calls = %d, want exactly one", service.setCalls)
+	}
+}
+
+func TestConfigurationSetInvalidTokenNeverExecutesSet(t *testing.T) {
+	server, service, _, _ := newConfigTestServer(t)
+	recorder := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": "not-a-token"}, nil)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d body=%s, want 409", recorder.Code, recorder.Body.String())
+	}
+	if service.setCalls != 0 {
+		t.Fatalf("invalid token executed %d sets", service.setCalls)
+	}
+}
+
+func TestConfigurationPreviewStoreRestoreDropsExpiredToken(t *testing.T) {
+	store := newConfigPreviewStore()
+	const token = "expired-token"
+	store.restore(token, configPreviewRecord{ExpiresAt: time.Unix(0, 0)})
+	if _, ok := store.take(token); ok {
+		t.Fatal("expired restored token was usable")
 	}
 }
 

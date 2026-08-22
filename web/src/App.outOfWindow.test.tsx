@@ -30,6 +30,10 @@ function panelConfiguration() {
   return { repositoryIdentity: 'repo-1', panels: [{ name: 'reviewers', kind: 'panel', members: ['codex'], origin: 'global', valid: true }], selectedPanel: 'reviewers', selectionRequired: false }
 }
 
+function scopedReviewPath(id: number, identity = 'repo-1') {
+  return `/api/reviews/${id}?repositoryIdentity=${encodeURIComponent(identity)}`
+}
+
 function withPanels(handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
@@ -85,7 +89,7 @@ describe('out-of-window selected review mutation', () => {
         taskClosed = true
         return response({ success: true })
       }
-      if (path === '/api/reviews/91') {
+      if (path === '/api/reviews/91' || path === scopedReviewPath(91)) {
         return response({ ...taskJob, closed: taskClosed, output: '# Task finding', review: { output: '# Task finding' } })
       }
       return response({ success: true })
@@ -123,7 +127,7 @@ describe('out-of-window selected review mutation', () => {
       if (path === '/api/bootstrap') return response(bootstrapBase)
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskJob, closed: taskClosed }])
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([])
-      if (path === '/api/reviews/92') return response({ ...taskJob, closed: taskClosed, output: '# Task finding', review: { output: '# Task finding' } })
+      if (path === '/api/reviews/92' || path === scopedReviewPath(92)) return response({ ...taskJob, closed: taskClosed, output: '# Task finding', review: { output: '# Task finding' } })
       if (path === '/api/reviews/92/reopen' && init?.method === 'POST') { taskClosed = false; return response({ success: true }) }
       return response({ success: true })
     }))
@@ -144,7 +148,6 @@ describe('out-of-window selected review mutation', () => {
     const reviewB = { id: 44, git_ref: 'abcdef123456', commit_subject: 'Review B', branch: 'main', status: 'done', verdict: 'P', closed: false, review: { output: '# Review B' } }
     let taskAClosed = false
     const freshADeferred = deferred<Response>()
-    let freshAFetchStarted = false
 
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -152,13 +155,12 @@ describe('out-of-window selected review mutation', () => {
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([taskA])
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([reviewB])
       if (path === '/api/reviews/93') {
-        if (freshAFetchStarted) return freshADeferred.promise
         return response({ ...taskA, closed: taskAClosed, output: '# Task A', review: { output: '# Task A' } })
       }
+      if (path === scopedReviewPath(93)) return freshADeferred.promise
       if (path === '/api/reviews/44') return response({ ...reviewB, output: '# Review B', review: { output: '# Review B' } })
       if (path === '/api/reviews/93/close' && init?.method === 'POST') {
         taskAClosed = true
-        freshAFetchStarted = true
         return response({ success: true })
       }
       return response({ success: true })
@@ -196,8 +198,173 @@ describe('out-of-window selected review mutation', () => {
     expect(screen.getAllByRole('heading', { name: 'Review B' }).length).toBeGreaterThanOrEqual(1)
   })
 
+  it('D2. A to B to A applies the scoped response to the current A selection', async () => {
+    const taskA = { id: 94, uuid: '550e8400-e29b-41d4-a716-446655440094', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', closed: false, branch: 'main', review: { output: '# Task A' } }
+    const reviewB = { id: 45, git_ref: 'abcdef123456', commit_subject: 'Review B', branch: 'main', status: 'done', verdict: 'P', closed: false, review: { output: '# Review B' } }
+    let taskAClosed = false
+    let freshAStarted = false
+    const freshADeferred = deferred<Response>()
+
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrapBase)
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskA, closed: taskAClosed }])
+      if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([reviewB])
+      if (path === '/api/reviews/94') return response({ ...taskA, closed: taskAClosed, output: '# Task A', review: { output: '# Task A' } })
+      if (path === scopedReviewPath(94)) {
+        freshAStarted = true
+        return freshADeferred.promise
+      }
+      if (path === '/api/reviews/45') return response({ ...reviewB, output: '# Review B', review: { output: '# Review B' } })
+      if (path === '/api/reviews/94/close' && init?.method === 'POST') {
+        taskAClosed = true
+        return response({ success: true })
+      }
+      return response({ success: true })
+    }))
+
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#45/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    await userEvent.click((await screen.findAllByRole('button', { name: 'View result' }))[0])
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+
+    void userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(freshAStarted).toBe(true))
+    await userEvent.click(screen.getByRole('button', { name: 'Reviews' }))
+    await userEvent.click(await screen.findByText(/#45/))
+    expect((await screen.findAllByText('Review B')).length).toBeGreaterThanOrEqual(1)
+
+    // Return to the same A selection before the pending authoritative response resolves.
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    await userEvent.click((await screen.findAllByRole('button', { name: 'View result' }))[0])
+    expect(await screen.findByText('Task A')).toBeInTheDocument()
+
+    freshADeferred.resolve(new Response(JSON.stringify({ ...taskA, closed: true, output: '# Task A closed', review: { output: '# Task A closed' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
+  })
+
+  it('D3. a repository A response never applies after switching to repository B', async () => {
+    const repoA = { identity: 'repo-a', name: 'repo-a', path: 'E:\\repo-a', branch: 'main', head: 'aaaaaaaaaaaa', headShort: 'aaaaaaaa', commitSubject: 'A', dirty: false, hasConfig: true }
+    const repoB = { identity: 'repo-b', name: 'repo-b', path: 'E:\\repo-b', branch: 'main', head: 'bbbbbbbbbbbb', headShort: 'bbbbbbbb', commitSubject: 'B', dirty: false, hasConfig: true }
+    const taskA = { id: 98, uuid: '550e8400-e29b-41d4-a716-446655440098', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', branch: 'main', closed: false, review: { output: '# Task A' } }
+    const reviewA = { id: 46, git_ref: 'aaaaaaaaaaaa', commit_subject: 'Review A', branch: 'main', status: 'done', verdict: 'P', closed: false, review: { output: '# Review A' } }
+    let selectedIdentity = repoA.identity
+    let taskAClosed = false
+    let freshAStarted = false
+    const freshADeferred = deferred<Response>()
+    const bootstrapFor = (identity: string) => ({ ...bootstrapBase, selectedRepository: identity === repoA.identity ? repoA.path : repoB.path, selectedRepositoryIdentity: identity, repositories: [repoA, repoB] })
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/repos/panels?')) return response({ ...panelConfiguration(), repositoryIdentity: selectedIdentity })
+      if (path === '/api/bootstrap') return response(bootstrapFor(selectedIdentity))
+      if (path === '/api/repos/select' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { repoPath?: string }
+        selectedIdentity = body.repoPath === repoB.path ? repoB.identity : repoA.identity
+        return response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response(selectedIdentity === repoA.identity ? [{ ...taskA, closed: taskAClosed }] : [])
+      if (path.startsWith('/api/reviews?')) return response(selectedIdentity === repoA.identity ? [reviewA] : [])
+      if (path === '/api/reviews/98') return response({ ...taskA, closed: taskAClosed, output: '# Task A', review: { output: '# Task A' } })
+      if (path === scopedReviewPath(98, repoA.identity)) {
+        freshAStarted = true
+        return freshADeferred.promise
+      }
+      if (path === '/api/reviews/98/close' && init?.method === 'POST') {
+        taskAClosed = true
+        return response({ success: true })
+      }
+      return response({ success: true })
+    }))
+
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#46/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    await userEvent.click((await screen.findAllByRole('button', { name: 'View result' }))[0])
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    void userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(freshAStarted).toBe(true))
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Current repository' }), repoB.identity)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(repoB.identity))
+    freshADeferred.resolve(new Response(JSON.stringify({ ...taskA, closed: true, output: '# Task A closed', review: { output: '# Task A closed' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(screen.queryByText('Task A closed')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument()
+  })
+
+  it('D4. a delayed mutation bootstrap from A cannot restore A after B bootstrap applies', async () => {
+    const repoA = { identity: 'repo-a', name: 'repo-a', path: 'E:\\repo-a', branch: 'main', head: 'aaaaaaaaaaaa', headShort: 'aaaaaaaa', commitSubject: 'A', dirty: false, hasConfig: true }
+    const repoB = { identity: 'repo-b', name: 'repo-b', path: 'E:\\repo-b', branch: 'main', head: 'bbbbbbbbbbbb', headShort: 'bbbbbbbb', commitSubject: 'B', dirty: false, hasConfig: true }
+    const taskA = { id: 99, uuid: '550e8400-e29b-41d4-a716-446655440099', job_type: 'task', git_ref: 'run', status: 'done', verdict: 'F', branch: 'main', closed: false, review: { output: '# Task A' } }
+    const reviewA = { id: 49, git_ref: 'aaaaaaaaaaaa', commit_subject: 'Review A', branch: 'main', status: 'done', verdict: 'P', closed: false, review: { output: '# Review A' } }
+    const reviewB = { id: 50, git_ref: 'bbbbbbbbbbbb', commit_subject: 'Review B', branch: 'main', status: 'done', verdict: 'P', closed: false, review: { output: '# Review B' } }
+    let selectedIdentity = repoA.identity
+    let taskAClosed = false
+    let deferMutationBootstrap = false
+    let mutationBootstrapStarted = false
+    let scopedShowCalls = 0
+    const mutationBootstrap = deferred<Response>()
+    const bootstrapFor = (identity: string) => ({ ...bootstrapBase, selectedRepository: identity === repoA.identity ? repoA.path : repoB.path, selectedRepositoryIdentity: identity, repositories: [repoA, repoB] })
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/repos/panels?')) return response({ ...panelConfiguration(), repositoryIdentity: selectedIdentity })
+      if (path === '/api/bootstrap') {
+        if (deferMutationBootstrap) {
+          deferMutationBootstrap = false
+          mutationBootstrapStarted = true
+          return mutationBootstrap.promise
+        }
+        return response(bootstrapFor(selectedIdentity))
+      }
+      if (path === '/api/repos/select' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { repoPath?: string }
+        selectedIdentity = body.repoPath === repoB.path ? repoB.identity : repoA.identity
+        return response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response(selectedIdentity === repoA.identity ? [{ ...taskA, closed: taskAClosed }] : [])
+      if (path.startsWith('/api/reviews?')) return response(selectedIdentity === repoA.identity ? [reviewA] : [reviewB])
+      if (path === '/api/reviews/99') return response({ ...taskA, closed: taskAClosed, output: '# Task A', review: { output: '# Task A' } })
+      if (path === scopedReviewPath(99, repoA.identity)) {
+        scopedShowCalls++
+        return response({ ...taskA, closed: taskAClosed, output: '# Task A', review: { output: '# Task A' } })
+      }
+      if (path === '/api/reviews/99/close' && init?.method === 'POST') {
+        taskAClosed = true
+        deferMutationBootstrap = true
+        return response({ success: true })
+      }
+      return response({ success: true })
+    }))
+
+    render(<I18nProvider><App /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText(/#49/)).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    await userEvent.click((await screen.findAllByRole('button', { name: 'View result' }))[0])
+    expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    void userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(mutationBootstrapStarted).toBe(true))
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Current repository' }), repoB.identity)
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(repoB.identity))
+    await waitFor(() => expect(screen.getByText(/#50/)).toBeInTheDocument())
+
+    mutationBootstrap.resolve(new Response(JSON.stringify(bootstrapFor(repoA.identity)), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(repoB.identity)
+    expect(screen.getByText(/#50/)).toBeInTheDocument()
+    expect(scopedShowCalls).toBe(0)
+  })
+
   it('E. invalid selected IDs are rejected by positiveJobId helper', async () => {
     const { positiveJobId } = await import('./App')
+    expect(positiveJobId(1)).toBe(1)
+    expect(positiveJobId('1')).toBe(1)
+    expect(positiveJobId(' 1 ')).toBe(1)
     expect(positiveJobId(undefined)).toBeNull()
     expect(positiveJobId(null)).toBeNull()
     expect(positiveJobId('')).toBeNull()
@@ -205,6 +372,7 @@ describe('out-of-window selected review mutation', () => {
     expect(positiveJobId(0)).toBeNull()
     expect(positiveJobId(-1)).toBeNull()
     expect(positiveJobId(-5)).toBeNull()
+    expect(positiveJobId(Infinity)).toBeNull()
     expect(positiveJobId(Number.MAX_SAFE_INTEGER + 1)).toBeNull()
     expect(positiveJobId('abc')).toBeNull()
     expect(positiveJobId('   ')).toBeNull()
@@ -225,7 +393,7 @@ describe('out-of-window selected review mutation', () => {
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskJob, closed: taskClosed }])
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
       if (path === '/api/reviews/96/close' && init?.method === 'POST') { taskClosed = true; return response({ success: true }) }
-      if (path === '/api/reviews/96') {
+      if (path === '/api/reviews/96' || path === scopedReviewPath(96)) {
         detailCalls++
         if (detailCalls === 1) {
           return response({ ...taskJob, closed: false, output: '# Task', review: { output: '# Task' } })
@@ -259,7 +427,7 @@ describe('out-of-window selected review mutation', () => {
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...validJob, closed: validClosed }])
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
       if (path === '/api/reviews/95/close' && init?.method === 'POST') { validClosed = true; return response({ success: true }) }
-      if (path === '/api/reviews/95') return response({ ...validJob, closed: validClosed, output: '# Valid', review: { output: '# Valid' } })
+      if (path === '/api/reviews/95' || path === scopedReviewPath(95)) return response({ ...validJob, closed: validClosed, output: '# Valid', review: { output: '# Valid' } })
       return response({ success: true })
     }))
     render(<I18nProvider><App /></I18nProvider>)
@@ -271,7 +439,7 @@ describe('out-of-window selected review mutation', () => {
     calls.length = 0
     await userEvent.click(screen.getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
-    expect(calls.some(c => c === '/api/reviews/95')).toBe(true)
+    expect(calls.some(c => c === scopedReviewPath(95))).toBe(true)
   })
 
   it('G. fresh response with id/job_id precedence still applies close', async () => {
@@ -285,7 +453,7 @@ describe('out-of-window selected review mutation', () => {
       if (path.startsWith('/api/reviews?') && path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([{ ...taskJob, closed: taskClosed }])
       if (path.startsWith('/api/reviews?') && !path.includes(`limit=${TASK_HISTORY_LIMIT}`)) return response([recent])
       if (path === '/api/reviews/97/close' && init?.method === 'POST') { taskClosed = true; return response({ success: true }) }
-      if (path === '/api/reviews/97') {
+      if (path === '/api/reviews/97' || path === scopedReviewPath(97)) {
         detailCalls++
         if (detailCalls === 1) {
           return response({ ...taskJob, closed: false, output: '# Task', review: { output: '# Task' } })

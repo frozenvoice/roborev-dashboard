@@ -24,16 +24,16 @@ const configPreviewTTL = 10 * time.Minute
 // configPreviewRecord binds one prepared change to the exact repository,
 // checkout state, binary, and configuration snapshot it was validated against.
 type configPreviewRecord struct {
-	Identity    string
-	Path        string
-	Head        string
-	Branch      string
-	BinaryGen   string
-	Key         string
-	Scope       configuration.Scope
-	Value       string
-	Snapshot    string
-	ExpiresAt   time.Time
+	Identity  string
+	Path      string
+	Head      string
+	Branch    string
+	BinaryGen string
+	Key       string
+	Scope     configuration.Scope
+	Value     string
+	Snapshot  string
+	ExpiresAt time.Time
 }
 
 // configPreviewStore is a single-use token store. Tokens are 256-bit random
@@ -134,6 +134,10 @@ func (s *Server) configurationSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, ok := s.inspectAuthorizedRepository(w, r.Context(), identity)
 	if !ok {
+		return
+	}
+	if err := requireConfigCapability(s.RoboRev.Installation(r.Context()), false); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
 		return
 	}
 	configSvc, ok := configService(s.RoboRev)
@@ -390,6 +394,9 @@ func (s *Server) configurationSet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rows, listErr := configSvc.ConfigList(r.Context(), inspect.Path)
+	if listErr != nil {
+		verifyFailed = true
+	}
 	if verifyFailed {
 		detail := "configuration result could not be fully verified; refresh Configuration to check the current value."
 		if setErr != nil {

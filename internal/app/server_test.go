@@ -168,6 +168,71 @@ func setupServer(t *testing.T, service *fakeService) *Server {
 	return server
 }
 
+func TestShowReviewScopedRepositoryIdentityAuthorization(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	for _, path := range []string{`E:\repo-a`, `E:\repo-b`} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identityA, err := registry.Identity(`E:\repo-a`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &fakeService{
+		showRaw:       json.RawMessage(`{"job_id":42,"review":{"output":"ok"}}`),
+		panelMetadata: map[int64]roborev.JobMetadata{42: {ID: 42, RepoPath: `E:\repo-a`}},
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42?repositoryIdentity="+url.QueryEscape(identityA), nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != string(service.showRaw) || service.showCalls != 1 {
+		t.Fatalf("allowed scoped request = %d calls=%d body=%s", recorder.Code, service.showCalls, recorder.Body.String())
+	}
+
+	service.showCalls = 0
+	service.panelMetadata[42] = roborev.JobMetadata{ID: 42, RepoPath: `E:\repo-b`}
+	request = httptest.NewRequest(http.MethodGet, "/api/reviews/42?repositoryIdentity="+url.QueryEscape(identityA), nil)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || service.showCalls != 0 {
+		t.Fatalf("foreign scoped job = %d calls=%d body=%s", recorder.Code, service.showCalls, recorder.Body.String())
+	}
+}
+
+func TestShowReviewScopedRepositoryIdentityQueryValidation(t *testing.T) {
+	server := setupServer(t, &fakeService{})
+	for _, query := range []string{
+		"?repositoryIdentity=",
+		"?repositoryIdentity=%20",
+		"?repositoryIdentity=E%3A%5Crepo&repositoryIdentity=E%3A%5Crepo",
+		"?repositoryIdentity=E%3A%5Crepo&extra=value",
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/api/reviews/42"+query, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("query %q status = %d, want %d: %s", query, recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		}
+	}
+}
+
+func TestShowReviewWithoutRepositoryIdentityPreservesGenericAuthorization(t *testing.T) {
+	service := &fakeService{showRaw: json.RawMessage(`{"id":42}`), panelMetadata: map[int64]roborev.JobMetadata{42: {ID: 42, RepoPath: `E:\repo`}}}
+	server := setupServer(t, service)
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || service.showCalls != 1 || recorder.Body.String() != string(service.showRaw) {
+		t.Fatalf("generic request = %d calls=%d body=%s", recorder.Code, service.showCalls, recorder.Body.String())
+	}
+}
+
 func TestCommentCloseDoesNotCloseWhenCommentFails(t *testing.T) {
 	service := &fakeService{commentErr: errors.New("comment rejected")}
 	server := setupServer(t, service)
