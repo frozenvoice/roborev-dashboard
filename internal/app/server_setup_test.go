@@ -415,7 +415,8 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := setup.NewManager(client, setupInstaller{target: filepath.Join(t.TempDir(), "managed.exe")})
+	installer := &countingSetupInstaller{target: filepath.Join(t.TempDir(), "managed.exe")}
+	manager, err := setup.NewManager(client, installer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +469,7 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 	}
 	close(healthProbeRelease)
 	deadline := time.Now().Add(3 * time.Second)
+	ready := false
 	for time.Now().Before(deadline) {
 		getResponse, getErr := http.Get(httpServer.URL + "/api/setup/roborev")
 		if getErr == nil {
@@ -475,12 +477,23 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 			decodeErr := json.NewDecoder(getResponse.Body).Decode(&state)
 			_ = getResponse.Body.Close()
 			if decodeErr == nil && getResponse.StatusCode == http.StatusOK && state.Phase == setup.PhaseReady && !state.OperationActive && state.DaemonRunning {
-				return
+				ready = true
+				break
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("daemon recovery did not reach ready: %#v", manager.Status(context.Background()))
+	if !ready {
+		t.Fatalf("daemon recovery did not reach ready: %#v", manager.Status(context.Background()))
+	}
+	if got := installer.calls.Load(); got != 0 {
+		t.Fatalf("installer calls = %d", got)
+	}
+	select {
+	case <-runner.started:
+		t.Fatal("health-only recovery unexpectedly started the daemon")
+	default:
+	}
 }
 
 func TestBlockedInstallEndpointReturnsConflictWithoutRedownload(t *testing.T) {
