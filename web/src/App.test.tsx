@@ -947,6 +947,131 @@ describe('App review workflow', () => {
     expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled()
   })
 
+  it('registers the first repository with one POST followed by authoritative bootstrap', async () => {
+    const registered = { identity: 'repo-new', name: 'new', path: 'E:\\new', branch: 'main', head: '111111111111', headShort: '11111111', commitSubject: 'New', dirty: false, hasConfig: true }
+    const empty = { ...bootstrap, selectedRepository: '', selectedRepositoryIdentity: '', repositories: [] }
+    const registeredBootstrap = { ...empty, csrfToken: 'csrf-new', selectedRepository: registered.path, selectedRepositoryIdentity: registered.identity, repositories: [registered] }
+    const registration = deferred<Response>()
+    let postCount = 0
+    let bootstrapCount = 0
+    let reviewCSRF: string | null = null
+    const order: string[] = []
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') {
+        bootstrapCount += 1
+        order.push(`bootstrap-${bootstrapCount}`)
+        return response(bootstrapCount === 1 ? empty : registeredBootstrap)
+      }
+      if (path === '/api/repos' && init?.method === 'POST') {
+        postCount += 1
+        order.push('post')
+        return registration.promise
+      }
+      if (path === '/api/reviews' && init?.method === 'POST') {
+        reviewCSRF = new Headers(init.headers).get('X-CSRF-Token')
+        return response({ receipt: { job_id: 100 }, target: registered })
+      }
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }, repoPath => response(panelConfiguration(repoPath === registered.path ? registered.identity : 'repo-1'))))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Repositories' }))
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+    await userEvent.type(input, registered.path)
+    const form = input.closest('form')
+    expect(form).not.toBeNull()
+    fireEvent.submit(form!)
+    fireEvent.submit(form!)
+
+    await waitFor(() => expect(postCount).toBe(1))
+    expect(bootstrapCount).toBe(1)
+    registration.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.getByText(registered.path)).toBeInTheDocument())
+    expect(postCount).toBe(1)
+    expect(order.indexOf('post')).toBeGreaterThan(order.indexOf('bootstrap-1'))
+    expect(order.indexOf('bootstrap-2')).toBeGreaterThan(order.indexOf('post'))
+    expect(input).toHaveValue('')
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(registered.identity)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Review HEAD' })).toBeEnabled())
+    await userEvent.click(screen.getByRole('button', { name: 'Review HEAD' }))
+    await waitFor(() => expect(reviewCSRF).toBe('csrf-new'))
+  })
+
+  it('registers a repository without resetting the existing selected repository', async () => {
+    const selected = bootstrap.repositories[0]
+    const registered = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const next = { ...bootstrap, selectedRepository: selected.path, selectedRepositoryIdentity: selected.identity, repositories: [selected, registered] }
+    let bootstrapCount = 0
+    let postCount = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(++bootstrapCount === 1 ? bootstrap : next)
+      if (path === '/api/repos' && init?.method === 'POST') { postCount += 1; return response({ success: true }) }
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }, repoPath => response(panelConfiguration(repoPath === registered.path ? registered.identity : selected.identity))))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Repositories' }))
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+    await userEvent.type(input, registered.path)
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }))
+
+    await waitFor(() => expect(screen.getByText(registered.path)).toBeInTheDocument())
+    expect(postCount).toBe(1)
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue(selected.identity)
+    expect(screen.getByText(selected.path)).toBeInTheDocument()
+  })
+
+  it('does not let delayed registration bootstrap overwrite a later repository switch', async () => {
+    const repoA = bootstrap.repositories[0]
+    const repoB = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const repoC = { identity: 'repo-3', name: 'new', path: 'E:\\new', branch: 'main', head: '333333333333', headShort: '33333333', commitSubject: 'New', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [repoA, repoB] }
+    let selectedIdentity = repoA.identity
+    let deferRegistrationBootstrap = false
+    let registrationBootstrapStarted = false
+    const registrationBootstrap = deferred<Response>()
+    const bootstrapFor = (identity: string) => ({ ...initial, selectedRepository: identity === repoA.identity ? repoA.path : repoB.path, selectedRepositoryIdentity: identity, repositories: identity === repoA.identity ? [repoA, repoB, repoC] : [repoA, repoB] })
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') {
+        if (deferRegistrationBootstrap) {
+          deferRegistrationBootstrap = false
+          registrationBootstrapStarted = true
+          return registrationBootstrap.promise
+        }
+        return response(bootstrapFor(selectedIdentity))
+      }
+      if (path === '/api/repos' && init?.method === 'POST') { deferRegistrationBootstrap = true; return response({ success: true }) }
+      if (path === '/api/repos/select' && init?.method === 'POST') {
+        selectedIdentity = repoB.identity
+        return response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?')) return response(selectedIdentity === repoA.identity ? [] : [{ ...jobs[0], id: 84, commit_subject: 'Other repository review' }])
+      return response({ success: true })
+    }, repoPath => response(panelConfiguration(repoPath === repoB.path ? repoB.identity : repoA.identity))))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Repositories' }))
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+    await userEvent.type(input, repoC.path)
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }))
+    await waitFor(() => expect(registrationBootstrapStarted).toBe(true))
+
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    await userEvent.selectOptions(selector, repoB.identity)
+    await waitFor(() => expect(selector).toHaveValue(repoB.identity))
+    registrationBootstrap.resolve(new Response(JSON.stringify(bootstrapFor(repoA.identity)), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(selector).toHaveValue(repoB.identity)
+    expect(screen.getByText(repoB.path)).toBeInTheDocument()
+    expect(input).toHaveValue(repoC.path)
+  })
+
   it('uses opaque identity for case-varied selected paths and updates an existing repository without duplication', async () => {
     const registered = { ...bootstrap.repositories[0], path: 'E:\\Repo', branch: 'main' }
     const caseBootstrap = { ...bootstrap, selectedRepository: 'e:\\repo', repositories: [registered] }
