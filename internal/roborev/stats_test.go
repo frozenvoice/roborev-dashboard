@@ -250,10 +250,12 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 		running   bool
 	}{
 		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true}`, want: DaemonHealthOnline, running: true},
-		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, running: false},
+		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, running: true},
 		{name: "HTTP error", status: http.StatusInternalServerError, body: `server error`, want: DaemonHealthInvalid},
 		{name: "malformed JSON", status: http.StatusOK, body: `{`, want: DaemonHealthInvalid},
 		{name: "trailing JSON", status: http.StatusOK, body: `{"healthy":true}{}`, want: DaemonHealthInvalid},
+		{name: "healthy null", status: http.StatusOK, body: `{"healthy":null}`, want: DaemonHealthInvalid},
+		{name: "missing healthy", status: http.StatusOK, body: `{"version":"v0.64.0"}`, want: DaemonHealthInvalid},
 		{name: "unknown field", status: http.StatusOK, body: `{"healthy":true,"unexpected":true}`, want: DaemonHealthInvalid},
 		{name: "invalid schema", status: http.StatusOK, body: `{"$schema":null,"healthy":true}`, want: DaemonHealthInvalid},
 		{name: "oversized response", status: http.StatusOK, body: strings.Repeat("x", int(runtimeControlResponseLimit)+1), want: DaemonHealthInvalid},
@@ -293,6 +295,35 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 			}
 			if !strings.Contains(status, wantRunning) {
 				t.Fatalf("status=%s want substring %s", status, wantRunning)
+			}
+		})
+	}
+}
+
+func TestClientStatsRejectsMalformedHealthBeforeEitherStatsCommand(t *testing.T) {
+	for _, body := range []string{
+		`{"healthy":null}`,
+		`{}`,
+		`[{"healthy":true}]`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			health := statsHealthBodyServer(body)
+			defer health.Close()
+			runner := &statsRecordingRunner{version: "v0.64.0"}
+			client, err := NewClient("roborev", runner, health.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Summary(context.Background(), "repo", "", "7d"); err == nil || errors.Is(err, ErrStatsOffline) || errors.Is(err, ErrStatsUnhealthy) {
+				t.Fatalf("summary error=%v, want protocol error", err)
+			}
+			if _, err := client.Cost(context.Background(), "repo", ""); err == nil || errors.Is(err, ErrStatsOffline) || errors.Is(err, ErrStatsUnhealthy) {
+				t.Fatalf("cost error=%v, want protocol error", err)
+			}
+			for _, command := range runner.snapshot() {
+				if len(command.Args) > 0 && (command.Args[0] == "summary" || command.Args[0] == "cost") {
+					t.Fatalf("stats command ran after malformed health: %#v", command)
+				}
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/stats"
 )
@@ -32,6 +33,18 @@ type statsHTTPService struct {
 	lastWindow    string
 	summaryErr    error
 	costErr       error
+}
+
+type statsHealthProductionRunner struct {
+	commands int
+}
+
+func (r *statsHealthProductionRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.commands++
+	if len(command.Args) > 0 && command.Args[0] == "version" {
+		return proc.Result{Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
+	}
+	return proc.Result{}, nil
 }
 
 func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
@@ -370,5 +383,58 @@ func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testin
 	server.Handler().ServeHTTP(response, nativeStatsRequest(summaryTarget))
 	if response.Code != http.StatusBadGateway || service.summaryCalls != 0 {
 		t.Fatalf("malformed status=%d calls=%d body=%s", response.Code, service.summaryCalls, response.Body.String())
+	}
+}
+
+func TestStatsMalformedProductionHealthReturns502BeforeStatsCommands(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "top-level null", body: `null`, want: http.StatusBadGateway},
+		{name: "healthy null", body: `{"healthy":null}`, want: http.StatusBadGateway},
+		{name: "reachable unhealthy", body: `{"healthy":false}`, want: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer health.Close()
+			runner := &statsHealthProductionRunner{}
+			client, err := roborev.NewClient("roborev", runner, health.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry := NewRegistry(fakeInspector{}, "")
+			path := `E:\repo`
+			if _, err := registry.Add(context.Background(), path); err != nil {
+				t.Fatal(err)
+			}
+			server, err := NewServer(client, registry, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := registry.Identity(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range []string{
+				"/api/stats/summary?repositoryIdentity=" + statsIdentityQuery(identity) + "&window=7d&branchScope=all",
+				"/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=all",
+			} {
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, nativeStatsRequest(target))
+				if response.Code != test.want {
+					t.Fatalf("target=%s status=%d want=%d body=%s", target, response.Code, test.want, response.Body.String())
+				}
+			}
+			// Installation needs exactly one version probe; no stats command may
+			// run after malformed or unhealthy health responses.
+			if runner.commands != 1 {
+				t.Fatalf("process commands=%d, want only one version probe", runner.commands)
+			}
+		})
 	}
 }

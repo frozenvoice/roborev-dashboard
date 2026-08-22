@@ -108,6 +108,30 @@ describe('App review workflow', () => {
     expect(within(statsButton).queryByText('Soon')).not.toBeInTheDocument()
   })
 
+  it('keeps daemon polling and Review HEAD enabled for a reachable but unhealthy health response', async () => {
+    // The backend adapter maps HTTP 200 { healthy: false } to a reachable
+    // installation with status.running=true; the health detail is consumed
+    // by Stats separately.
+    const reachableUnhealthyBootstrap = { ...bootstrap, roborev: { ...bootstrap.roborev, status: { running: true } } }
+    let reviewPolls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(reachableUnhealthyBootstrap)
+      if (path.startsWith('/api/reviews?')) {
+        reviewPolls++
+        return response([])
+      }
+      if (path.startsWith('/api/panel-refines?')) return response(refineEnvelope([]))
+      return response({ success: true })
+    }))
+    render(<App />)
+    await waitFor(() => expect(reviewPolls).toBeGreaterThan(0))
+    expect(await screen.findByRole('button', { name: 'Review HEAD' })).toBeEnabled()
+    expect(screen.getByText('Daemon online')).toBeInTheDocument()
+    await openFixRefine()
+    expect(await screen.findByRole('button', { name: 'Panel Refine' })).toBeEnabled()
+  })
+
   it('keeps Review HEAD distinct from frozen rerun', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)

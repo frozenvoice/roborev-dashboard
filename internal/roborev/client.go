@@ -267,7 +267,10 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	if installation.Capabilities.ReviewEnqueueAPI {
 		if health, healthErr := c.healthStatus(ctx); healthErr == nil {
 			installation.DaemonHealth = DaemonHealthOnline
-			status, _ := json.Marshal(map[string]any{"running": health.Healthy, "known": true, "health": health})
+			// A valid response proves the daemon is reachable even when its
+			// health payload reports unhealthy components. Stats applies the
+			// typed health result separately and rejects that condition.
+			status, _ := json.Marshal(map[string]any{"running": true, "known": true, "health": health})
 			installation.Status = status
 		} else {
 			if ctx.Err() != nil || !isUnreachableHealthError(healthErr) {

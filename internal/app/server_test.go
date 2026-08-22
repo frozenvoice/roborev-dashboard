@@ -699,6 +699,44 @@ func TestBootstrapDoesNotAdvertiseFictionalReviewCLICommand(t *testing.T) {
 	}
 }
 
+func TestBootstrapKeepsReachableUnhealthyDaemonRunning(t *testing.T) {
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"healthy":false}`))
+	}))
+	defer health.Close()
+	client, err := roborev.NewClient("roborev", setupRunner{}, health.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(client, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/bootstrap", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		RoboRev struct {
+			Status struct {
+				Running bool `json:"running"`
+			} `json:"status"`
+		} `json:"roborev"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.RoboRev.Status.Running {
+		t.Fatalf("reachable unhealthy daemon was advertised as stopped: %s", recorder.Body.String())
+	}
+}
+
 func TestCreateReviewRejectsCanonicalRootDriftBeforeEnqueue(t *testing.T) {
 	inspector := &mutableInspector{repository: gitx.Repository{Path: `E:\registered`, Head: "initial"}}
 	registry := NewRegistry(inspector, "")

@@ -119,15 +119,23 @@ func (s *daemonHealthSchema) UnmarshalJSON(data []byte) error {
 }
 
 func (h *daemonHealthResponse) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return errors.New("RoboRev daemon health must be a JSON object")
+	}
+	rawHealthy, ok := fields["healthy"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawHealthy), []byte("null")) {
+		return errors.New(`RoboRev daemon health "healthy" must be a boolean`)
+	}
+	var healthy bool
+	if err := json.Unmarshal(rawHealthy, &healthy); err != nil {
+		return errors.New(`RoboRev daemon health "healthy" must be a boolean`)
+	}
 	type plain daemonHealthResponse
 	var decoded plain
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
 	_, decoded.schemaPresent = fields["$schema"]

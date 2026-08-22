@@ -14,6 +14,10 @@ export type StatsInsightsProps = {
 
 type LoadState<T> = { status: 'idle' | 'loading' | 'success' | 'error' | 'unavailable'; data: T | null; error: string }
 
+export function statsCompletionAllowed(suspended: boolean, aborted: boolean, generation: number, currentGeneration: number) {
+  return !suspended && !aborted && generation === currentGeneration
+}
+
 const windows: StatsWindow[] = ['24h', '7d', '30d', '90d']
 const branchScopes: StatsBranchScope[] = ['all', 'current']
 
@@ -59,10 +63,10 @@ export function StatsInsights({ selectedRepositoryIdentity, capabilities = {}, d
     setSummary(old => ({ ...old, status: 'loading', error: '' }))
     const path = `/api/stats/summary?repositoryIdentity=${encodeURIComponent(selectedRepositoryIdentity)}&window=${windowValue}&branchScope=${branchScope}`
     void request<StatsSummaryResponse>(path, { signal: controller.signal }).then(data => {
-      if (controller.signal.aborted || generation !== summaryGeneration.current || data.repositoryIdentity !== selectedRepositoryIdentity || data.window !== windowValue || data.branchScope !== branchScope) return
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, summaryGeneration.current) || data.repositoryIdentity !== selectedRepositoryIdentity || data.window !== windowValue || data.branchScope !== branchScope) return
       setSummary({ status: 'success', data, error: '' })
     }).catch(error => {
-      if (controller.signal.aborted || generation !== summaryGeneration.current) return
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, summaryGeneration.current)) return
       setSummary({ status: 'error', data: null, error: (error as Error).message })
     })
   }, [branchScope, fetchUnavailable, selectedRepositoryIdentity, summarySupported, windowValue])
@@ -77,10 +81,10 @@ export function StatsInsights({ selectedRepositoryIdentity, capabilities = {}, d
     setCost(old => ({ ...old, status: 'loading', error: '' }))
     const path = `/api/stats/cost?repositoryIdentity=${encodeURIComponent(selectedRepositoryIdentity)}&branchScope=${branchScope}`
     void request<StatsCostResponse>(path, { signal: controller.signal }).then(data => {
-      if (controller.signal.aborted || generation !== costGeneration.current || data.repositoryIdentity !== selectedRepositoryIdentity || data.branchScope !== branchScope) return
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, costGeneration.current) || data.repositoryIdentity !== selectedRepositoryIdentity || data.branchScope !== branchScope) return
       setCost({ status: 'success', data, error: '' })
     }).catch(error => {
-      if (controller.signal.aborted || generation !== costGeneration.current) return
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, costGeneration.current)) return
       setCost({ status: 'error', data: null, error: (error as Error).message })
     })
   }, [branchScope, costSupported, fetchUnavailable, selectedRepositoryIdentity])

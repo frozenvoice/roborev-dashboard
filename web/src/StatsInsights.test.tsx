@@ -1,7 +1,7 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { StatsInsights } from './StatsInsights'
+import { StatsInsights, statsCompletionAllowed } from './StatsInsights'
 import { I18nProvider, LANGUAGE_STORAGE_KEY, LanguageSelector } from './i18n'
 
 const identity = 'repo-a'
@@ -26,6 +26,13 @@ function renderStats(props: Partial<React.ComponentProps<typeof StatsInsights>> 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
 
 describe('StatsInsights', () => {
+  it('rejects success and error completion handlers while suspended', () => {
+    expect(statsCompletionAllowed(true, false, 4, 4)).toBe(false)
+    expect(statsCompletionAllowed(true, true, 4, 4)).toBe(false)
+    expect(statsCompletionAllowed(false, false, 4, 4)).toBe(true)
+    expect(statsCompletionAllowed(false, false, 3, 4)).toBe(false)
+  })
+
   it('is a real workspace with default 7d/all scope and renders upstream values', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { const path = String(input); calls.push(path); const branch = path.includes('branchScope=current') ? 'current' : 'all'; const window = (path.match(/window=([^&]+)/)?.[1] ?? '7d') as '24h' | '7d' | '30d' | '90d'; return path.includes('/cost?') ? response({ ...cost, branchScope: branch }) : response({ ...summary, window, branchScope: branch }) }))
