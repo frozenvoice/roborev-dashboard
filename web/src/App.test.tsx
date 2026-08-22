@@ -1126,6 +1126,67 @@ describe('App review workflow', () => {
     expect(input).toHaveValue('')
   })
 
+  it('serializes a pending repository switch ahead of registration', async () => {
+    const repoA = bootstrap.repositories[0]
+    const repoB = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
+    const repoC = { identity: 'repo-3', name: 'new', path: 'E:\\new', branch: 'main', head: '333333333333', headShort: '33333333', commitSubject: 'New', dirty: false, hasConfig: true }
+    const initial = { ...bootstrap, repositories: [repoA, repoB], selectedRepository: repoA.path, selectedRepositoryIdentity: repoA.identity }
+    const switched = { ...initial, selectedRepository: repoB.path, selectedRepositoryIdentity: repoB.identity }
+    const registered = { ...switched, repositories: [repoA, repoB, repoC] }
+    const selection = deferred<Response>()
+    let bootstrapCount = 0
+    let selectionStarted = false
+    let registrationPostCount = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') {
+        bootstrapCount += 1
+        return response(bootstrapCount === 1 ? initial : bootstrapCount === 2 ? switched : registered)
+      }
+      if (path === '/api/repos/select' && init?.method === 'POST') {
+        selectionStarted = true
+        return selection.promise
+      }
+      if (path === '/api/repos' && init?.method === 'POST') {
+        registrationPostCount += 1
+        return response({ success: true })
+      }
+      if (path.startsWith('/api/reviews?')) return response([])
+      return response({ success: true })
+    }, repoPath => response(panelConfiguration(repoPath === repoB.path ? repoB.identity : repoA.identity))))
+
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Repositories' }))
+    const selector = screen.getByRole('combobox', { name: 'Current repository' })
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+    const form = input.closest('form')
+    expect(form).not.toBeNull()
+
+    fireEvent.change(selector, { target: { value: repoB.identity } })
+    await waitFor(() => expect(selectionStarted).toBe(true))
+    expect(selector).toBeDisabled()
+    await userEvent.type(input, repoC.path)
+    const registerButton = screen.getByRole('button', { name: 'Register' })
+    expect(registerButton).toBeDisabled()
+    await userEvent.click(registerButton)
+    fireEvent.submit(form!)
+    expect(registrationPostCount).toBe(0)
+
+    selection.resolve(new Response(JSON.stringify({ success: true }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(selector).toBeEnabled())
+    expect(selector).toHaveValue(repoB.identity)
+    expect(input).toHaveValue(repoC.path)
+    expect(screen.getByRole('button', { name: 'Register' })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Register' }))
+    await waitFor(() => expect(registrationPostCount).toBe(1))
+    await waitFor(() => expect(screen.getByText(repoC.path)).toBeInTheDocument())
+    expect(bootstrapCount).toBe(3)
+    expect(selector).toBeEnabled()
+    expect(selector).toHaveValue(repoB.identity)
+    expect(input).toHaveValue('')
+  })
+
   it('uses opaque identity for case-varied selected paths and updates an existing repository without duplication', async () => {
     const registered = { ...bootstrap.repositories[0], path: 'E:\\Repo', branch: 'main' }
     const caseBootstrap = { ...bootstrap, selectedRepository: 'e:\\repo', repositories: [registered] }
@@ -1421,10 +1482,12 @@ describe('App review workflow', () => {
   it('restores the server-selected repository after a repo switch fails', async () => {
     const other = { identity: 'repo-2', name: 'other', path: 'E:\\other', branch: 'feature', head: '222222222222', headShort: '22222222', commitSubject: 'Other', dirty: false, hasConfig: true }
     const state = { ...bootstrap, repositories: [...bootstrap.repositories, other] }
+    let registrationPostCount = 0
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(state)
       if (path === '/api/repos/select' && init?.method === 'POST') return response({ error: 'repository selection rejected' }, 500)
+      if (path === '/api/repos' && init?.method === 'POST') { registrationPostCount += 1; return response({ success: true }) }
       if (path.startsWith('/api/reviews?')) return response(jobs)
       return response({ success: true })
     }))
@@ -1436,24 +1499,29 @@ describe('App review workflow', () => {
     expect(screen.getByText(/#42/)).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue(defaultPanel.name)
     expect(screen.queryByText('Panel configuration unavailable')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Repositories' }))
+    const input = await screen.findByRole('textbox', { name: 'Add local Git repository' })
+    await userEvent.type(input, 'E:\\after-failed-switch')
+    const registerButton = screen.getByRole('button', { name: 'Register' })
+    await waitFor(() => expect(registerButton).toBeEnabled())
+    await userEvent.click(registerButton)
+    await waitFor(() => expect(registrationPostCount).toBe(1))
+    expect(screen.getByRole('combobox', { name: 'Current repository' })).toBeEnabled()
   })
 
-  it('keeps the newest repository when an older failed switch completes later', async () => {
+  it('ignores a queued repository switch while another switch is pending', async () => {
     const staleSwitch = deferred<Response>()
     const repoB = { identity: 'repo-2', name: 'repo-b', path: 'E:\\repo-b', branch: 'feature/b', head: '222222222222', headShort: '22222222', commitSubject: 'B', dirty: false, hasConfig: true }
     const repoC = { identity: 'repo-3', name: 'repo-c', path: 'E:\\repo-c', branch: 'feature/c', head: '333333333333', headShort: '33333333', commitSubject: 'C', dirty: false, hasConfig: true }
     const initial = { ...bootstrap, repositories: [...bootstrap.repositories, repoB, repoC] }
-    const selectedC = { ...initial, selectedRepository: repoC.path, selectedRepositoryIdentity: repoC.identity }
-    const cJobs = [{ ...jobs[0], id: 126, git_ref: repoC.head, commit_subject: 'Repository C review' }]
-    let bootstrapCalls = 0
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
-      if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : selectedC)
+      if (path === '/api/bootstrap') return response(initial)
       if (path === '/api/repos/select' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body)) as { repoPath: string }
         return body.repoPath === repoB.path ? staleSwitch.promise : response({ success: true })
       }
-      if (path.startsWith('/api/reviews?')) return response(path.includes(encodeURIComponent(repoC.path)) ? cJobs : jobs)
+      if (path.startsWith('/api/reviews?')) return response(jobs)
       return response({ success: true })
     }, repoPath => {
       const identity = repoPath === repoC.path ? repoC.identity : repoPath === repoB.path ? repoB.identity : 'repo-1'
@@ -1466,19 +1534,13 @@ describe('App review workflow', () => {
     expect(selector).toBeDisabled()
     // A queued browser event is still guarded even though the control is disabled during the active switch.
     fireEvent.change(selector, { target: { value: repoC.identity } })
-    expect(await screen.findByText(/#126/)).toBeInTheDocument()
-    await waitFor(() => expect(selector).toHaveValue(repoC.identity))
-    expect(selector).toBeEnabled()
+    expect(selector).toHaveValue(bootstrap.selectedRepositoryIdentity)
 
     staleSwitch.resolve(new Response(JSON.stringify({ error: 'stale repository B failure' }), { status: 500, headers: { 'Content-Type': 'application/json' } }))
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(selector).toHaveValue(repoC.identity)
-    expect(screen.getByText('feature/c')).toBeInTheDocument()
-    expect(screen.getByText('33333333')).toBeInTheDocument()
-    expect(screen.getByText(/#126/)).toBeInTheDocument()
-    expect(screen.queryByText(/#42/)).not.toBeInTheDocument()
-    expect(screen.queryByText('stale repository B failure')).not.toBeInTheDocument()
-    expect(screen.queryByText('Repository state could not be restored')).not.toBeInTheDocument()
+    await waitFor(() => expect(selector).toBeEnabled())
+    expect(selector).toHaveValue(bootstrap.selectedRepositoryIdentity)
+    expect(screen.getByText(/#42/)).toBeInTheDocument()
+    expect(screen.getByText('stale repository B failure')).toBeInTheDocument()
   })
 
   it('uses the server-pinned Review HEAD target in the toast and repository metadata', async () => {
