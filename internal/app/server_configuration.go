@@ -75,6 +75,20 @@ func (s *configPreviewStore) take(token string) (configPreviewRecord, bool) {
 	return record, true
 }
 
+// restore returns an unconsumed record to the store after a failed set
+// attempt (for example a busy operation gate) so the user does not have to
+// re-prepare an unchanged change. Expired records are dropped instead.
+func (s *configPreviewStore) restore(token string, record configPreviewRecord) {
+	if time.Now().After(record.ExpiresAt) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.pending[token]; !exists {
+		s.pending[token] = record
+	}
+}
+
 func (s *configPreviewStore) expireLocked(now time.Time) {
 	for token, record := range s.pending {
 		if now.After(record.ExpiresAt) {
@@ -300,23 +314,30 @@ func (s *Server) configurationSet(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	record, ok := s.configPreviews.take(strings.TrimSpace(body.PreviewToken))
-	if !ok {
-		writeError(w, http.StatusConflict, "prepared configuration change is missing or expired; refresh and prepare again", "stale")
-		return
-	}
 	// The exclusive operation slot keeps a config write from overlapping
 	// setup, runtime control, Panel Refine, agentic fixes, or other mutations.
+	// It is acquired BEFORE the preview token is consumed so a busy system
+	// rejects with 409 without burning a prepared change.
 	releaseFix, err := s.Gate.AcquireFix()
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error(), "operation")
 		return
 	}
 	defer releaseFix()
+	token := strings.TrimSpace(body.PreviewToken)
+	record, ok := s.configPreviews.take(token)
+	if !ok {
+		writeError(w, http.StatusConflict, "prepared configuration change is missing or expired; refresh and prepare again", "stale")
+		return
+	}
 	if record.Scope == configuration.ScopeLocal {
-		releaseRepo, err := s.Gate.AcquireRepository(record.Identity)
-		if err != nil {
-			writeError(w, http.StatusConflict, err.Error(), "operation")
+		releaseRepo, repoErr := s.Gate.AcquireRepository(record.Identity)
+		if repoErr != nil {
+			// The change itself is still valid; give the token back so the
+			// user can retry without preparing again once the repository is
+			// free.
+			s.configPreviews.restore(token, record)
+			writeError(w, http.StatusConflict, repoErr.Error(), "operation")
 			return
 		}
 		defer releaseRepo()

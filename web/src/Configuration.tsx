@@ -36,7 +36,9 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
   // A generation counter discards stale snapshot responses after a repository
   // switch so repo A data can never land in repo B's UI.
   const generation = useRef(0)
-  const refreshEpoch = useRef(0)
+  // Reload must be state, not a ref: a ref bump never re-renders, so the
+  // snapshot effect below would not re-run.
+  const [refreshEpoch, setRefreshEpoch] = useState(0)
 
   useEffect(() => {
     if (!configEnabled || !repositoryIdentity) return
@@ -60,9 +62,9 @@ export function Configuration({ repositoryIdentity, configEnabled, onToast }: Co
         setLoading(false)
       })
     return () => { generation.current++ }
-  }, [configEnabled, repositoryIdentity, refreshEpoch.current, t])
+  }, [configEnabled, repositoryIdentity, refreshEpoch, t])
 
-  const reload = useCallback(() => { refreshEpoch.current++ }, [])
+  const reload = useCallback(() => { setRefreshEpoch(epoch => epoch + 1) }, [])
 
   const rowFor = useCallback((key: string): ConfigurationRow | undefined => snapshot?.rows.find(row => row.key === key), [snapshot])
   const defaultDraft = useCallback((spec: ConfigurationSettingSpec): Draft => {

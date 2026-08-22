@@ -417,18 +417,38 @@ func TestConfigurationSetRejectsChangedStateAfterPreview(t *testing.T) {
 }
 
 func TestConfigurationSetRespectsExclusiveOperationGate(t *testing.T) {
-	server, service, _, _ := newConfigTestServer(t)
+	server, service, _, identity := newConfigTestServer(t)
 	release, err := server.Gate.AcquireFix()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
-	recorder := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": "anything"}, nil)
+	preview := preparePreview(t, server, identity)
+	recorder := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 while another exclusive operation runs", recorder.Code)
 	}
-	if service.setCalls != 0 {
-		t.Fatal("busy gate must not execute a set")
+	release()
+
+	// The busy-gate rejection must not have burned the prepared change.
+	retry := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("retry status = %d body=%s, want the same token to succeed after the gate freed", retry.Code, retry.Body.String())
+	}
+	var result configurationSetDTO
+	if err := json.Unmarshal(retry.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || service.setCalls != 1 {
+		t.Fatalf("result=%+v setCalls=%d", result, service.setCalls)
+	}
+
+	// An invalid token still conflicts without touching RoboRev.
+	bogus := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": "anything"}, nil)
+	if bogus.Code != http.StatusConflict {
+		t.Fatalf("bogus token status = %d, want 409", bogus.Code)
+	}
+	if service.setCalls != 1 {
+		t.Fatalf("bogus token executed a set: %d calls", service.setCalls)
 	}
 }
 
