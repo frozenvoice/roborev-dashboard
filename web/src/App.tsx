@@ -154,6 +154,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const [fixPromptLoading, setFixPromptLoading] = useState(false)
   const previousStatus = useRef(job.status)
   const detailGeneration = useRef(0)
+  const detailPollGeneration = useRef(0)
   const lazyGeneration = useRef<Record<string, number>>({})
   const memberDetailGeneration = useRef(0)
   const memberPollGeneration = useRef(0)
@@ -195,6 +196,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
 
   useEffect(() => {
     const generation = ++detailGeneration.current
+    detailPollGeneration.current++
     lazyGeneration.current = { prompt: (lazyGeneration.current.prompt ?? 0) + 1, log: (lazyGeneration.current.log ?? 0) + 1 }
     memberDetailGeneration.current++
     memberRepositoryIdentity.current = repoIdentity
@@ -202,7 +204,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     selectedMemberIdRef.current = null
     setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setLazyLoading({}); setMemberJobs([]); setMemberLoadState('not-requested'); setMemberError(''); setSelectedMemberId(null); setMemberDetail(null); setMemberDetailError(''); setMemberDetailLoading(false); setMemberLoading(false); setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review'); setDetailLoading(true)
     request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setDetailLoading(false) })
-    return () => { detailGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
+    return () => { detailGeneration.current++; detailPollGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
   }, [id])
   useEffect(() => {
     const scope = `${repoIdentity}\u0000${id}\u0000${job.panel_run_uuid || ''}`
@@ -345,20 +347,23 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const isTaskResult = current.job_type === 'task' || current.git_ref === 'run'
   // A running single job whose row lives only in the Tasks history slice has
   // no list polling to refresh it; poll its detail until terminal instead.
+  // This poll owns its own generation so a terminal reconciliation (which
+  // uses detailGeneration) that fails does not permanently invalidate the
+  // long-lived authoritative detail poll.
   const detailIsFresh = detail !== null
   const currentRunning = isRunning(current)
   useEffect(() => {
     if (!currentRunning || !detailIsFresh || job.panel_run_uuid) return
-    const generation = ++detailGeneration.current
+    const generation = ++detailPollGeneration.current
     const timer = setInterval(() => {
       void request<ReviewJob>(`/api/reviews/${id}`).then(value => {
-        if (generation === detailGeneration.current) {
+        if (generation === detailPollGeneration.current) {
           setDetail({ ...value, id, job_id: id })
           setDetailError('')
         }
       }).catch(() => { /* transient transport errors keep the last good detail */ })
     }, 4000)
-    return () => clearInterval(timer)
+    return () => { clearInterval(timer); detailPollGeneration.current++ }
   }, [currentRunning, detailIsFresh, id, job.panel_run_uuid])
   const finding = terminal && isFinding(current)
   const fixTarget = selectedMemberId === null && isFixTarget(current)
