@@ -56,14 +56,6 @@ review_type = "default"
 timeout = "15m"
 instructions = "Perform a deep independent final review. Trace interactions between changed code and existing lifecycle/state ownership instead of reviewing only local lines. Check async races, stale data, repository identity boundaries, mutation authorization, shutdown/process behavior, Windows compatibility, RoboRev v0.64 semantics, and whether regression tests actually fail when the claimed bug returns. Report only actionable findings grounded in concrete code evidence, including meaningful Low findings. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
 
-[review.subagents.grok_high]
-agent = "grok"
-model = "grok-4.6"
-reasoning = "maximum"
-review_type = "default"
-timeout = "15m"
-instructions = "Perform a deep final regression review of the complete change. Trace cross-file and async interactions, security boundaries, process/shutdown lifecycle, Windows behavior, RoboRev v0.64 compatibility, and test validity. Look specifically for bugs that a local diff-only review can miss. Report only actionable findings supported by concrete code evidence. Write all human-readable review results and explanations in Korean. Preserve code identifiers, file paths, function/type/field names, API/CLI commands, JSON keys, original error text, and direct quotations in their original language."
-
 # Iterative fast gate: cheap/fast Muse + Grok. Synthesis also uses free OpenCode.
 [review.panels.dashboard_opencode]
 members = ["muse_fast", "grok_fast"]
@@ -75,7 +67,7 @@ synthesis_backup_model = "opencode/x-preview-f-free"
 # Final deep gate: Ox + Muse + Grok maximum. OpenCode itself has no v0.64
 # reasoning passthrough, so Ox/Muse depth comes from the stronger prompt/time budget.
 [review.panels.dashboard_opencode_high]
-members = ["ox_high", "muse_high", "grok_high"]
+members = ["ox_high", "muse_high", "grok"]
 synthesis_agent = "opencode"
 synthesis_model = "opencode/muse-spark-1.2-contributor-free"
 synthesis_backup_agent = "opencode"
