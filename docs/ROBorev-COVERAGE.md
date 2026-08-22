@@ -58,8 +58,10 @@
 | custom task model | custom model override | JSON CLI | P | 아니요 | model 입력과 argv는 Dashboard가 받거나 저장하지 않음 |
 | custom task reasoning | custom reasoning override | JSON CLI | P | 아니요 | reasoning 입력과 argv는 Dashboard가 받거나 저장하지 않음 |
 | `compact` | dry-run/background compaction | typed CLI stream | P | 아니요 | compact execution은 미지원; same-branch concurrency 경고는 별도 checkpoint |
-| `config list --show-origin` | effective/origin | CLI tabular text | P | 아니요 | version-gated parser 필요 |
-| `config get/set` | common settings | typed CLI | P | 아니요 | unknown key 보존 |
+| `config list --show-origin` | Configuration effective/origin table | version-gated bounded CLI text + fail-closed typed parser | B | 예 | exact v0.64.0 gate; origin allowlist(global/local/default), duplicate/unknown key reject, row/output bound, control char reject; sensitive rows는 upstream masked text 그대로 표시만 |
+| `config get <key> --global/--local` | safe allowlisted post-write verification | version-gated bounded CLI text | B | 예 | editable allowlist 8개 key의 set 검증 범위에서만 사용; "is not set in"은 빈 값 처리; arbitrary key get endpoint 없음 |
+| `config set <key> <value> --global/--local` | Configuration v1 editable allowlist | version-gated typed CLI + single-use preview token + exclusive operation gate | B | 예 | max_workers(global,1..32), review_context_count(0..20), auto_close_passing_reviews, review/refine_reasoning enum, review/fix/refine_min_severity enum; preview→fresh digest/HEAD/branch/dirty/binary 재검증→set→scoped get verification→fresh list refresh; 실패는 unverified 보고(단정 금지); local dirty fail closed |
+| raw/unknown/sensitive config editing | `config set` outside allowlist (allow_unsafe_agents, disable_codex_sandbox, server_addr, *_cmd, credentials, panels/subagents/hooks 등) | 없음 — Dashboard가 key/type/scope/validation을 소유하는 backend allowlist 밖 | N | 아니요 | effective table에는 masked 표시될 수 있으나 mutation surface에서 영구 제외 |
 | `repo list/show/rename/move/delete/merge` | RoboRev repo management | CLI text/API 검토 | P | 아니요 | `repo list --json` 미지원 |
 | `summary --json` | stats | JSON CLI | P | 아니요 | repo/branch/since |
 | `cost --json` | approximate cost | JSON CLI | P | 아니요 | 실제 청구액이 아닌 lower bound |

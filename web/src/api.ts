@@ -30,6 +30,9 @@ export type Installation = {
     rawLog: boolean
     /** Optional because older bootstrap responses predate the stream relay. */
     streamEvents?: boolean
+    /** Optional because older bootstrap responses predate the config surface. */
+    configIntrospection?: boolean
+    configMutation?: boolean
   }
 }
 
@@ -719,4 +722,125 @@ export function jobsFromPayload(value: unknown): ReviewJob[] {
     for (const key of ['jobs', 'reviews', 'items']) if (Array.isArray(object[key])) return object[key] as ReviewJob[]
   }
   return []
+}
+
+export type ConfigValueType = 'integer' | 'boolean' | 'enum'
+export type ConfigScope = 'global' | 'local'
+export type ConfigRowOrigin = 'global' | 'local' | 'default'
+
+/** Backend-owned editable allowlist schema; the browser never invents keys, types, scopes, or bounds. */
+export type ConfigurationSettingSpec = {
+  key: string
+  valueType: ConfigValueType
+  scopes: ConfigScope[]
+  enumValues?: string[]
+  min?: number
+  max?: number
+}
+
+export type ConfigurationRow = { origin: ConfigRowOrigin; key: string; value: string }
+
+export type ConfigurationSnapshot = {
+  repositoryIdentity: string
+  settings: ConfigurationSettingSpec[]
+  rows: ConfigurationRow[]
+}
+
+export type ConfigurationPreview = {
+  previewToken: string
+  key: string
+  scope: string
+  currentValue: string
+  currentOrigin: string
+  newValue: string
+  command: { executable: string; args: string[] }
+  warnings: string[]
+}
+
+export type ConfigurationSetResult = {
+  status: 'succeeded' | 'unverified'
+  message?: string
+  key?: string
+  scope?: string
+  value?: string
+  verifiedValue?: string
+  repositoryDirty?: boolean
+}
+
+const configScopeValues: ConfigScope[] = ['global', 'local']
+const configValueTypeValues: ConfigValueType[] = ['integer', 'boolean', 'enum']
+
+function normalizeConfigSpec(value: unknown): ConfigurationSettingSpec | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (typeof object.key !== 'string' || !/^[a-z0-9_]+$/.test(object.key)) return null
+  if (typeof object.valueType !== 'string' || !configValueTypeValues.includes(object.valueType as ConfigValueType)) return null
+  if (!Array.isArray(object.scopes) || object.scopes.length === 0 || !object.scopes.every(scope => configScopeValues.includes(scope as ConfigScope))) return null
+  const spec: ConfigurationSettingSpec = { key: object.key, valueType: object.valueType as ConfigValueType, scopes: object.scopes as ConfigScope[] }
+  if (object.enumValues !== undefined) {
+    if (!Array.isArray(object.enumValues) || !object.enumValues.every(item => typeof item === 'string')) return null
+    spec.enumValues = object.enumValues as string[]
+  }
+  for (const bound of ['min', 'max'] as const) {
+    if (object[bound] !== undefined) {
+      if (typeof object[bound] !== 'number' || !Number.isSafeInteger(object[bound])) return null
+      spec[bound] = object[bound] as number
+    }
+  }
+  return spec
+}
+
+function normalizeConfigurationRows(value: unknown): ConfigurationRow[] | null {
+  if (!Array.isArray(value)) return null
+  const rows: ConfigurationRow[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (!item || typeof item !== 'object') return null
+    const object = item as Record<string, unknown>
+    if (typeof object.origin !== 'string' || !['global', 'local', 'default'].includes(object.origin)) return null
+    if (typeof object.key !== 'string' || !object.key) return null
+    if (typeof object.value !== 'string') return null
+    if (seen.has(object.key)) return null
+    seen.add(object.key)
+    rows.push({ origin: object.origin as ConfigRowOrigin, key: object.key, value: object.value })
+  }
+  return rows
+}
+
+/** Parse the typed configuration snapshot. Malformed envelopes fail closed. */
+export function normalizeConfigurationSnapshot(value: unknown): ConfigurationSnapshot | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity) return null
+  if (!Array.isArray(object.settings)) return null
+  const settings: ConfigurationSettingSpec[] = []
+  for (const item of object.settings) {
+    const spec = normalizeConfigSpec(item)
+    if (!spec) return null
+    settings.push(spec)
+  }
+  const rows = normalizeConfigurationRows(object.rows)
+  if (rows === null) return null
+  return { repositoryIdentity: object.repositoryIdentity, settings, rows }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+export function normalizeConfigurationPreview(value: unknown): ConfigurationPreview | null {
+  if (!isRecord(value)) return null
+  if (typeof value.previewToken !== 'string' || !value.previewToken) return null
+  if (typeof value.key !== 'string' || typeof value.scope !== 'string' || typeof value.newValue !== 'string') return null
+  if (typeof value.currentValue !== 'string' || typeof value.currentOrigin !== 'string') return null
+  const command = value.command && typeof value.command === 'object' && !Array.isArray(value.command) ? value.command as Record<string, unknown> : null
+  if (!command || typeof command.executable !== 'string' || !Array.isArray(command.args) || !command.args.every(item => typeof item === 'string')) return null
+  if (!Array.isArray(value.warnings) || !value.warnings.every(item => typeof item === 'string')) return null
+  return { previewToken: value.previewToken, key: value.key, scope: value.scope, currentValue: value.currentValue, currentOrigin: value.currentOrigin, newValue: value.newValue, command: { executable: command.executable, args: command.args as string[] }, warnings: value.warnings as string[] }
+}
+
+export function normalizeConfigurationSetResult(value: unknown): ConfigurationSetResult | null {
+  if (!isRecord(value)) return null
+  if (value.status !== 'succeeded' && value.status !== 'unverified') return null
+  return { status: value.status, message: optionalString(value.message), key: optionalString(value.key), scope: optionalString(value.scope), value: optionalString(value.value), verifiedValue: optionalString(value.verifiedValue), repositoryDirty: value.repositoryDirty === true }
 }

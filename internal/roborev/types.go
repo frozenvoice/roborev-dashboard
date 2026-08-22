@@ -27,6 +27,11 @@ type Capabilities struct {
 	// inspection surface. v0.64 analysis enqueue is intentionally not exposed
 	// by the Dashboard because upstream runs those jobs in agentic mode.
 	AnalyzeIntrospection bool `json:"analyzeIntrospection"`
+	// Configuration introspection/mutation cover the bounded, allowlisted
+	// `config list --show-origin` / `config get` / `config set` CLI surface.
+	// Raw or sensitive config editing is intentionally not exposed.
+	ConfigIntrospection bool `json:"configIntrospection"`
+	ConfigMutation      bool `json:"configMutation"`
 }
 
 type JobMetadata struct {

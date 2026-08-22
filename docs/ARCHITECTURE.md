@@ -159,6 +159,28 @@ Analyze manager는 operation history, preview token, confirmation, registry leas
 
 health adapter는 다른 runtime/stream 계약과 동일하게 bounded body, `DisallowUnknownFields`, exactly one JSON value, `healthy`와 version 검증을 유지한다. `$schema`는 missing 또는 임의 JSON string이면 허용하고, present null/non-string은 거부한다. 실제 Analyze enqueue, daemon mutation 또는 LLM smoke는 자동 검증에서 실행하지 않는다.
 
+### Configuration
+
+Configuration은 exact v0.64.0의 `configIntrospection`/`configMutation` capability로만 열리는 bounded config surface다. `config list/get/set`은 filesystem/CLI operation이므로 조회에 daemon online을 요구하지 않고 Dashboard가 조회를 위해 daemon을 시작하지도 않는다.
+
+backend exact argv는 세 가지다.
+
+```text
+list: roborev config list --show-origin
+get:  roborev config get <key> --global|--local   (allowlisted post-write verification만)
+set:  roborev config set <key> <value> --global|--local
+```
+
+`config list --show-origin`은 사람용 tabwriter text이므로 fail-closed parser로 읽는다. row는 `<origin><key><value>` 순서며 origin은 global/local/default allowlist, key는 safe charset, 첫 두 column을 분리한 나머지 전체를 value로 보존해 공백 포함 값을 잃지 않는다. unknown origin, duplicate key, malformed row, control character(NUL/DEL/C0), line/row count bound, total output bound(256 KiB) 위반은 전부 reject한다. sensitive 값은 upstream이 이미 mask한 텍스트 그대로 표시하며 Dashboard는 raw secret을 재조회하거나 unmask하는 endpoint를 제공하지 않는다.
+
+수정 가능한 설정은 backend가 소유하는 typed allowlist(`internal/configuration`)뿐이다: `max_workers`(global only, 1..32), `review_context_count`(0..20), `auto_close_passing_reviews`, `review_reasoning`, `refine_reasoning`(enum), `review_min_severity`, `fix_min_severity`, `refine_min_severity`(빈 값=filtering disabled 포함 enum). integer bound는 upstream generic parser와 별개인 Dashboard safety policy다. `allow_unsafe_agents`, `disable_codex_sandbox`, `server_addr`, `*_cmd` override, credential, panel/subagent/hook/ACP 등은 v1 mutation surface에서 영구 제외며 browser는 key/type/scope/validation을 결정하지 못하고 POST의 arbitrary key는 backend가 거부한다.
+
+flow는 preview → explicit confirmation → set이다. `POST /api/configuration/preview`(same-origin+CSRF)는 fresh repository identity resolve/canonical inspection/local dirty 검사/exact v0.64 binding 후 typed request(integer/boolean/enum JSON)를 canonical CLI string으로 변환하고, current effective row와 snapshot digest(SHA-256 of parsed rows)를 계산해 single-use random token에 bind한다(browser에는 opaque token만 전달). response는 exact executable+argv preview와 warning codes(local: `.roborev.toml` 수정/tracked 시 dirty/TOML normalize, global: normalize)를 담는다.
+
+`POST /api/configuration/set`은 token 소비(single-use, TTL) 뒤 exclusive operation gate(AcquireFix)와 local scope repository lease를 잡고 identity/path/head/branch/dirty/binary generation/snapshot digest를 모두 fresh 재검증한다. 하나라도 다르면 stale로 reject하고 RoboRev를 실행하지 않는다. `config set` 성공만으로 끝내지 않고 scoped `config get <key>` readback이 요청 canonical value와 일치하는지 확인한 뒤 merged `config list`를 fresh 실행해 응답에 담는다. post-start failure(timeout/nonzero/readback 불일치/list 실패)는 "변경되지 않았다"고 단정하지 않고 `status=unverified` 결과로 보고하며 자동 rollback하지 않는다. local 변경 성공 후 fresh inspection으로 dirty 상태를 UI에 안내하고 commit/revert는 사용자 몫이다.
+
+GET `/api/configuration`과 preview/set authorization은 Analyze/SSE와 동일한 strict browser read / same-origin+CSRF 정책을 공유하며 authorization 실패 시 process를 시작하기 전에 거부한다. frontend는 generation counter로 repo switch 시 stale snapshot을 폐기하고, draft 편집이 preview를 무효화하며, confirm double click이 정확히 한 POST가 되게 보장하고, locale 전환으로 config subprocess를 재실행하지 않는다.
+
 ## 확장 원칙
 
 각 RoboRev 기능은 service method, typed request, command builder, capability, HTTP route, confirmation 정책과 테스트를 함께 추가한다. CLI help에서 확인되지 않은 flag를 추측해 만들지 않는다. 중요한 변경은 이 문서와 coverage matrix를 함께 갱신한다.

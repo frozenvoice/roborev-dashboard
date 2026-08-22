@@ -45,6 +45,10 @@ type Server struct {
 	AllowedHost string
 	csrfToken   string
 	mux         *http.ServeMux
+	// configPreviews holds single-use, server-side configuration preview
+	// bindings. The browser only ever receives the opaque token; every bound
+	// field is revalidated fresh before a config set executes.
+	configPreviews *configPreviewStore
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -122,7 +126,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -204,6 +208,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
+	s.mux.HandleFunc("GET /api/configuration", s.configurationSnapshot)
+	s.mux.HandleFunc("POST /api/configuration/preview", s.mutationAuth(s.configurationPreview))
+	s.mux.HandleFunc("POST /api/configuration/set", s.mutationAuth(s.configurationSet))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))
 	s.mux.HandleFunc("GET /api/tasks/preview", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "task preview requires POST", "method")
