@@ -185,7 +185,7 @@ GET `/api/configuration`과 preview/set authorization은 Analyze/SSE와 동일�
 
 Stats v1은 현재 선택된 registered repository 하나의 read-only aggregate workspace다. exact v0.64.0의 `summaryStats`/`costStats` capability와 already-online healthy daemon이 모두 확인될 때만 동작하며 Dashboard가 daemon을 자동 시작하거나 재시도 polling을 만들지 않는다. Browser는 opaque `repositoryIdentity`, allowlisted window(`24h`, `7d`, `30d`, `90d`), semantic branch scope(`all`, `current`)만 전송한다. raw path, branch name, arbitrary since expression과 all-repositories aggregate는 지원하지 않는다.
 
-backend는 strict browser read authorization을 query/registry/process보다 먼저 적용한다. `all` scope는 identity를 registered canonical root로 resolve하고, `current`는 fresh repository inspection으로 canonical root와 authoritative branch를 다시 얻는다. detached/empty branch는 fail closed한다. exact typed argv는 다음과 같으며 shell을 사용하지 않는다.
+backend는 strict browser read authorization을 query/registry/process보다 먼저 적용한다. `all`과 `current` scope 모두 fresh repository inspection으로 등록된 identity가 여전히 같은 canonical root를 가리키는지 다시 검증하고, `current`는 여기서 authoritative branch도 얻는다. canonical root drift와 detached/empty current branch는 fail closed한다. exact typed argv는 다음과 같으며 shell을 사용하지 않는다.
 
 ```text
 summary all:     roborev summary --repo <canonical-root> --since <window> --json

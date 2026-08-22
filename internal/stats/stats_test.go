@@ -57,6 +57,21 @@ func TestParseSummaryAcceptsZeroDenominatorRates(t *testing.T) {
 	}
 }
 
+func TestParseSummaryAllowsMutuallyExclusiveCompletedStatuses(t *testing.T) {
+	completed := `"overview":{"total":3,"queued":0,"running":0,"done":1,"failed":0,"canceled":0,"applied":1,"rebased":1}`
+	accepted := strings.Replace(validSummaryJSON, `"overview":{"total":4,"queued":1,"running":1,"done":1,"failed":1,"canceled":0,"applied":0,"rebased":0}`, completed, 1)
+	if parsed, err := ParseSummary(accepted); err != nil || parsed.Overview.Total != 3 || parsed.Overview.Done != 1 || parsed.Overview.Applied != 1 || parsed.Overview.Rebased != 1 {
+		t.Fatalf("mutually exclusive completed statuses rejected: %+v %v", parsed, err)
+	}
+	// done/applied/rebased are mutually exclusive status buckets, so their
+	// individual counts may add up to total without violating the invariant.
+	overflow := `"overview":{"total":1,"queued":0,"running":0,"done":1,"failed":0,"canceled":0,"applied":1,"rebased":0}`
+	rejected := strings.Replace(validSummaryJSON, `"overview":{"total":4,"queued":1,"running":1,"done":1,"failed":1,"canceled":0,"applied":0,"rebased":0}`, overflow, 1)
+	if _, err := ParseSummary(rejected); err == nil {
+		t.Fatal("overlapping overview status counts were accepted")
+	}
+}
+
 func TestParseSummaryRejectsMalformedAndUnsafeShapes(t *testing.T) {
 	cases := []struct {
 		name string

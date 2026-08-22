@@ -58,6 +58,13 @@ func statsHealthServer(healthy bool, version string) *httptest.Server {
 	}))
 }
 
+func statsHealthBodyServer(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
 func (r *statsRecordingRunner) snapshot() []proc.Command {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -132,10 +139,46 @@ func TestClientStatsRejectsUnsupportedAndOfflineBeforeStatsCommand(t *testing.T)
 	if _, err := client.Cost(context.Background(), "repo", ""); err == nil {
 		t.Fatal("offline daemon was accepted")
 	}
+	if _, err := client.Cost(context.Background(), "repo", ""); !errors.Is(err, ErrStatsOffline) {
+		t.Fatalf("offline error=%v, want ErrStatsOffline", err)
+	}
 	for _, command := range offline.snapshot() {
 		if len(command.Args) > 0 && command.Args[0] == "cost" {
 			t.Fatal("cost command ran while daemon was offline")
 		}
+	}
+}
+
+func TestClientStatsPreservesCancellationAndHealthProtocolErrors(t *testing.T) {
+	malformedHealth := statsHealthBodyServer(`{"healthy":true,"version":"v0.64.0","unexpected":true}`)
+	defer malformedHealth.Close()
+	malformedRunner := &statsRecordingRunner{version: "v0.64.0"}
+	malformedClient, err := NewClient("roborev", malformedRunner, malformedHealth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := malformedClient.Summary(context.Background(), "repo", "", "7d"); err == nil || errors.Is(err, ErrStatsOffline) {
+		t.Fatalf("malformed health error=%v, wanted non-offline protocol error", err)
+	}
+	for _, command := range malformedRunner.snapshot() {
+		if len(command.Args) > 0 && command.Args[0] == "summary" {
+			t.Fatal("summary command ran after malformed health")
+		}
+	}
+	canceledRunner := &statsRecordingRunner{version: "v0.64.0"}
+	canceledClient, err := NewClient("roborev", canceledRunner, "127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := canceledClient.Summary(ctx, "repo", "", "7d"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled error=%v, want context.Canceled", err)
+	}
+	deadlineCtx, deadlineCancel := context.WithTimeout(context.Background(), 0)
+	defer deadlineCancel()
+	if _, err := canceledClient.Summary(deadlineCtx, "repo", "", "7d"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline error=%v, want context.DeadlineExceeded", err)
 	}
 }
 

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { StatsInsights } from './StatsInsights'
@@ -48,6 +48,13 @@ describe('StatsInsights', () => {
     expect(calls.some(path => path.includes('window=7d') && path.includes('branchScope=all'))).toBe(true)
   })
 
+  it('sums mutually exclusive done, applied, and rebased statuses for Completed', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).includes('/cost?') ? response(cost) : response({ ...summary, summary: { ...summary.summary, overview: { ...summary.summary.overview, total: 3, done: 1, applied: 1, rebased: 1 } } })))
+    renderStats()
+    await screen.findByText('codex')
+    expect(within(screen.getByText('Completed').parentElement as HTMLElement).getByText('3')).toBeInTheDocument()
+  })
+
   it('changes summary windows, reloads both for branch scope, and refreshes explicitly', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { const path = String(input); calls.push(path); const branch = path.includes('branchScope=current') ? 'current' : 'all'; const window = (path.match(/window=([^&]+)/)?.[1] ?? '7d') as '24h' | '7d' | '30d' | '90d'; return path.includes('/cost?') ? response({ ...cost, branchScope: branch }) : response({ ...summary, window, branchScope: branch }) }))
@@ -83,6 +90,10 @@ describe('StatsInsights', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
     expect(await screen.findByText('summary unavailable')).toBeInTheDocument()
     expect(screen.getAllByText('$0.00').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('heading', { name: 'Duration' })).not.toBeInTheDocument()
+    expect(screen.queryByText('No data reported.')).not.toBeInTheDocument()
+    expect(screen.queryByText('No failure categories reported.')).not.toBeInTheDocument()
+    expect(screen.queryByText('—')).not.toBeInTheDocument()
     summaryFails = false
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.queryByText('summary unavailable')).not.toBeInTheDocument())
@@ -110,6 +121,36 @@ describe('StatsInsights', () => {
     renderStats()
     expect((await screen.findAllByText('No eligible cost-reporting jobs are in this scope yet.')).length).toBe(2)
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Some eligible jobs did not report cost; actual spend may be higher than this lower bound.')).not.toBeInTheDocument()
+  })
+
+  it('shows reported free cost without empty or incomplete warnings', async () => {
+    const completeSummary = { ...summary, summary: { ...summary.summary, cost: { total_usd: 0, jobs_with_cost: 7, jobs_total: 7, complete: true } } }
+    const completeCost = { ...cost, cost: { total_usd: 0, jobs_with_cost: 7, jobs_total: 7, complete: true } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input).includes('/cost?') ? response(completeCost) : response(completeSummary)))
+    renderStats()
+    await screen.findByText('codex')
+    expect(screen.getAllByText('$0.00').length).toBeGreaterThan(0)
+    expect(screen.queryByText('No eligible cost-reporting jobs are in this scope yet.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Some eligible jobs did not report cost; actual spend may be higher than this lower bound.')).not.toBeInTheDocument()
+  })
+
+  it('disables controls while suspended without refetching on suspend or resume', async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/cost?') ? response(cost) : response(summary))
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = renderStats()
+    await screen.findByText('codex')
+    const count = fetchMock.mock.calls.length
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning suspended /></I18nProvider>)
+    expect(screen.getByRole('combobox', { name: 'Window' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Branch scope' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled()
+    expect(fetchMock.mock.calls.length).toBe(count)
+    rerender(<I18nProvider><StatsInsights selectedRepositoryIdentity={identity} capabilities={capabilities} daemonRunning /></I18nProvider>)
+    expect(screen.getByRole('combobox', { name: 'Window' })).toBeEnabled()
+    expect(screen.getByRole('combobox', { name: 'Branch scope' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+    expect(fetchMock.mock.calls.length).toBe(count)
   })
 
   it('discards a stale 7d summary after switching to 30d', async () => {

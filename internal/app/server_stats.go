@@ -130,14 +130,12 @@ func parseStatsQuery(w http.ResponseWriter, r *http.Request, summary bool) (iden
 }
 
 func (s *Server) statsRepositoryScope(w http.ResponseWriter, ctx context.Context, identity, branchScope string) (gitx.Repository, string, bool) {
-	var repo gitx.Repository
-	var err error
+	repo, err := s.Registry.InspectIdentity(ctx, identity)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
+		return gitx.Repository{}, "", false
+	}
 	if branchScope == statsScopeCurrent {
-		repo, err = s.Registry.InspectIdentity(ctx, identity)
-		if err != nil {
-			writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
-			return gitx.Repository{}, "", false
-		}
 		branch := strings.TrimSpace(repo.Branch)
 		if branch == "" || strings.EqualFold(branch, "detached") || strings.EqualFold(branch, "head") {
 			writeError(w, http.StatusConflict, "current branch is unavailable", "branch")
@@ -145,12 +143,7 @@ func (s *Server) statsRepositoryScope(w http.ResponseWriter, ctx context.Context
 		}
 		return repo, branch, true
 	}
-	path, err := s.Registry.ResolveIdentity(identity)
-	if err != nil {
-		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
-		return gitx.Repository{}, "", false
-	}
-	return gitx.Repository{Path: path}, "", true
+	return repo, "", true
 }
 
 func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summary bool) (roborev.StatsService, bool) {
@@ -167,6 +160,10 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 		Running bool `json:"running"`
 	}
 	if len(installation.Status) == 0 || json.Unmarshal(installation.Status, &status) != nil || !status.Running {
+		if statsInstallationHealthMalformed(installation) {
+			writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
+			return nil, false
+		}
 		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be online.", "stats")
 		return nil, false
 	}
@@ -176,6 +173,11 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 		return nil, false
 	}
 	return service, true
+}
+
+func statsInstallationHealthMalformed(installation roborev.Installation) bool {
+	errorText := strings.ToLower(installation.Error)
+	return strings.Contains(errorText, "malformed") || strings.Contains(errorText, "health returned") || strings.Contains(errorText, "health endpoint returned")
 }
 
 func writeStatsError(w http.ResponseWriter, err error) {

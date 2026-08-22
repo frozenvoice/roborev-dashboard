@@ -502,6 +502,8 @@ func validateSummaryValues(summary Summary) error {
 			return fmt.Errorf("overview.%s exceeds total", name)
 		}
 	}
+	// v0.64 uses mutually exclusive review_jobs.status values for done,
+	// applied, and rebased; the CLI's completed count is their sum.
 	if summary.Overview.Queued+summary.Overview.Running+summary.Overview.Done+summary.Overview.Failed+summary.Overview.Canceled+summary.Overview.Applied+summary.Overview.Rebased > summary.Overview.Total {
 		return errors.New("overview status counts exceed total")
 	}

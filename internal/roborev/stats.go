@@ -173,6 +173,9 @@ func (c *Client) statsPreflight(ctx context.Context, summary bool) (string, uint
 	}
 	version, err := c.detectVersion(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", 0, ctx.Err()
+		}
 		return "", 0, ErrUnsupportedStats
 	}
 	capability := capabilities(version).CostStats
@@ -190,7 +193,7 @@ func (c *Client) statsPreflight(ctx context.Context, summary bool) (string, uint
 		if isUnreachableHealthError(err) {
 			return "", 0, ErrStatsOffline
 		}
-		return "", 0, ErrStatsOffline
+		return "", 0, err
 	}
 	if !health.Healthy {
 		return "", 0, ErrStatsUnhealthy

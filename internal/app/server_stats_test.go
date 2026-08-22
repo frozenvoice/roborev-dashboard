@@ -76,6 +76,18 @@ func (i *statsCountingInspector) Inspect(_ context.Context, path string) (gitx.R
 	return gitx.Repository{Path: path, Branch: "main", Head: "abc"}, nil
 }
 
+type mismatchStatsInspector struct {
+	calls int
+}
+
+func (i *mismatchStatsInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	i.calls++
+	if i.calls > 1 {
+		return gitx.Repository{Path: `E:\other`, Branch: "main", Head: "abc"}, nil
+	}
+	return gitx.Repository{Path: path, Branch: "main", Head: "abc"}, nil
+}
+
 func setupStatsServer(t *testing.T, service *statsHTTPService, inspector RepositoryInspector) (*Server, string) {
 	t.Helper()
 	if inspector == nil {
@@ -118,7 +130,7 @@ func TestStatsSummaryUsesOpaqueIdentityAndExactScope(t *testing.T) {
 	if response.Code != http.StatusOK || service.summaryCalls != 1 {
 		t.Fatalf("status=%d summaryCalls=%d body=%s", response.Code, service.summaryCalls, response.Body.String())
 	}
-	if inspector.calls != 0 || service.lastRepo != `E:\한글 프로젝트\repo` || service.lastBranch != "" || service.lastWindow != "30d" {
+	if inspector.calls != 1 || service.lastRepo != `E:\한글 프로젝트\repo` || service.lastBranch != "" || service.lastWindow != "30d" {
 		t.Fatalf("scope repo=%q branch=%q window=%q inspections=%d", service.lastRepo, service.lastBranch, service.lastWindow, inspector.calls)
 	}
 	if !strings.Contains(response.Body.String(), `"branchScope":"all"`) || !strings.Contains(response.Body.String(), `"window":"30d"`) {
@@ -145,6 +157,26 @@ func TestStatsCurrentBranchFreshInspectionAndDetachedRejection(t *testing.T) {
 	detachedServer.Handler().ServeHTTP(detachedResponse, nativeStatsRequest("/api/stats/cost?repositoryIdentity="+statsIdentityQuery(detachedIdentity)+"&branchScope=current"))
 	if detachedResponse.Code != http.StatusConflict || service.costCalls != 0 {
 		t.Fatalf("detached status=%d costCalls=%d", detachedResponse.Code, service.costCalls)
+	}
+}
+
+func TestStatsRejectsInspectionRootMismatchBeforeServiceForAllAndCurrent(t *testing.T) {
+	service := &statsHTTPService{version: "v0.64.0", summaryCaps: true, costCaps: true, running: true}
+	inspector := &mismatchStatsInspector{}
+	server, identity := setupStatsServer(t, service, inspector)
+	cases := []string{
+		"/api/stats/summary?repositoryIdentity=" + statsIdentityQuery(identity) + "&window=7d&branchScope=all",
+		"/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=all",
+		"/api/stats/summary?repositoryIdentity=" + statsIdentityQuery(identity) + "&window=7d&branchScope=current",
+		"/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=current",
+	}
+	for _, target := range cases {
+		service.summaryCalls, service.costCalls = 0, 0
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, nativeStatsRequest(target))
+		if response.Code != http.StatusForbidden || service.summaryCalls != 0 || service.costCalls != 0 {
+			t.Fatalf("target=%s status=%d summaryCalls=%d costCalls=%d body=%s", target, response.Code, service.summaryCalls, service.costCalls, response.Body.String())
+		}
 	}
 }
 
@@ -269,5 +301,17 @@ func TestStatsCapabilityDaemonAndErrorsAreIndependentAndStable(t *testing.T) {
 	server.Handler().ServeHTTP(response, nativeStatsRequest("/api/stats/summary?repositoryIdentity="+statsIdentityQuery(identity)+"&window=7d&branchScope=all"))
 	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "secret stderr") {
 		t.Fatalf("stable error status=%d body=%s", response.Code, response.Body.String())
+	}
+	service.summaryErr = roborev.ErrStatsOffline
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, nativeStatsRequest("/api/stats/summary?repositoryIdentity="+statsIdentityQuery(identity)+"&window=7d&branchScope=all"))
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "offline") {
+		t.Fatalf("offline status=%d body=%s", response.Code, response.Body.String())
+	}
+	service.summaryErr = errors.New("malformed RoboRev daemon health: secret protocol detail")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, nativeStatsRequest("/api/stats/summary?repositoryIdentity="+statsIdentityQuery(identity)+"&window=7d&branchScope=all"))
+	if response.Code != http.StatusBadGateway || strings.Contains(response.Body.String(), "secret protocol detail") {
+		t.Fatalf("malformed health status=%d body=%s", response.Code, response.Body.String())
 	}
 }
