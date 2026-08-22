@@ -18,22 +18,24 @@ import (
 
 type statsHTTPService struct {
 	fakeService
-	version         string
-	summaryCaps     bool
-	costCaps        bool
-	running         bool
-	healthState     roborev.DaemonHealthProbeState
-	healthCondition roborev.DaemonHealthCondition
-	healthError     string
-	status          json.RawMessage
-	installations   int
-	summaryCalls    int
-	costCalls       int
-	lastRepo        string
-	lastBranch      string
-	lastWindow      string
-	summaryErr      error
-	costErr         error
+	version          string
+	summaryCaps      bool
+	costCaps         bool
+	running          bool
+	healthState      roborev.DaemonHealthProbeState
+	healthCondition  roborev.DaemonHealthCondition
+	daemonVersion    string
+	daemonVersionSet bool
+	healthError      string
+	status           json.RawMessage
+	installations    int
+	summaryCalls     int
+	costCalls        int
+	lastRepo         string
+	lastBranch       string
+	lastWindow       string
+	summaryErr       error
+	costErr          error
 }
 
 type statsHealthProductionRunner struct {
@@ -70,6 +72,10 @@ func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 			return json.RawMessage(`{"running":false}`)
 		}()
 	}
+	daemonVersion := s.daemonVersion
+	if !s.daemonVersionSet {
+		daemonVersion = s.version
+	}
 	return roborev.Installation{
 		Installed: s.version != "",
 		Version:   s.version,
@@ -81,6 +87,7 @@ func (s *statsHTTPService) Installation(context.Context) roborev.Installation {
 		Error:           s.healthError,
 		DaemonHealth:    healthState,
 		DaemonCondition: healthCondition,
+		DaemonVersion:   daemonVersion,
 	}
 }
 
@@ -358,21 +365,28 @@ func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testin
 	costTarget := "/api/stats/cost?repositoryIdentity=" + statsIdentityQuery(identity) + "&branchScope=all"
 
 	for _, test := range []struct {
-		name      string
-		state     roborev.DaemonHealthProbeState
-		condition roborev.DaemonHealthCondition
-		error     string
-		want      int
+		name             string
+		state            roborev.DaemonHealthProbeState
+		condition        roborev.DaemonHealthCondition
+		daemonVersion    string
+		setDaemonVersion bool
+		error            string
+		want             int
 	}{
 		{name: "offline state wins over malformed-looking error", state: roborev.DaemonHealthOffline, condition: roborev.DaemonConditionUnknown, error: "malformed RoboRev daemon health: offline", want: http.StatusServiceUnavailable},
 		{name: "invalid state ignores banana error", state: roborev.DaemonHealthInvalid, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
 		{name: "unknown state is unavailable", state: roborev.DaemonHealthUnknown, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
 		{name: "online unknown condition is unavailable", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionUnknown, error: "banana", want: http.StatusBadGateway},
 		{name: "unhealthy condition is unavailable", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionUnhealthy, error: "banana", want: http.StatusServiceUnavailable},
+		{name: "healthy missing daemon version", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, setDaemonVersion: true, daemonVersion: "", error: "banana", want: http.StatusServiceUnavailable},
+		{name: "healthy invalid daemon version", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, setDaemonVersion: true, daemonVersion: "0.64.0", error: "banana", want: http.StatusServiceUnavailable},
+		{name: "healthy mismatched daemon version", state: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, setDaemonVersion: true, daemonVersion: "v0.63.0", error: "banana", want: http.StatusServiceUnavailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service.healthState = test.state
 			service.healthCondition = test.condition
+			service.daemonVersion = test.daemonVersion
+			service.daemonVersionSet = test.setDaemonVersion
 			service.healthError = test.error
 			for _, target := range []string{summaryTarget, costTarget} {
 				response := httptest.NewRecorder()
@@ -388,6 +402,7 @@ func TestStatsTypedHealthStateControlsPreflightWithoutErrorTextParsing(t *testin
 	// the probe says the daemon is reachable and healthy.
 	service.healthState = roborev.DaemonHealthOnline
 	service.healthCondition = roborev.DaemonConditionHealthy
+	service.daemonVersionSet = false
 	service.healthError = "banana"
 	service.status = json.RawMessage(`{"running":`)
 	service.running = true

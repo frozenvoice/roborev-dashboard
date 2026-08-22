@@ -62,6 +62,17 @@ describe('localized confirmation surfaces', () => {
     expect(screen.getByRole('status')).toHaveTextContent('1.0 KiB')
   })
 
+  it('localizes daemon health attention and retry copy', async () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'ko')
+    const state: SetupState = { ...setupState, phase: 'failed', status: 'failed', installed: true, daemonRunning: true, canRetry: true, canInstall: false, installAvailable: false, failureCode: 'daemon_version_mismatch' }
+    render(withProvider(<><LanguageSelector /><SetupBanner state={state} onRetry={vi.fn()} /></>))
+    expect(screen.getByText('RoboRev 데몬 확인 필요')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '데몬 상태 다시 확인' })).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByLabelText('언어 선택'), 'en')
+    expect(screen.getByText('RoboRev daemon needs attention')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry daemon health' })).toBeInTheDocument()
+  })
+
   it('formats valid agent check times by locale and preserves invalid raw timestamps', () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
     const agents = { repositoryIdentity: 'repo-1', configured: [

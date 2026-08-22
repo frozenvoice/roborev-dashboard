@@ -10,6 +10,7 @@ export type DaemonAction = (action: 'start' | 'stop' | 'restart') => Promise<voi
 const SOURCE_URL = 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0'
 const SOURCE_REPOSITORY = 'https://github.com/kenn-io/roborev'
 const nonRetryableFailureCodes = new Set(['checksum_mismatch', 'archive_invalid', 'archive_corrupt', 'integrity_failure', 'unsafe_redirect', 'unsafe_archive', 'explicit_override', 'existing_binary'])
+const daemonHealthFailureCodes = new Set(['daemon_unhealthy', 'daemon_version_missing', 'daemon_version_invalid', 'daemon_version_mismatch', 'daemon_health_invalid'])
 
 function isOfficialSource(value?: string) {
   if (!value) return false
@@ -70,6 +71,7 @@ export function SetupBanner({ state, busy = false, onInstall, onRetry, onStartDa
   const blocked = state.blocked || state.phase === 'blocked'
   const unsupported = state.phase === 'unsupported' || (state.installed && state.compatible === false)
   const checksumFailure = state.failureCode === 'checksum_mismatch' || state.failureCode === 'archive_invalid' || state.failureCode === 'archive_corrupt'
+  const daemonHealthFailure = state.failureCode !== undefined && daemonHealthFailureCodes.has(state.failureCode)
   const retryAllowed = state.canRetry && !nonRetryableFailureCodes.has(state.failureCode || '')
   let title = ''
   let message = ''
@@ -89,15 +91,16 @@ export function SetupBanner({ state, busy = false, onInstall, onRetry, onStartDa
     message = t('setup.unsupportedBody', { version: state.recommendedVersion })
     icon = <Info />
   } else if (state.phase === 'failed') {
-    title = checksumFailure ? t('setup.installRejected') : t('setup.setupFailed')
-    message = state.failureCode ? t('setup.failureCode', { code: state.failureCode }) : t('setup.operationIncomplete')
+    title = daemonHealthFailure ? t('setup.daemonNeedsAttention') : checksumFailure ? t('setup.installRejected') : t('setup.setupFailed')
+    message = daemonHealthFailure ? t('setup.daemonHealthFailure', { code: state.failureCode || 'unknown' }) : state.failureCode ? t('setup.failureCode', { code: state.failureCode }) : t('setup.operationIncomplete')
     icon = <ShieldAlert />
-    if (retryAllowed && onRetry) action = <button className="button" disabled={busy} onClick={() => void onRetry()}>{t('setup.retryInstallation')}</button>
+    if (daemonHealthFailure && state.canRetry && onRetry) action = <button className="button" disabled={busy} onClick={() => void onRetry()}>{t('setup.retryDaemonHealth')}</button>
+    if (!daemonHealthFailure && retryAllowed && onRetry) action = <button className="button" disabled={busy} onClick={() => void onRetry()}>{t('setup.retryInstallation')}</button>
     // A failed install has already published the verified binary. Retry via
     // the setup manager so it can start/health-check that binding without a
     // second download; the direct daemon endpoint is for an ordinary stopped
     // daemon only.
-    if (state.canStartDaemon && onRetry) action = <button className="button" disabled={busy} onClick={() => void onRetry()}>{t('setup.retryStart')}</button>
+    if (!daemonHealthFailure && state.canStartDaemon && onRetry) action = <button className="button" disabled={busy} onClick={() => void onRetry()}>{t('setup.retryStart')}</button>
   } else if (state.phase === 'canceled') {
     title = t('setup.setupCanceled')
     message = t('setup.canceledBody')
@@ -327,11 +330,12 @@ export function Setup({ state, busy = false, onInstall, onRetry, onStartDaemon, 
   const sourceURL = state?.sourceURL || SOURCE_URL
   const recommended = state?.recommendedVersion || 'v0.64.0'
   const installable = Boolean(state && !state.installed && !state.operationActive && (state.installAvailable || state.canInstall) && onInstall)
+  const healthyReady = state?.phase === 'ready' && state.daemonRunning
   return <section className="cards-page setup-page">
     <header className="section-heading"><div><span className="eyebrow">{t('setup.runtimeHealth')}</span><h1>{t('setup.heading')}</h1><p>{t('setup.authNotice')}</p></div></header>
-    {state && <SetupBanner state={state} busy={busy || actionBusy} onInstall={() => { setConfirming(true); return Promise.resolve() }} onRetry={() => runAction(onRetry)} />}
+    {state && <SetupBanner state={state} busy={busy || actionBusy} onInstall={() => { setConfirming(true); return Promise.resolve() }} onRetry={onRetry ? () => runAction(onRetry) : undefined} onStartDaemon={onStartDaemon ? () => runAction(onStartDaemon) : undefined} />}
     {!state && <section className="setup-card"><Server /><div><h3>{t('setup.setupUnavailable')}</h3><p>{t('setup.setupResponseInvalid')}</p></div></section>}
-    {state && <article className="setup-card setup-detail-card"><Server /><div><h3>RoboRev {state.version || t('setup.versionNotDetected')}</h3><code>{state.binaryPath || t('setup.pathUnavailable')}</code><p>{state.daemonRunning ? t('setup.daemonRunningDetail') : state.installed ? t('setup.daemonStoppedDetail') : t('setup.daemonNotInstalledDetail')}</p></div><span className={`status ${state.daemonRunning ? 'status-pass' : state.installed ? 'status-queued' : 'status-failed'}`}><span className="status-dot" />{state.daemonRunning ? t('status.ready') : state.installed ? t('status.stopped') : t('status.setupRequired')}</span></article>}
+    {state && <article className="setup-card setup-detail-card"><Server /><div><h3>RoboRev {state.version || t('setup.versionNotDetected')}</h3><code>{state.binaryPath || t('setup.pathUnavailable')}</code><p>{healthyReady ? t('setup.daemonRunningDetail') : state.daemonRunning ? t('setup.daemonNeedsAttentionDetail') : state.installed ? t('setup.daemonStoppedDetail') : t('setup.daemonNotInstalledDetail')}</p></div><span className={`status ${healthyReady ? 'status-pass' : state.daemonRunning ? 'status-failed' : state.installed ? 'status-queued' : 'status-failed'}`}><span className="status-dot" />{healthyReady ? t('status.ready') : state.daemonRunning ? t('status.error') : state.installed ? t('status.stopped') : t('status.setupRequired')}</span></article>}
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
     <ConfiguredReviewAgents agents={agents} loading={agentsLoading} error={agentsError} busy={busy || actionBusy} onRefresh={onRefreshAgents} onCheck={onCheckAgent} />
     {state && <section className="setup-facts" aria-label={t('setup.verifiedInstallation')}><h2>{t('setup.verifiedInstallation')}</h2><dl>

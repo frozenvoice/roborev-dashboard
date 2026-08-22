@@ -267,6 +267,7 @@ func (c *Client) Installation(ctx context.Context) Installation {
 	if installation.Capabilities.ReviewEnqueueAPI {
 		if health, healthErr := c.healthStatus(ctx); healthErr == nil {
 			installation.DaemonHealth = DaemonHealthOnline
+			installation.DaemonVersion = health.Version
 			if health.Healthy {
 				installation.DaemonCondition = DaemonConditionHealthy
 			} else {

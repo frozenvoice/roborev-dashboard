@@ -53,13 +53,27 @@ func Manifest064() Manifest { return manifest064 }
 var canonicalVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
 func ValidateVersionIdentity(name, version string) error {
-	if name != manifest064.Name || !canonicalVersion.MatchString(version) {
+	if name != manifest064.Name || !IsCanonicalVersion(version) {
 		return fmt.Errorf("%w: expected name %q and canonical version", ErrUnsupportedVersion, manifest064.Name)
 	}
 	return nil
 }
 
-func IsSupportedVersion(version string) bool { return version == manifest064.Version }
+// IsCanonicalVersion accepts only the machine-readable vMAJOR.MINOR.PATCH
+// spelling. It deliberately does not trim whitespace or accept a leading or
+// trailing decoration; callers use the exact value returned by RoboRev.
+func IsCanonicalVersion(version string) bool { return canonicalVersion.MatchString(version) }
+
+// IsMatchingSupportedVersion requires both sides to be the pinned release and
+// byte-for-byte equal. This is used whenever a CLI process and daemon share a
+// version-gated contract.
+func IsMatchingSupportedVersion(cliVersion, daemonVersion string) bool {
+	return IsSupportedVersion(cliVersion) && IsSupportedVersion(daemonVersion) && cliVersion == daemonVersion
+}
+
+func IsSupportedVersion(version string) bool {
+	return IsCanonicalVersion(version) && version == manifest064.Version
+}
 
 func isPinnedManifest(value Manifest) bool { return value == manifest064 }
 

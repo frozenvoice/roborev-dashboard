@@ -120,6 +120,7 @@ func TestOpenStreamRequiresExactMatchingSupportedDaemonVersion(t *testing.T) {
 		{name: "daemon mismatch", cliVersion: "v0.64.0", daemonVersion: "v0.65.0", healthy: true, want: ErrStreamUnsupported},
 		{name: "daemon empty", cliVersion: "v0.64.0", daemonVersion: "", healthy: true, want: ErrStreamUnsupported},
 		{name: "daemon malformed", cliVersion: "v0.64.0", daemonVersion: "64", healthy: true, want: ErrStreamUnsupported},
+		{name: "daemon whitespace is not canonical", cliVersion: "v0.64.0", daemonVersion: " v0.64.0 ", healthy: true, want: ErrStreamUnsupported},
 		{name: "daemon unhealthy", cliVersion: "v0.64.0", daemonVersion: "v0.64.0", healthy: false, want: ErrStreamUnhealthy},
 	}
 	for _, testCase := range cases {

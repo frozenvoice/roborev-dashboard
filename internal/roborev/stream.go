@@ -42,7 +42,7 @@ func (c *Client) OpenStream(ctx context.Context, repoPath string) (proc.Stream, 
 		return nil, ErrStreamUnsupported
 	}
 	installation := c.Installation(ctx)
-	cliVersion := strings.TrimSpace(installation.Version)
+	cliVersion := installation.Version
 	if !installation.Installed || !installation.Capabilities.StreamEvents || !roborevcompat.IsSupportedVersion(cliVersion) {
 		return nil, fmt.Errorf("%w: %s", ErrStreamUnsupported, installation.Version)
 	}
@@ -59,9 +59,8 @@ func (c *Client) OpenStream(ctx context.Context, repoPath string) (proc.Stream, 
 	if !health.Healthy {
 		return nil, ErrStreamUnhealthy
 	}
-	daemonVersion := strings.TrimSpace(health.Version)
-	if !roborevcompat.IsSupportedVersion(daemonVersion) || daemonVersion != cliVersion {
-		return nil, fmt.Errorf("%w: daemon=%s cli=%s", ErrStreamUnsupported, daemonVersion, cliVersion)
+	if !roborevcompat.IsMatchingSupportedVersion(cliVersion, health.Version) {
+		return nil, fmt.Errorf("%w: daemon=%s cli=%s", ErrStreamUnsupported, health.Version, cliVersion)
 	}
 	binaryNow, _, generationNow := c.snapshot()
 	if generationNow != generation || binaryNow != binary {

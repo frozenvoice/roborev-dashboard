@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -172,7 +173,7 @@ func TestSetupInstallReturnsAcceptedStateAndStatusEndpoint(t *testing.T) {
 func TestSetupInstallHTTPResponseDoesNotCancelAcceptedOperation(t *testing.T) {
 	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 	}))
 	defer health.Close()
 	registry := NewRegistry(fakeInspector{}, "")
@@ -316,7 +317,7 @@ func TestSetupRetryEndpointStartsHealthyExistingDaemonWithoutDownload(t *testing
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 	}))
 	defer health.Close()
 	binary := filepath.Join(t.TempDir(), "roborev.exe")
@@ -379,13 +380,26 @@ func TestSetupRetryEndpointStartsHealthyExistingDaemonWithoutDownload(t *testing
 
 func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 	var healthy atomic.Bool
-	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	healthProbeStarted := make(chan struct{})
+	healthProbeRelease := make(chan struct{})
+	healthProbeCanceled := make(chan struct{})
+	var healthProbeOnce sync.Once
+	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !healthy.Load() {
 			http.Error(w, "daemon stopped", http.StatusServiceUnavailable)
 			return
 		}
+		healthProbeOnce.Do(func() {
+			close(healthProbeStarted)
+			select {
+			case <-healthProbeRelease:
+			case <-r.Context().Done():
+				close(healthProbeCanceled)
+				return
+			}
+		})
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+		_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 	}))
 	defer health.Close()
 	binary := filepath.Join(t.TempDir(), "roborev.exe")
@@ -441,14 +455,18 @@ func TestSetupRetryHTTPResponseDoesNotCancelDaemonRecovery(t *testing.T) {
 	if err := response.Body.Close(); err != nil {
 		t.Fatal(err)
 	}
-	<-runner.started
+	healthy.Store(true)
 	select {
-	case <-runner.canceled:
+	case <-healthProbeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for health-only recovery probe")
+	}
+	select {
+	case <-healthProbeCanceled:
 		t.Fatal("accepted daemon recovery canceled when HTTP request ended")
 	case <-time.After(50 * time.Millisecond):
 	}
-	healthy.Store(true)
-	close(runner.release)
+	close(healthProbeRelease)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		getResponse, getErr := http.Get(httpServer.URL + "/api/setup/roborev")

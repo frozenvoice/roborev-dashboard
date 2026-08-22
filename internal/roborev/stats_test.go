@@ -2,6 +2,7 @@ package roborev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -195,6 +196,7 @@ func TestClientStatsRejectsHealthFailuresOutputBoundsBindingAndIdentity(t *testi
 	}{
 		{name: "unhealthy daemon", health: false, healthVer: "v0.64.0", want: ErrStatsUnhealthy},
 		{name: "daemon version mismatch", health: true, healthVer: "v0.65.0", want: ErrUnsupportedStats},
+		{name: "daemon version whitespace is not canonical", health: true, healthVer: " v0.64.0 ", want: ErrUnsupportedStats},
 		{name: "stdout truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stdoutTruncated = true }},
 		{name: "stderr truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stderrTruncated = true }},
 		{name: "response repository mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) {
@@ -248,10 +250,12 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 		transport http.RoundTripper
 		want      DaemonHealthProbeState
 		condition DaemonHealthCondition
+		daemonVer string
 		running   bool
 	}{
-		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true}`, want: DaemonHealthOnline, condition: DaemonConditionHealthy, running: true},
-		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false}`, want: DaemonHealthOnline, condition: DaemonConditionUnhealthy, running: true},
+		{name: "valid reachable", status: http.StatusOK, body: `{"healthy":true,"version":"v0.64.0"}`, want: DaemonHealthOnline, condition: DaemonConditionHealthy, daemonVer: "v0.64.0", running: true},
+		{name: "valid unhealthy", status: http.StatusOK, body: `{"healthy":false,"version":"v0.64.0"}`, want: DaemonHealthOnline, condition: DaemonConditionUnhealthy, daemonVer: "v0.64.0", running: true},
+		{name: "reachable version is preserved exactly", status: http.StatusOK, body: `{"healthy":true,"version":" v0.64.0 "}`, want: DaemonHealthOnline, condition: DaemonConditionHealthy, daemonVer: " v0.64.0 ", running: true},
 		{name: "HTTP error", status: http.StatusInternalServerError, body: `server error`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
 		{name: "malformed JSON", status: http.StatusOK, body: `{`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
 		{name: "trailing JSON", status: http.StatusOK, body: `{"healthy":true}{}`, want: DaemonHealthInvalid, condition: DaemonConditionUnknown},
@@ -291,6 +295,14 @@ func TestClientInstallationClassifiesStrictHealthProbe(t *testing.T) {
 			}
 			if installation.DaemonCondition != test.condition {
 				t.Fatalf("health condition=%q want %q", installation.DaemonCondition, test.condition)
+			}
+			if installation.DaemonVersion != test.daemonVer {
+				t.Fatalf("daemon version=%q want %q", installation.DaemonVersion, test.daemonVer)
+			}
+			if encoded, err := json.Marshal(installation); err != nil {
+				t.Fatal(err)
+			} else if strings.Contains(string(encoded), "daemonVersion") || strings.Contains(string(encoded), "daemonHealth") || strings.Contains(string(encoded), "daemonCondition") {
+				t.Fatalf("typed daemon fields leaked into installation JSON: %s", encoded)
 			}
 			status := string(installation.Status)
 			wantRunning := `"running":false`

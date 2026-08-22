@@ -198,7 +198,7 @@ func (c *Client) statsPreflight(ctx context.Context, summary bool) (string, uint
 	if !health.Healthy {
 		return "", 0, ErrStatsUnhealthy
 	}
-	if strings.TrimSpace(health.Version) != version || !roborevcompat.IsSupportedVersion(health.Version) {
+	if !roborevcompat.IsMatchingSupportedVersion(version, health.Version) {
 		return "", 0, ErrUnsupportedStats
 	}
 	if !c.bindingUnchanged(binary, generation) {

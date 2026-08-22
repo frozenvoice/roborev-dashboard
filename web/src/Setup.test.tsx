@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { normalizeSetupState, type AgentsResponse, type RuntimeControlState, type SetupState } from './api'
@@ -39,6 +39,45 @@ describe('RoboRev setup', () => {
     rerender(<Setup state={readySetup} agents={configuredAgents} runtimeControl={runningRuntime} onDaemonAction={vi.fn().mockResolvedValue(undefined)} />)
     await userEvent.click(screen.getByRole('button', { name: 'Stop daemon' }))
     expect(document.querySelector('.runtime-command-preview')).toBeInTheDocument()
+  })
+
+  it('shows green Ready only for a ready phase with a running daemon', () => {
+    const { rerender } = render(<Setup state={readySetup} />)
+    const card = document.querySelector('.setup-detail-card') as HTMLElement
+    expect(within(card).getByText('Ready')).toBeInTheDocument()
+    expect(card.querySelector('.status-pass')).toBeInTheDocument()
+    const unhealthy = { ...readySetup, phase: 'failed' as const, status: 'failed' as const, failureCode: 'daemon_version_mismatch', canRetry: true }
+    rerender(<Setup state={unhealthy} onRetry={vi.fn().mockResolvedValue(undefined)} />)
+    expect(within(document.querySelector('.setup-detail-card') as HTMLElement).queryByText('Ready')).not.toBeInTheDocument()
+    expect(document.querySelector('.setup-detail-card .status-failed')).toBeInTheDocument()
+  })
+
+  it.each(['daemon_unhealthy', 'daemon_version_mismatch'])('offers daemon health retry for %s without installation retry', async failureCode => {
+    const retry = vi.fn().mockResolvedValue(undefined)
+    const state = { ...baseState, phase: 'failed' as const, status: 'failed' as const, installed: true, daemonRunning: true, canRetry: true, canInstall: false, installAvailable: false, failureCode }
+    render(<SetupBanner state={state} onRetry={retry} onInstall={vi.fn()} />)
+    expect(screen.getByText('RoboRev daemon needs attention')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry daemon health' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry installation' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry daemon health' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an installed offline daemon on Start daemon', async () => {
+    const start = vi.fn().mockResolvedValue(undefined)
+    const state = { ...baseState, phase: 'ready' as const, status: 'ready' as const, installed: true, daemonRunning: false, canStartDaemon: true, canInstall: false, installAvailable: false }
+    render(<SetupBanner state={state} onStartDaemon={start} onInstall={vi.fn()} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Start daemon' }))
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Retry installation' })).not.toBeInTheDocument()
+  })
+
+  it('keeps installation failures on Retry installation', async () => {
+    const retry = vi.fn().mockResolvedValue(undefined)
+    const state = { ...baseState, phase: 'failed' as const, status: 'failed' as const, canRetry: true, failureCode: 'download_failed' }
+    render(<SetupBanner state={state} onRetry={retry} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Retry installation' }))
+    expect(retry).toHaveBeenCalledTimes(1)
   })
 
   it('does not health-check on render and checks only the confirmed canonical agent', async () => {

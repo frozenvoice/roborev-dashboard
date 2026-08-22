@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -62,7 +63,7 @@ func (f *fakeProber) Installation(context.Context) roborev.Installation {
 	if f.version == "" {
 		return roborev.Installation{Binary: f.binary, Error: f.err, FailureCode: f.failureCode}
 	}
-	return roborev.Installation{Installed: true, Binary: f.binary, Version: f.version, Error: f.err, Status: json.RawMessage(`{"running":true,"known":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy}
+	return roborev.Installation{Installed: true, Binary: f.binary, Version: f.version, Error: f.err, Status: json.RawMessage(`{"running":true,"known":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy, DaemonVersion: f.version}
 }
 
 type fakeInstaller struct {
@@ -97,13 +98,16 @@ type daemonProber struct {
 }
 
 type conditionDaemonProber struct {
-	mu           sync.Mutex
-	binary       string
-	version      string
-	healthyAfter int
-	probes       int
-	starts       int
-	conditions   []roborev.DaemonHealthCondition
+	mu                 sync.Mutex
+	binary             string
+	version            string
+	daemonVersion      string
+	daemonVersionAfter int
+	healthyAfter       int
+	probes             int
+	starts             int
+	rebinds            int
+	conditions         []roborev.DaemonHealthCondition
 }
 
 type typedHealthProber struct {
@@ -120,6 +124,61 @@ func (p *typedHealthProber) Installation(context.Context) roborev.Installation {
 	return p.installation
 }
 
+type refreshSequenceProber struct {
+	mu      sync.Mutex
+	binary  string
+	samples []roborev.Installation
+	gates   []<-chan struct{}
+	started []chan struct{}
+	calls   int
+}
+
+func (p *refreshSequenceProber) BinaryPath() string        { return p.binary }
+func (p *refreshSequenceProber) HasExplicitOverride() bool { return false }
+func (p *refreshSequenceProber) Rebind(_ context.Context, path string) error {
+	p.mu.Lock()
+	p.binary = path
+	p.mu.Unlock()
+	return nil
+}
+func (p *refreshSequenceProber) Installation(ctx context.Context) roborev.Installation {
+	p.mu.Lock()
+	index := p.calls
+	p.calls++
+	var sample roborev.Installation
+	if len(p.samples) > 0 {
+		sample = p.samples[index%len(p.samples)]
+	}
+	var gate <-chan struct{}
+	if index < len(p.gates) {
+		gate = p.gates[index]
+	}
+	var started chan struct{}
+	if index < len(p.started) {
+		started = p.started[index]
+	}
+	p.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+		}
+	}
+	return sample
+}
+
+func awaitSetupSignal(t *testing.T, signal <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deterministic setup probe")
+	}
+}
+
 func (p *conditionDaemonProber) BinaryPath() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -129,6 +188,7 @@ func (p *conditionDaemonProber) HasExplicitOverride() bool { return false }
 func (p *conditionDaemonProber) Rebind(_ context.Context, path string) error {
 	p.mu.Lock()
 	p.binary, p.version = path, "v0.64.0"
+	p.rebinds++
 	p.mu.Unlock()
 	return nil
 }
@@ -139,7 +199,14 @@ func (p *conditionDaemonProber) Installation(context.Context) roborev.Installati
 	if p.version == "" {
 		return roborev.Installation{Binary: p.binary}
 	}
-	installation := roborev.Installation{Installed: true, Binary: p.binary, Version: p.version, Status: json.RawMessage(`{"running":true,"known":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionUnhealthy}
+	daemonVersion := p.daemonVersion
+	if daemonVersion == "" {
+		daemonVersion = p.version
+	}
+	if p.daemonVersionAfter > 0 && p.probes >= p.daemonVersionAfter {
+		daemonVersion = p.version
+	}
+	installation := roborev.Installation{Installed: true, Binary: p.binary, Version: p.version, Status: json.RawMessage(`{"running":true,"known":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionUnhealthy, DaemonVersion: daemonVersion}
 	if p.healthyAfter > 0 && p.probes >= p.healthyAfter {
 		installation.DaemonCondition = roborev.DaemonConditionHealthy
 	}
@@ -174,6 +241,7 @@ func (p *daemonProber) Installation(context.Context) roborev.Installation {
 	if running {
 		installation.DaemonHealth = roborev.DaemonHealthOnline
 		installation.DaemonCondition = roborev.DaemonConditionHealthy
+		installation.DaemonVersion = p.version
 	} else {
 		installation.DaemonHealth = roborev.DaemonHealthOffline
 		installation.DaemonCondition = roborev.DaemonConditionUnknown
@@ -1055,7 +1123,7 @@ func TestPermanentReachableUnhealthyDaemonIsRetryableAndRemainsRunning(t *testin
 	}
 	manager.wait = func(context.Context, time.Duration) error { return nil }
 	state := manager.Status(context.Background())
-	if state.Phase != PhaseFailed || !state.DaemonRunning || state.DaemonCondition != roborev.DaemonConditionUnhealthy || !state.CanRetry || !state.Retryable {
+	if state.Phase != PhaseFailed || state.FailureCode != "daemon_unhealthy" || !state.DaemonRunning || state.DaemonCondition != roborev.DaemonConditionUnhealthy || !state.CanRetry || !state.Retryable {
 		t.Fatalf("permanent unhealthy state = %#v", state)
 	}
 }
@@ -1084,13 +1152,20 @@ func TestRefreshTypedProbeFailureMatrixKeepsOfflineStartUX(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		health        roborev.DaemonHealthProbeState
+		condition     roborev.DaemonHealthCondition
+		daemonVersion string
 		wantPhase     Phase
 		wantCanStart  bool
 		wantRetryable bool
+		wantCode      string
 	}{
-		{name: "offline remains startable", health: roborev.DaemonHealthOffline, wantPhase: PhaseReady, wantCanStart: true},
-		{name: "invalid fails closed", health: roborev.DaemonHealthInvalid, wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true},
-		{name: "unknown fails closed", health: roborev.DaemonHealthUnknown, wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true},
+		{name: "offline remains startable", health: roborev.DaemonHealthOffline, condition: roborev.DaemonConditionUnknown, wantPhase: PhaseReady, wantCanStart: true},
+		{name: "invalid fails closed", health: roborev.DaemonHealthInvalid, condition: roborev.DaemonConditionUnknown, wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_health_invalid"},
+		{name: "unknown fails closed", health: roborev.DaemonHealthUnknown, condition: roborev.DaemonConditionUnknown, wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_health_invalid"},
+		{name: "daemon version missing", health: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_version_missing"},
+		{name: "daemon version invalid", health: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, daemonVersion: "0.64.0", wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_version_invalid"},
+		{name: "daemon version mismatch", health: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionHealthy, daemonVersion: "v0.63.0", wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_version_mismatch"},
+		{name: "unhealthy with invalid daemon version reports incompatibility", health: roborev.DaemonHealthOnline, condition: roborev.DaemonConditionUnhealthy, daemonVersion: "0.64.0", wantPhase: PhaseFailed, wantCanStart: true, wantRetryable: true, wantCode: "daemon_version_invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := &typedHealthProber{installation: roborev.Installation{
@@ -1099,7 +1174,8 @@ func TestRefreshTypedProbeFailureMatrixKeepsOfflineStartUX(t *testing.T) {
 				Version:         "v0.64.0",
 				Status:          json.RawMessage(`{"running":false,"known":true}`),
 				DaemonHealth:    test.health,
-				DaemonCondition: roborev.DaemonConditionUnknown,
+				DaemonCondition: test.condition,
+				DaemonVersion:   test.daemonVersion,
 			}}
 			installer := &fakeInstaller{target: client.installation.Binary, install: func(context.Context) (string, error) {
 				return "", errors.New("installer must not run during refresh")
@@ -1109,10 +1185,10 @@ func TestRefreshTypedProbeFailureMatrixKeepsOfflineStartUX(t *testing.T) {
 				t.Fatal(err)
 			}
 			state := manager.Status(context.Background())
-			if state.Phase != test.wantPhase || state.DaemonRunning || state.CanStartDaemon != test.wantCanStart || state.DaemonCondition != roborev.DaemonConditionUnknown {
+			if state.Phase != test.wantPhase || state.DaemonRunning || state.CanStartDaemon != test.wantCanStart || state.DaemonCondition != test.condition {
 				t.Fatalf("typed probe state = %#v", state)
 			}
-			if test.wantRetryable && (!state.CanRetry || !state.Retryable || state.Message == "RoboRev is ready") {
+			if state.FailureCode != test.wantCode || (test.wantRetryable && (!state.CanRetry || !state.Retryable || state.Message == "RoboRev is ready")) {
 				t.Fatalf("typed probe failure state = %#v", state)
 			}
 		})
@@ -1124,10 +1200,12 @@ func TestDaemonRetryDoesNotBecomeReadyBeforeHealthyProbe(t *testing.T) {
 	installer := &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) {
 		return "", errors.New("installer must not run for daemon recovery")
 	}}
-	manager, err := NewManager(client, installer)
+	gate := operation.NewGate()
+	manager, err := NewManagerWithGate(client, installer, gate)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupSetupManager(t, manager)
 	firstWait := make(chan struct{})
 	releaseWait := make(chan struct{})
 	manager.wait = func(ctx context.Context, _ time.Duration) error {
@@ -1152,7 +1230,13 @@ func TestDaemonRetryDoesNotBecomeReadyBeforeHealthyProbe(t *testing.T) {
 	if _, err := manager.Retry(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	<-firstWait
+	awaitSetupSignal(t, firstWait)
+	if release, err := gate.AcquireMutation(); !errors.Is(err, operation.ErrBusy) {
+		if err == nil {
+			release()
+		}
+		t.Fatalf("mutation gate acquisition during health-only recovery = %v, want busy", err)
+	}
 	intermediate := manager.stateCopy()
 	if intermediate.Phase == PhaseReady || intermediate.DaemonCondition == roborev.DaemonConditionHealthy {
 		t.Fatalf("retry became ready before healthy probe = %#v", intermediate)
@@ -1161,6 +1245,216 @@ func TestDaemonRetryDoesNotBecomeReadyBeforeHealthyProbe(t *testing.T) {
 	final := waitSetupLong(t, manager)
 	if final.Phase != PhaseReady || final.DaemonCondition != roborev.DaemonConditionHealthy || !final.DaemonRunning {
 		t.Fatalf("retry final state = %#v", final)
+	}
+	client.mu.Lock()
+	starts, rebinds := client.starts, client.rebinds
+	client.mu.Unlock()
+	if starts != 0 || rebinds != 0 {
+		t.Fatalf("health-only retry lifecycle calls = start %d rebind %d, want both zero", starts, rebinds)
+	}
+}
+
+func TestDaemonVersionMismatchRecoveryDoesNotStartOrRebind(t *testing.T) {
+	client := &conditionDaemonProber{binary: `C:\managed\roborev.exe`, version: "v0.64.0", daemonVersion: "v0.63.0", healthyAfter: 1}
+	installer := &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) {
+		return "", errors.New("installer must not run for daemon recovery")
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.wait = func(context.Context, time.Duration) error { return nil }
+	state := manager.Status(context.Background())
+	if state.Phase != PhaseFailed || state.FailureCode != "daemon_version_mismatch" || !state.CanRetry {
+		t.Fatalf("mismatched daemon state = %#v", state)
+	}
+	if _, err := manager.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state = waitSetupLong(t, manager)
+	if state.Phase != PhaseFailed || state.FailureCode != "daemon_version_mismatch" || !state.CanRetry || state.DaemonVersion != "v0.63.0" {
+		t.Fatalf("mismatched recovery state = %#v", state)
+	}
+	client.mu.Lock()
+	starts, rebinds := client.starts, client.rebinds
+	client.mu.Unlock()
+	if starts != 0 || rebinds != 0 {
+		t.Fatalf("mismatched recovery lifecycle calls = start %d rebind %d, want both zero", starts, rebinds)
+	}
+}
+
+func TestDaemonVersionMismatchRecoveryPublishesOnlyAfterExactMatch(t *testing.T) {
+	client := &conditionDaemonProber{binary: `C:\managed\roborev.exe`, version: "v0.64.0", daemonVersion: "v0.63.0", daemonVersionAfter: 3, healthyAfter: 1}
+	installer := &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) {
+		return "", errors.New("installer must not run for health recovery")
+	}}
+	manager, err := NewManager(client, installer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.wait = func(context.Context, time.Duration) error { return nil }
+	state := manager.Status(context.Background())
+	if state.Phase != PhaseFailed || state.FailureCode != "daemon_version_mismatch" {
+		t.Fatalf("initial mismatch state = %#v", state)
+	}
+	if _, err := manager.Retry(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state = waitSetupLong(t, manager)
+	if state.Phase != PhaseReady || state.DaemonVersion != "v0.64.0" || !state.DaemonRunning {
+		t.Fatalf("eventual exact-match state = %#v", state)
+	}
+	client.mu.Lock()
+	starts, rebinds := client.starts, client.rebinds
+	client.mu.Unlock()
+	installer.mu.Lock()
+	installs := installer.calls
+	installer.mu.Unlock()
+	if starts != 0 || rebinds != 0 || installs != 0 {
+		t.Fatalf("health recovery lifecycle calls = start %d rebind %d install %d, want all zero", starts, rebinds, installs)
+	}
+}
+
+func TestDaemonReadyRequiresExactSupportedVersionPair(t *testing.T) {
+	base := roborev.Installation{Installed: true, Version: "v0.64.0", DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy, DaemonVersion: "v0.64.0"}
+	for _, test := range []struct {
+		name string
+		edit func(*roborev.Installation)
+		want bool
+	}{
+		{name: "matching", want: true},
+		{name: "missing daemon version", edit: func(i *roborev.Installation) { i.DaemonVersion = "" }},
+		{name: "invalid daemon version", edit: func(i *roborev.Installation) { i.DaemonVersion = "0.64.0" }},
+		{name: "mismatched daemon version", edit: func(i *roborev.Installation) { i.DaemonVersion = "v0.63.0" }},
+		{name: "unhealthy", edit: func(i *roborev.Installation) { i.DaemonCondition = roborev.DaemonConditionUnhealthy }},
+		{name: "offline", edit: func(i *roborev.Installation) {
+			i.DaemonHealth = roborev.DaemonHealthOffline
+			i.DaemonCondition = roborev.DaemonConditionUnknown
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installation := base
+			if test.edit != nil {
+				test.edit(&installation)
+			}
+			if got := daemonReady(installation); got != test.want {
+				t.Fatalf("daemonReady = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRefreshGenerationPublishesOnlyNewestProbe(t *testing.T) {
+	gateOne := make(chan struct{})
+	gateTwo := make(chan struct{})
+	startedOne := make(chan struct{})
+	startedTwo := make(chan struct{})
+	first := roborev.Installation{Installed: true, Binary: `C:\first\roborev.exe`, Version: "v0.64.0", Status: json.RawMessage(`{"running":true,"known":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy, DaemonVersion: "v0.64.0"}
+	second := first
+	second.Binary = `C:\second\roborev.exe`
+	client := &refreshSequenceProber{binary: first.Binary, samples: []roborev.Installation{first, second}, gates: []<-chan struct{}{gateOne, gateTwo}, started: []chan struct{}{startedOne, startedTwo}}
+	manager, err := NewManager(client, &fakeInstaller{target: first.Binary, install: func(context.Context) (string, error) { return first.Binary, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSetupManager(t, manager)
+	firstDone := make(chan struct{})
+	go func() {
+		manager.refresh(context.Background())
+		close(firstDone)
+	}()
+	awaitSetupSignal(t, startedOne)
+	secondDone := make(chan struct{})
+	go func() {
+		manager.refresh(context.Background())
+		close(secondDone)
+	}()
+	awaitSetupSignal(t, startedTwo)
+	close(gateTwo)
+	awaitSetupSignal(t, secondDone)
+	if state := manager.stateCopy(); state.Binary != second.Binary || state.Phase != PhaseReady {
+		t.Fatalf("newest refresh state = %#v", state)
+	}
+	close(gateOne)
+	awaitSetupSignal(t, firstDone)
+	if state := manager.stateCopy(); state.Binary != second.Binary || state.Phase != PhaseReady {
+		t.Fatalf("stale refresh overwrote state = %#v", state)
+	}
+}
+
+func TestCanceledRefreshDoesNotPublish(t *testing.T) {
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	client := &refreshSequenceProber{
+		binary:  `C:\stale\roborev.exe`,
+		samples: []roborev.Installation{{Installed: true, Binary: `C:\stale\roborev.exe`, Version: "v0.64.0", Status: json.RawMessage(`{"running":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy, DaemonVersion: "v0.64.0"}},
+		gates:   []<-chan struct{}{gate},
+		started: []chan struct{}{started},
+	}
+	manager, err := NewManager(client, &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) { return client.binary, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSetupManager(t, manager)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		manager.refresh(ctx)
+		close(done)
+	}()
+	awaitSetupSignal(t, started)
+	cancel()
+	awaitSetupSignal(t, done)
+	state := manager.stateCopy()
+	if state.Phase != PhaseIdle || state.Binary != "" || state.Installed {
+		t.Fatalf("canceled refresh published state = %#v", state)
+	}
+	fresh := manager.Status(context.Background())
+	if fresh.Phase != PhaseReady || fresh.Binary != client.binary || !fresh.Installed || fresh.DaemonHealth != roborev.DaemonHealthOnline || fresh.DaemonVersion != "v0.64.0" {
+		t.Fatalf("fresh refresh state = %#v", fresh)
+	}
+}
+
+func TestAcceptedSetupOperationInvalidatesPendingRefresh(t *testing.T) {
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	client := &refreshSequenceProber{binary: `C:\pending\roborev.exe`, samples: []roborev.Installation{{Installed: true, Binary: `C:\pending\roborev.exe`, Version: "v0.64.0", Status: json.RawMessage(`{"running":true}`), DaemonHealth: roborev.DaemonHealthOnline, DaemonCondition: roborev.DaemonConditionHealthy, DaemonVersion: "v0.64.0"}}, gates: []<-chan struct{}{gate}, started: []chan struct{}{started}}
+	manager, err := NewManager(client, &fakeInstaller{target: client.binary, install: func(context.Context) (string, error) { return client.binary, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupSetupManager(t, manager)
+	refreshDone := make(chan struct{})
+	go func() {
+		manager.refresh(context.Background())
+		close(refreshDone)
+	}()
+	awaitSetupSignal(t, started)
+	if _, err := manager.acceptAsync(context.Background(), nil, time.Second, func(state State) State {
+		state.Phase, state.Status = PhaseChecking, PhaseChecking
+		return state
+	}, func(ctx context.Context) {
+		manager.finishError(ctx, errors.New("deterministic terminal setup failure"), `C:\terminal\roborev.exe`)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	terminalDeadline := time.Now().Add(time.Second)
+	for time.Now().Before(terminalDeadline) {
+		state := manager.stateCopy()
+		if !state.InProgress && state.Phase == PhaseFailed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	terminal := manager.stateCopy()
+	if terminal.InProgress || terminal.Phase != PhaseFailed || !strings.Contains(terminal.Error, "deterministic terminal setup failure") {
+		t.Fatalf("accepted operation did not publish terminal state before stale release = %#v", terminal)
+	}
+	close(gate)
+	awaitSetupSignal(t, refreshDone)
+	state := manager.stateCopy()
+	if state.Phase != PhaseFailed || !strings.Contains(state.Error, "deterministic terminal setup failure") {
+		t.Fatalf("pending refresh overwrote terminal operation = %#v", state)
 	}
 }
 

@@ -163,6 +163,10 @@ func (s *Server) statsService(w http.ResponseWriter, ctx context.Context, summar
 		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
 		return nil, false
 	}
+	if !roborevcompat.IsMatchingSupportedVersion(installation.Version, installation.DaemonVersion) {
+		writeError(w, http.StatusServiceUnavailable, "Stats require RoboRev v0.64.0", "stats")
+		return nil, false
+	}
 	if installation.DaemonCondition == roborev.DaemonConditionUnhealthy {
 		writeError(w, http.StatusServiceUnavailable, "Stats require the RoboRev daemon to be healthy.", "stats")
 		return nil, false

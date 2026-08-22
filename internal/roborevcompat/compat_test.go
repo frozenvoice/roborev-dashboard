@@ -78,6 +78,39 @@ func testManifest(data []byte) Manifest {
 	return manifest
 }
 
+func TestCanonicalAndMatchingSupportedVersionsAreExact(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "v0.64.0", want: true},
+		{value: "v1.2.3", want: true},
+		{value: " v0.64.0", want: false},
+		{value: "v0.64.0 ", want: false},
+		{value: "0.64.0", want: false},
+		{value: "", want: false},
+		{value: "v0.64", want: false},
+	} {
+		if got := IsCanonicalVersion(test.value); got != test.want {
+			t.Errorf("IsCanonicalVersion(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+	for _, test := range []struct {
+		cli, daemon string
+		want        bool
+	}{
+		{cli: "v0.64.0", daemon: "v0.64.0", want: true},
+		{cli: "v0.64.0", daemon: "v0.65.0", want: false},
+		{cli: "v0.64.0", daemon: " v0.64.0", want: false},
+		{cli: "v0.63.0", daemon: "v0.63.0", want: false},
+		{cli: "", daemon: "v0.64.0", want: false},
+	} {
+		if got := IsMatchingSupportedVersion(test.cli, test.daemon); got != test.want {
+			t.Errorf("IsMatchingSupportedVersion(%q,%q) = %v, want %v", test.cli, test.daemon, got, test.want)
+		}
+	}
+}
+
 func TestDownloadChecksExactSizeAndHashWithoutExternalNetwork(t *testing.T) {
 	archive := makeArchive(t, 0o700, "roborev.exe")
 	manifest := testManifest(archive)
