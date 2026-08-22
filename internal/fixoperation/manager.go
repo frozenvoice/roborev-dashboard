@@ -407,6 +407,16 @@ func previewToken(preview *Preview) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// shutdownCanceled explains a preflight failure that Shutdown caused, so a
+// canceled validation call is classified as a shutdown conflict instead of an
+// unrelated repository or transport error.
+func (m *manager) shutdownCanceled(parent context.Context) error {
+	if err := m.shutdownCtx.Err(); err != nil {
+		return fmt.Errorf("server is shutting down: %w", err)
+	}
+	return parent.Err()
+}
+
 func (m *manager) Start(parent context.Context, request StartRequest) (*Operation, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -454,6 +464,11 @@ func (m *manager) Start(parent context.Context, request StartRequest) (*Operatio
 		err = typed(ErrorConflict, parentErr)
 	}
 	if err != nil {
+		if shutdownErr := m.shutdownCanceled(parent); shutdownErr != nil && parent.Err() == nil {
+			repoLease()
+			global()
+			return nil, typed(ErrorConflict, shutdownErr)
+		}
 		repoLease()
 		global()
 		return nil, err

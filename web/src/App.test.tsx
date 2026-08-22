@@ -123,6 +123,29 @@ describe('App review workflow', () => {
     expect(screen.queryByRole('button', { name: /Rerun same target\/config/ })).not.toBeInTheDocument()
   })
 
+  it('recovers Tasks history through retry after a failed load', async () => {
+    let historyCalls = 0
+    const taskRow = { ...jobs[0], id: 91, job_id: 91, job_type: 'task', git_ref: 'run', uuid: '00000000-0000-0000-0000-000000000091', status: 'done' }
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) {
+        if (path.includes('limit=200')) {
+          historyCalls++
+          return historyCalls === 1 ? response({ error: 'history list failed' }, 502) : response([taskRow])
+        }
+        return response([])
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Tasks' }))
+    expect(await screen.findByText(/Task history could not be loaded/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Retry/ }))
+    expect(await screen.findByText(/#91/)).toBeInTheDocument()
+    expect(historyCalls).toBeGreaterThanOrEqual(2)
+  })
+
   it('renders finding state and safe review text', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => String(input) === '/api/bootstrap' ? response(bootstrap) : response(jobs)))
     render(<App />)

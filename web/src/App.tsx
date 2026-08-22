@@ -480,6 +480,7 @@ export function App() {
   const repoSwitchGeneration = useRef(0)
   const panelRefineReviewGeneration = useRef(0)
   const taskHistoryGeneration = useRef(0)
+  const lastTaskSliceEpoch = useRef(-1)
   const setupGeneration = useRef(0)
   const setupReadyGeneration = useRef(0)
   const reviewEffectEpoch = useRef(0)
@@ -1115,7 +1116,8 @@ export function App() {
   const openReviewById = (id: number) => {
     setActiveNav('Reviews')
     setMenu(false)
-    const existing = jobs.find(job => idOf(job) === id)
+    // The Tasks slice can contain rows beyond the polling list's window.
+    const existing = jobs.find(job => idOf(job) === id) ?? taskJobs.find(job => idOf(job) === id)
     if (existing) { setSelected(existing); return }
     const identity = selectedRepositoryIdentity
     const generation = ++panelRefineReviewGeneration.current
@@ -1161,7 +1163,9 @@ export function App() {
     setJobs([])
     setSelected(null)
     // Task history is scoped to one repository; a switch must not show the
-    // previous repository's rows or its empty state while reloading.
+    // previous repository's rows or its empty state while reloading, and any
+    // in-flight history request for the old repository is invalidated.
+    taskHistoryGeneration.current++
     setTaskJobs([])
     loadedTaskIdentityRef.current = ''
     setLoadedTaskIdentity('')
@@ -1210,11 +1214,6 @@ export function App() {
   const panelRefineDisabledReason = !bootstrap?.roborev?.installed ? t('panel.unavailableNotInstalled') : !daemonRunning ? t('panel.unavailableDaemonOffline') : !bootstrap.roborev.capabilities.panelReview ? t('panel.versionNoPanel') : !bootstrap.roborev.capabilities.fixCommand ? t('panel.versionNoFix') : !panelOutputStatusAvailable ? t('panel.versionNoStatus') : ''
   const reviewsReady = !canPollReviews || !selectedRepositoryIdentity || loadedReviewIdentity === selectedRepositoryIdentity
   const reviewPageActive = activeNav === 'Reviews' || activeNav === 'Overview'
-  // The Tasks screen renders only a history slice loaded for the exact
-  // current repository. A load failure renders the screen itself with its
-  // error and retry affordance; only an in-flight or not-yet-started slice
-  // shows the page skeleton.
-  tasksVisibleRef.current = activeNav === 'Tasks'
   const prepareFix = (job: ReviewJob) => {
     const id = idOf(job)
     if (!isFixTarget(job) || !Number.isSafeInteger(id) || id <= 0) return
@@ -1240,7 +1239,10 @@ export function App() {
     const identity = selectedRepositoryIdentity
     const path = repo?.path
     if (!identity || !path) return
-    if (loadedTaskHistoryForScope) return
+    // An explicit retry bumps the epoch so a scope that looks loaded does not
+    // swallow the refetch after a failed refresh.
+    if (loadedTaskHistoryForScope && lastTaskSliceEpoch.current === taskReloadEpoch) return
+    lastTaskSliceEpoch.current = taskReloadEpoch
     void loadTaskHistory(path, identity)
   }, [activeNav, repo?.path, selectedRepositoryIdentity, loadedTaskHistoryForScope, taskReloadEpoch, repoSwitching, loadTaskHistory])
   const taskSliceInFlight = canPollReviews && Boolean(selectedRepositoryIdentity) && !loadedTaskHistoryForScope && !taskHistoryError
