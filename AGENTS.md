@@ -90,7 +90,7 @@ fast panel all-green 뒤:
 
 `roborev review <same cumulative target> --panel dashboard_opencode_high`
 
-를 실행한다. high panel의 모든 Ox / Muse / Grok / synthesis output을 확인한다. `dashboard_opencode_high`는 최종 집중 gate다: `ox_high` (x-preview-f-free 20m) + `muse_high` (Muse Spark 15m) + `grok_high` (Grok 4.6 maximum 15m).
+를 실행한다. high panel의 모든 Ox / Muse / Grok / synthesis output을 확인한다. `dashboard_opencode_high`는 최종 집중 gate다: `ox_high` (x-preview-f-free 20m) + `muse_high` (Muse Spark 15m) + `grok` (Grok 4.6 thorough 12m, `--reasoning-effort high`).
 
 valid finding이 있으면 수정 → tests/build → 새 commit → Stage 1 `dashboard_opencode`부터 다시 시작한다. 즉 `FAST green → HIGH → finding → fix → FAST green → HIGH` 순서다. HIGH까지 clean해야 작업 완료 가능하다.
 
@@ -108,7 +108,7 @@ RoboRev v0.64 OpenCode adapter는 non-interactive OpenCode를 사용하므로 re
 
 ### OpenCode reasoning 주의
 
-RoboRev v0.64 OpenCode adapter는 `reasoning` level을 `opencode run` CLI에 전달하지 않는다. 따라서 Ox/Muse high의 깊이는 stronger instructions + longer timeout으로 만들며, 실제 `reasoning = "maximum"` override는 high panel에서 Grok에만 효과적이다. 이 사실은 `.roborev.toml` 주석에도 명시한다.
+RoboRev v0.64 OpenCode adapter는 `reasoning` level을 `opencode run` CLI에 전달하지 않는다. 따라서 Ox/Muse high의 깊이는 stronger instructions + longer timeout으로 만들며, `dashboard_opencode_high`는 기존 `grok`(`reasoning="thorough"` → Grok CLI `--reasoning-effort high`)을 재사용한다. `grok_high`/`reasoning="maximum"`은 사용하지 않는다. 이 사실은 `.roborev.toml` 주석에도 명시한다.
 
 ### paid panels
 
