@@ -36,6 +36,8 @@ export type Installation = {
     guidelineInsights?: boolean
     /** Optional because older bootstrap responses predate repository inventory. */
     repositoryInventory?: boolean
+    /** Optional because older bootstrap responses predate repository rename. */
+    repositoryRename?: boolean
   }
 }
 
@@ -58,6 +60,80 @@ export type RepositoryInventoryResponse = {
   repositories: RepositoryInventoryRow[]
   repositoryCount: number
   totalJobCount: number
+}
+
+export type RepositoryRenameCommand = { executable: string; args: string[] }
+export type RepositoryRenamePreview = {
+  path: string
+  currentName: string
+  newName: string
+  jobCount: number
+  dashboardRegistered: boolean
+  command: RepositoryRenameCommand
+  token: string
+  expiresAt: string
+}
+export type RepositoryRenameResult =
+  | { status: 'renamed'; path: string; previousName: string; name: string }
+  | { status: 'unverified'; path: string; message: string }
+
+function renameObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function renameCommand(value: unknown): RepositoryRenameCommand | null {
+  const command = renameObject(value)
+  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string')) return null
+  if (Object.keys(command).some(key => !['executable', 'args'].includes(key))) return null
+  return { executable: command.executable, args: command.args as string[] }
+}
+
+/** Normalize the strict, server-owned repository rename preview. */
+export function normalizeRepositoryRenamePreview(value: unknown): RepositoryRenamePreview | null {
+  const object = renameObject(value)
+  if (!object || Object.keys(object).some(key => !['path', 'currentName', 'newName', 'jobCount', 'dashboardRegistered', 'command', 'token', 'expiresAt'].includes(key))) return null
+  const command = renameCommand(object.command)
+  if (typeof object.path !== 'string' || object.path.length === 0 || typeof object.currentName !== 'string' || typeof object.newName !== 'string' || object.newName.trim() === '' || !nonNegativeSafeInteger(object.jobCount) || typeof object.dashboardRegistered !== 'boolean' || !command || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  return { path: object.path, currentName: object.currentName, newName: object.newName, jobCount: object.jobCount, dashboardRegistered: object.dashboardRegistered, command, token: object.token, expiresAt: object.expiresAt }
+}
+
+/** Normalize the post-confirm receipt. Unverified results intentionally carry no name claim. */
+export function normalizeRepositoryRenameResult(value: unknown): RepositoryRenameResult | null {
+  const object = renameObject(value)
+  if (!object || typeof object.status !== 'string') return null
+  if (object.status === 'renamed') {
+    if (Object.keys(object).some(key => !['status', 'path', 'previousName', 'name'].includes(key)) || typeof object.path !== 'string' || object.path.length === 0 || typeof object.previousName !== 'string' || typeof object.name !== 'string' || object.name.length === 0) return null
+    return { status: 'renamed', path: object.path, previousName: object.previousName, name: object.name }
+  }
+  if (object.status === 'unverified') {
+    if (Object.keys(object).some(key => !['status', 'path', 'message'].includes(key)) || typeof object.path !== 'string' || object.path.length === 0 || typeof object.message !== 'string' || !object.message.trim()) return null
+    return { status: 'unverified', path: object.path, message: object.message }
+  }
+  return null
+}
+
+export type RepositoryRenameNameError = 'empty' | 'tooLong' | 'invalidUtf8' | 'control' | 'leadingDash' | 'same'
+
+/** Apply the backend rename policy locally so invalid input never creates a preview request. */
+export function validateRepositoryRenameName(input: string, currentName: string): { value: string | null; error?: RepositoryRenameNameError } {
+  const value = input.trim()
+  if (!value) return { value: null, error: 'empty' }
+  let codePoints = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) return { value: null, error: 'invalidUtf8' }
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) return { value: null, error: 'invalidUtf8' }
+    const point = value.codePointAt(index) as number
+    if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)) return { value: null, error: 'control' }
+    codePoints += 1
+  }
+  if (codePoints > 128) return { value: null, error: 'tooLong' }
+  if (value.startsWith('-')) return { value: null, error: 'leadingDash' }
+  if (value === currentName) return { value: null, error: 'same' }
+  return { value }
 }
 
 function nonNegativeSafeInteger(value: unknown): value is number {

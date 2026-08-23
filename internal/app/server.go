@@ -50,6 +50,7 @@ type Server struct {
 	// bindings. The browser only ever receives the opaque token; every bound
 	// field is revalidated fresh before a config set executes.
 	configPreviews *configPreviewStore
+	renamePreviews *repositoryRenamePreviewStore
 	Insights       *insights.Manager
 }
 
@@ -135,7 +136,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -225,6 +226,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/insights/{id}", s.insightsStatus)
 	s.mux.HandleFunc("POST /api/configuration/preview", s.mutationAuth(s.configurationPreview))
 	s.mux.HandleFunc("POST /api/configuration/set", s.mutationAuth(s.configurationSet))
+	s.mux.HandleFunc("POST /api/repository-renames/preview", s.mutationAuth(s.repositoryRenamePreview))
+	s.mux.HandleFunc("POST /api/repository-renames", s.mutation(s.repositoryRenameConfirm))
 	s.mux.HandleFunc("POST /api/insights/preview", s.mutationAuth(s.insightsPreview))
 	s.mux.HandleFunc("POST /api/insights", s.mutationAuth(s.startInsights))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))

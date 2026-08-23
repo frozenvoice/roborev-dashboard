@@ -343,6 +343,31 @@ export const en = {
   'repo.trackedUnavailableBody': 'A supported, healthy RoboRev daemon is required to read tracked repositories.',
   'repo.trackedError': 'Tracked repository inventory could not be loaded.',
   'repo.trackedMalformed': 'The Dashboard could not validate the RoboRev repository inventory.',
+  'repo.rename': 'Rename',
+  'repo.renameTitle': 'Rename RoboRev repository',
+  'repo.renameDescription': 'Change the RoboRev display name only. The filesystem path and Dashboard registration stay unchanged.',
+  'repo.renameCurrentName': 'Current name',
+  'repo.renameNewName': 'New display name',
+  'repo.renamePath': 'Tracked root path',
+  'repo.renameJobs': 'Jobs',
+  'repo.renameDashboardStatus': 'Dashboard status',
+  'repo.renameCommand': 'Exact executable and argv',
+  'repo.renameWarning': 'Display-name only: no filesystem move, Git operation, or Dashboard registration change.',
+  'repo.renamePrepare': 'Prepare rename',
+  'repo.renamePreparing': 'Preparing…',
+  'repo.renameConfirm': 'Confirm rename',
+  'repo.renameConfirming': 'Renaming…',
+  'repo.renameSuccess': 'Repository display name changed.',
+  'repo.renameUnverified': 'The rename process started, but the fresh inventory could not verify the final name. Refresh to inspect the current state. No retry was issued.',
+  'repo.renameFailed': 'Repository rename could not be completed: {error}',
+  'repo.renameMalformed': 'The Dashboard could not validate the repository rename response.',
+  'repo.renameInvalidEmpty': 'Enter a non-empty display name.',
+  'repo.renameInvalidTooLong': 'Display names must be at most 128 Unicode characters.',
+  'repo.renameInvalidUtf8': 'Enter valid Unicode text.',
+  'repo.renameInvalidControl': 'Control characters are not allowed.',
+  'repo.renameInvalidLeadingDash': 'Names beginning with “-” are not allowed.',
+  'repo.renameInvalidSame': 'Enter a different display name.',
+  'repo.renameClose': 'Close rename dialog',
   'panel.unavailable': 'Panel unavailable',
   'panel.unavailableNotInstalled': 'RoboRev is not installed.',
   'panel.unavailableDaemonOffline': 'The RoboRev daemon is not running.',
@@ -816,6 +841,31 @@ ko['stats.insightsMalformed'] = 'Dashboard가 Insights 응답을 검증하지 �
 ko['stats.guidelineResultFailed'] = 'Insights 결과를 불러오지 못했습니다. daemon을 확인한 뒤 다시 시도하세요.'
 ko['stats.guidelineRetryResult'] = '결과 다시 시도'
 ko['stats.insightsCopyFailed'] = '클립보드에 접근할 수 없습니다.'
+ko['repo.rename'] = '이름 변경'
+ko['repo.renameTitle'] = 'RoboRev 저장소 이름 변경'
+ko['repo.renameDescription'] = 'RoboRev 표시 이름만 변경합니다. 파일 시스템 경로와 Dashboard 등록은 유지됩니다.'
+ko['repo.renameCurrentName'] = '현재 이름'
+ko['repo.renameNewName'] = '새 표시 이름'
+ko['repo.renamePath'] = '추적 루트 경로'
+ko['repo.renameJobs'] = '작업'
+ko['repo.renameDashboardStatus'] = 'Dashboard 상태'
+ko['repo.renameCommand'] = '정확한 실행 파일과 argv'
+ko['repo.renameWarning'] = '표시 이름만 변경합니다. 파일 시스템 이동, Git 작업 또는 Dashboard 등록 변경은 하지 않습니다.'
+ko['repo.renamePrepare'] = '이름 변경 준비'
+ko['repo.renamePreparing'] = '준비 중…'
+ko['repo.renameConfirm'] = '이름 변경 확인'
+ko['repo.renameConfirming'] = '이름 변경 중…'
+ko['repo.renameSuccess'] = '저장소 표시 이름을 변경했습니다.'
+ko['repo.renameUnverified'] = '이름 변경 프로세스는 시작했지만 새 이름을 inventory에서 확인하지 못했습니다. 새로고침하여 현재 상태를 확인하세요. 자동 재시도하지 않았습니다.'
+ko['repo.renameFailed'] = '저장소 이름을 변경하지 못했습니다: {error}'
+ko['repo.renameMalformed'] = 'Dashboard가 저장소 이름 변경 응답을 검증하지 못했습니다.'
+ko['repo.renameInvalidEmpty'] = '비어 있지 않은 표시 이름을 입력하세요.'
+ko['repo.renameInvalidTooLong'] = '표시 이름은 Unicode 문자 128자 이하여야 합니다.'
+ko['repo.renameInvalidUtf8'] = '올바른 Unicode 텍스트를 입력하세요.'
+ko['repo.renameInvalidControl'] = '제어 문자는 사용할 수 없습니다.'
+ko['repo.renameInvalidLeadingDash'] = '“-”로 시작하는 이름은 사용할 수 없습니다.'
+ko['repo.renameInvalidSame'] = '현재와 다른 표시 이름을 입력하세요.'
+ko['repo.renameClose'] = '이름 변경 대화상자 닫기'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

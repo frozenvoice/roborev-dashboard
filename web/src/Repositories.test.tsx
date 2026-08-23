@@ -11,6 +11,9 @@ const bootstrap: Bootstrap = {
   repositories: [{ identity: 'repo-1', name: 'registered', path: 'E:\\repo', branch: 'main', head: 'abc', headShort: 'abc', commitSubject: 'Initial', dirty: false, hasConfig: true }],
   roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities },
 }
+const renameBootstrap: Bootstrap = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, repositoryRename: true } } }
+
+const renamePreview = { path: 'E:\\tracked', currentName: 'tracked', newName: 'Renamed 저장소', jobCount: 3, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\tracked', 'Renamed 저장소'] }, token: 'rename-token', expiresAt: '2026-08-23T01:02:03Z' }
 
 function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }))
@@ -33,7 +36,7 @@ describe('Repositories v2 inventory', () => {
     expect(calls).toEqual(['/api/repository-inventory'])
     expect(screen.getByRole('textbox', { name: 'Add local Git repository' })).toBeInTheDocument()
     expect(screen.getByText('registered')).toBeInTheDocument()
-    expect(screen.getByText('E:\\other')).toBeInTheDocument()
+    expect(screen.getAllByText('E:\\other')[0]).toBeInTheDocument()
     expect(screen.getByText('Tracked repositories 2, Jobs 2')).toBeInTheDocument()
     const trackedTable = document.querySelector('.tracked-table')
     expect(trackedTable?.querySelectorAll('tbody tr')).toHaveLength(2)
@@ -153,5 +156,178 @@ describe('Repositories v2 inventory', () => {
     await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1))
     await new Promise(resolve => setTimeout(resolve, 80))
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers rename only for tracked rows, captures the exact duplicate-name row path, and shows the fresh preview', async () => {
+    const calls: Array<{ input: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input: String(input), init })
+      if (calls.length === 1) return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 3, dashboardRegistered: false }, { name: 'tracked', path: 'E:\\other', jobCount: 1, dashboardRegistered: true }], repositoryCount: 2, totalJobCount: 4 })
+      return response({ ...renamePreview, path: 'E:\\other', currentName: 'tracked', newName: '새 이름', jobCount: 9, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\other', '새 이름'] } })
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(await screen.findAllByRole('button', { name: 'Rename' })).toHaveLength(2)
+    expect(screen.getByText('registered')).toBeInTheDocument()
+    await userEvent.click(screen.getAllByRole('button', { name: 'Rename' })[1])
+    const input = screen.getByRole('textbox', { name: 'New display name' })
+    await userEvent.type(input, ' 새 이름 ')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await waitFor(() => expect(screen.getByText('Exact executable and argv')).toBeInTheDocument())
+    expect(calls[1].input).toBe('/api/repository-renames/preview')
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ path: 'E:\\other', newName: '새 이름' })
+    expect(screen.getAllByText('E:\\other')[0]).toBeInTheDocument()
+    expect(screen.getByText('9')).toBeInTheDocument()
+    expect(screen.getAllByText('Not registered')[0]).toBeInTheDocument()
+    expect(screen.queryByText('Move')).not.toBeInTheDocument()
+    expect(screen.queryByText('Delete')).not.toBeInTheDocument()
+    expect(screen.queryByText('Merge')).not.toBeInTheDocument()
+  })
+
+  it('rejects invalid names without preview and cancel never confirms', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { calls.push(String(input)); return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 }) }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'New display name' })
+    await userEvent.type(input, '-unsafe')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Names beginning with')
+    expect(calls).toEqual(['/api/repository-inventory'])
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(calls).toEqual(['/api/repository-inventory'])
+  })
+
+  it('confirms once, closes on verified success, toasts, and refreshes inventory independently', async () => {
+    const calls: string[] = []
+    let inventoryCount = 0
+    const toast = vi.fn()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') { inventoryCount += 1; return response({ repositories: [{ name: inventoryCount > 1 ? 'Renamed 저장소' : 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 }) }
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ status: 'renamed', path: 'E:\\tracked', previousName: 'tracked', name: 'Renamed 저장소' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('success', 'Repository display name changed.'))
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+    expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(2)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('guards a double confirm click to exactly one confirm request', async () => {
+    const calls: string[] = []
+    let resolveConfirm!: (value: Response) => void
+    const confirmResponse = new Promise<Response>(resolve => { resolveConfirm = resolve })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input); calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return confirmResponse
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    const confirm = await screen.findByRole('button', { name: 'Confirm rename' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    await waitFor(() => expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1))
+    resolveConfirm(await response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' }))
+  })
+
+  it('shows preview failure as a definite error and never offers confirm', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input); calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      return response({ error: 'preview failed' }, 502)
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('preview failed')
+    expect(screen.queryByRole('button', { name: 'Confirm rename' })).not.toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(0)
+  })
+
+  it('shows confirm failure without retrying or refreshing inventory', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input); calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ error: 'confirm failed' }, 502)
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('confirm failed')
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+    expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Confirm rename' })).not.toBeInTheDocument()
+  })
+
+  it('keeps registered cards unchanged when verified success is followed by inventory failure', async () => {
+    const calls: string[] = []
+    const toast = vi.fn()
+    let inventoryReads = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input); calls.push(url)
+      if (url === '/api/repository-inventory') {
+        inventoryReads += 1
+        return inventoryReads === 1
+          ? response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+          : response({ error: 'refresh failed' }, 503)
+      }
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ status: 'renamed', path: 'E:\\tracked', previousName: 'tracked', name: 'Renamed 저장소' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('success', 'Repository display name changed.'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByText('registered')).toBeInTheDocument()
+    expect(document.querySelector('.repo-cards article button')).toBeNull()
+    expect(await screen.findByRole('alert')).toHaveTextContent('refresh failed')
+    expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(2)
+  })
+
+  it('leaves registered cards without rename controls while tracked rows have one control each', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(await screen.findByText('registered')).toBeInTheDocument()
+    expect(document.querySelector('.repo-cards article button')).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Rename' })).toHaveLength(1)
+  })
+
+  it('keeps unverified warning without retry or automatic refresh and offers explicit refresh', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input); calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Readback unavailable')
+    expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(1)
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+    await userEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[1])
+    await waitFor(() => expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(2))
   })
 })

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 
 	"github.com/froze/roborev-dashboard/internal/insights"
+	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
+	"github.com/froze/roborev-dashboard/internal/reporename"
 )
 
 type Installation struct {
@@ -69,6 +71,7 @@ type Capabilities struct {
 	CostStats           bool `json:"costStats"`
 	GuidelineInsights   bool `json:"guidelineInsights"`
 	RepositoryInventory bool `json:"repositoryInventory"`
+	RepositoryRename    bool `json:"repositoryRename"`
 }
 
 // RepositoryInventoryService is deliberately optional: the base Service
@@ -76,6 +79,14 @@ type Capabilities struct {
 // a new read surface that would break legacy fakes.
 type RepositoryInventoryService interface {
 	RepositoryInventory(context.Context) (repoinventory.Inventory, error)
+}
+
+// RepositoryRenameService is optional so existing Service fakes and legacy
+// adapters remain source-compatible. Implementations must preflight again at
+// the process boundary and must not infer success from human CLI output.
+type RepositoryRenameService interface {
+	RepositoryRenamePreflight(context.Context, reporename.Request) (reporename.Preflight, error)
+	RepositoryRename(context.Context, reporename.Request, reporename.Preflight) (proc.Result, error)
 }
 
 // InsightsService is deliberately optional: the base Service interface is

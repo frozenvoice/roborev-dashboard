@@ -10,6 +10,7 @@ function Harness() {
   return <div>
     <output data-testid="locale">{locale}</output>
     <output data-testid="label">{t('nav.overview')}</output>
+    <output data-testid="rename-title">{t('repo.renameTitle')}</output>
     <output data-testid="formatted">{format('review.runningCount', { count: 2 })}</output>
     <output data-testid="stable-t">{String(firstT.current === t)}</output>
     <output data-testid="stable-format">{String(firstFormat.current === format)}</output>
@@ -69,11 +70,13 @@ describe('frontend locale provider', () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
     renderHarness()
     expect(screen.getByTestId('label')).toHaveTextContent('Overview')
+    expect(screen.getByTestId('rename-title')).toHaveTextContent('Rename RoboRev repository')
     expect(screen.getByTestId('formatted')).toHaveTextContent('2 running')
     expect(document.documentElement.lang).toBe('en')
     act(() => screen.getByRole('button', { name: '한국어' }).click())
     expect(screen.getByTestId('locale')).toHaveTextContent('ko')
     expect(screen.getByTestId('label')).toHaveTextContent('개요')
+    expect(screen.getByTestId('rename-title')).toHaveTextContent('RoboRev 저장소 이름 변경')
     expect(screen.getByTestId('formatted')).toHaveTextContent('2개 실행 중')
     expect(screen.getByTestId('stable-t')).toHaveTextContent('true')
     expect(screen.getByTestId('stable-format')).toHaveTextContent('true')

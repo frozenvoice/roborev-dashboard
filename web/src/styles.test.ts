@@ -73,4 +73,17 @@ describe('setup theme stylesheet contract', () => {
     expect(stylesheet).toContain('overflow-wrap:anywhere')
     expect(stylesheet).toContain('@media(max-width:720px){.tracked-repositories{padding:13px}')
   })
+
+  it('keeps rename command arguments exact and wraps long paths/names', () => {
+    expect(stylesheet).toContain('.rename-command-preview code{font:11px/1.45 "Cascadia Code",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}')
+    expect(stylesheet).toContain('.rename-command-preview li{display:grid;grid-template-columns:55px minmax(0,1fr)')
+    expect(stylesheet).toContain('.rename-facts strong,.rename-facts code{overflow-wrap:anywhere')
+  })
+
+  it('keeps the rename dialog usable on mobile', () => {
+    expect(stylesheet).toContain('@media(max-width:720px){.rename-dialog{padding:14px}')
+    expect(stylesheet).toContain('.rename-facts{grid-template-columns:1fr}')
+    expect(stylesheet).toContain('.rename-dialog footer .button{flex:1;min-width:120px}')
+    expect(stylesheet).toContain('.rename-command-preview{max-height:300px;overflow:auto}')
+  })
 })
