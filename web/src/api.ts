@@ -34,6 +34,8 @@ export type Installation = {
     configIntrospection?: boolean
     configMutation?: boolean
     guidelineInsights?: boolean
+    /** Optional because older bootstrap responses predate repository inventory. */
+    repositoryInventory?: boolean
   }
 }
 
@@ -43,6 +45,49 @@ export type Bootstrap = {
   selectedRepository: string
   selectedRepositoryIdentity: string
   roborev: Installation
+}
+
+export type RepositoryInventoryRow = {
+  name: string
+  path: string
+  jobCount: number
+  dashboardRegistered: boolean
+}
+
+export type RepositoryInventoryResponse = {
+  repositories: RepositoryInventoryRow[]
+  repositoryCount: number
+  totalJobCount: number
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/**
+ * Normalize the backend-owned repository inventory DTO.  The inventory is
+ * read-only UI data, so malformed rows are rejected as a whole rather than
+ * being partially rendered or matched in the browser.
+ */
+export function normalizeRepositoryInventoryResponse(value: unknown): RepositoryInventoryResponse | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (Object.keys(object).some(key => !['repositories', 'repositoryCount', 'totalJobCount'].includes(key))) return null
+  if (!Array.isArray(object.repositories) || !nonNegativeSafeInteger(object.repositoryCount) || !nonNegativeSafeInteger(object.totalJobCount)) return null
+  if (object.repositoryCount !== object.repositories.length) return null
+  const repositories: RepositoryInventoryRow[] = []
+  let total = 0
+  for (const item of object.repositories) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const row = item as Record<string, unknown>
+    if (Object.keys(row).some(key => !['name', 'path', 'jobCount', 'dashboardRegistered'].includes(key))) return null
+    if (typeof row.name !== 'string' || typeof row.path !== 'string' || row.path.length === 0 || !nonNegativeSafeInteger(row.jobCount) || typeof row.dashboardRegistered !== 'boolean') return null
+    total += row.jobCount
+    if (!Number.isSafeInteger(total)) return null
+    repositories.push({ name: row.name, path: row.path, jobCount: row.jobCount, dashboardRegistered: row.dashboardRegistered })
+  }
+  if (total !== object.totalJobCount) return null
+  return { repositories, repositoryCount: object.repositoryCount, totalJobCount: object.totalJobCount }
 }
 
 export type StatsWindow = '24h' | '7d' | '30d' | '90d'

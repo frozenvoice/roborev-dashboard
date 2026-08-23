@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/froze/roborev-dashboard/internal/insights"
+	"github.com/froze/roborev-dashboard/internal/repoinventory"
 )
 
 type Installation struct {
@@ -67,6 +68,14 @@ type Capabilities struct {
 	SummaryStats        bool `json:"summaryStats"`
 	CostStats           bool `json:"costStats"`
 	GuidelineInsights   bool `json:"guidelineInsights"`
+	RepositoryInventory bool `json:"repositoryInventory"`
+}
+
+// RepositoryInventoryService is deliberately optional: the base Service
+// interface is shared by existing review/task consumers and must not acquire
+// a new read surface that would break legacy fakes.
+type RepositoryInventoryService interface {
+	RepositoryInventory(context.Context) (repoinventory.Inventory, error)
 }
 
 // InsightsService is deliberately optional: the base Service interface is

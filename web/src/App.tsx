@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, Plus, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
+import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
 import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeSetupState, normalizeRuntimeControl, parseReviewInvalidationEvent, reviewEventsURL, TASK_HISTORY_LIMIT, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { jobStatus, jobStatusLabel } from './jobStatus'
@@ -8,6 +8,7 @@ import { Analyze } from './Analyze'
 import { Tasks } from './Tasks'
 import { Configuration } from './Configuration'
 import { StatsInsights } from './StatsInsights'
+import { Repositories } from './Repositories'
 import { InstallConfirmation, Setup, SetupBanner, setupIsActive, type DaemonAction } from './Setup'
 import { I18nContext, LanguageSelector, useI18n, type MessageKey } from './i18n'
 
@@ -1388,10 +1389,4 @@ export function App() {
     {setupConfirming && setupState && !setupState.installed && !setupOperationActive && <InstallConfirmation state={setupState} busy={busy} onCancel={() => setSetupConfirming(false)} onInstall={() => { setSetupConfirming(false); void setupMutation('/api/setup/roborev/install') }} />}
     <div className="toasts" aria-live="polite">{toasts.map(item => <div key={item.id} className={`toast ${item.kind}`}>{item.kind === 'success' ? <Check /> : <XCircle />}{item.message}</div>)}</div>
   </div>
-}
-
-function Repositories({ bootstrap, registerRepository, busy }: { bootstrap: Bootstrap | null; registerRepository: (repoPath: string) => Promise<boolean>; busy: boolean }) {
-  const { t } = useI18n()
-  const [path, setPath] = useState('')
-  return <section className="cards-page"><header className="section-heading"><div><span className="eyebrow">{t('repo.registeredTargets')}</span><h1>{t('nav.repositories')}</h1><p>{t('repo.onlyCanonical')}</p></div></header><div className="repo-cards">{bootstrap?.repositories.map(repo => <article key={repo.identity}><div className="repo-icon"><GitBranch /></div><div><h3>{repo.name}</h3><code>{repo.path}</code><p>{repo.branch} · {repo.headShort} {repo.dirty ? `· ${t('status.dirty').toLowerCase()}` : `· ${t('status.clean').toLowerCase()}`}</p></div></article>)}</div><form className="add-repo" onSubmit={event => { event.preventDefault(); void registerRepository(path).then(applied => { if (applied) setPath('') }) }}><label htmlFor="repo-path">{t('repo.addLocal')}</label><div><input id="repo-path" value={path} onChange={event => setPath(event.target.value)} placeholder={t('repo.pathPlaceholder')} /><button className="button primary" disabled={busy || !path.trim()}><Plus size={16} />{t('repo.register')}</button></div></form></section>
 }

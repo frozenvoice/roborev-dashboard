@@ -66,4 +66,11 @@ describe('setup theme stylesheet contract', () => {
   it('contains narrow Stats grid panels while preserving internal table scrolling', () => {
     expect(stylesheet).toContain('@media(max-width:390px){.stats-two-column{min-width:0}.stats-two-column>.stats-panel{min-width:0;max-width:100%}.stats-two-column>.stats-panel .stats-table-scroll{min-width:0;max-width:100%;overflow-x:auto}}')
   })
+
+  it('keeps the tracked repository inventory readable on mobile', () => {
+    expect(stylesheet).toContain('.tracked-table-wrap{overflow:auto')
+    expect(stylesheet).toContain('.tracked-table td code{font:11px/1.45')
+    expect(stylesheet).toContain('overflow-wrap:anywhere')
+    expect(stylesheet).toContain('@media(max-width:720px){.tracked-repositories{padding:13px}')
+  })
 })
