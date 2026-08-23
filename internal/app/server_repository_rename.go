@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -58,6 +59,17 @@ func (s *repositoryRenamePreviewStore) put(record repositoryRenamePreviewRecord)
 	return token, nil
 }
 
+// peek reads a still-valid preview without consuming it or reserving the
+// target. The caller releases the store lock before taking the shared
+// repository gate so lock ordering remains one-way across mutators.
+func (s *repositoryRenamePreviewStore) peek(token string) (repositoryRenamePreviewRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked(time.Now())
+	record, ok := s.pending[token]
+	return record, ok
+}
+
 // claim atomically consumes a token and reserves its exact target path. A
 // busy target leaves the token intact so a later confirm can try again.
 func (s *repositoryRenamePreviewStore) claim(token string) (repositoryRenamePreviewRecord, bool, bool) {
@@ -69,18 +81,19 @@ func (s *repositoryRenamePreviewStore) claim(token string) (repositoryRenamePrev
 	if !ok {
 		return repositoryRenamePreviewRecord{}, false, false
 	}
-	if _, busy := s.active[record.Path]; busy {
+	key := gitx.RepositoryKey(record.Path)
+	if _, busy := s.active[key]; busy {
 		return repositoryRenamePreviewRecord{}, false, true
 	}
 	delete(s.pending, token)
-	s.active[record.Path] = struct{}{}
+	s.active[key] = struct{}{}
 	return record, true, false
 }
 
 func (s *repositoryRenamePreviewStore) release(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.active, path)
+	delete(s.active, gitx.RepositoryKey(path))
 }
 
 func (s *repositoryRenamePreviewStore) expireLocked(now time.Time) {
@@ -176,15 +189,29 @@ func (s *Server) repositoryRenameConfirm(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "repository rename confirmation token is required", "request")
 		return
 	}
-	record, claimed, busy := s.renamePreviews.claim(token)
+	record, ok := s.renamePreviews.peek(token)
+	if !ok {
+		writeError(w, http.StatusConflict, "repository rename confirmation token is missing or expired", "stale")
+		return
+	}
+	releaseGate, gateErr := s.Gate.AcquireRepository(gitx.RepositoryKey(record.Path))
+	if gateErr != nil {
+		writeError(w, http.StatusConflict, gateErr.Error(), "operation")
+		return
+	}
+	claimedRecord, claimed, busy := s.renamePreviews.claim(token)
 	if busy {
+		releaseGate()
 		writeError(w, http.StatusConflict, "repository rename is already in progress", "operation")
 		return
 	}
 	if !claimed {
+		releaseGate()
 		writeError(w, http.StatusConflict, "repository rename confirmation token is missing or expired", "stale")
 		return
 	}
+	record = claimedRecord
+	defer releaseGate()
 	defer s.renamePreviews.release(record.Path)
 	ctx, cancel := mutationContext()
 	defer cancel()

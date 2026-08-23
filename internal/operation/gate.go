@@ -3,6 +3,7 @@ package operation
 
 import (
 	"errors"
+	"strings"
 	"sync"
 )
 
@@ -117,28 +118,54 @@ func (g *Gate) AcquireFix() (func(), error) {
 // Every long-lived repository mutator shares this map so stale UI requests
 // fail with a conflict instead of racing a currently running operation.
 func (g *Gate) AcquireRepository(identity string) (func(), error) {
-	if g == nil || identity == "" {
+	return g.AcquireRepositories(identity)
+}
+
+// AcquireRepositories reserves every canonical repository identity without
+// waiting. The check and all reservations happen while holding the same gate
+// lock, so callers either own the complete set or none of it. Duplicate keys
+// are harmless and are reserved only once.
+func (g *Gate) AcquireRepositories(identities ...string) (func(), error) {
+	if g == nil || len(identities) == 0 {
 		return nil, ErrBusy
+	}
+	keys := make([]string, 0, len(identities))
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		if strings.TrimSpace(identity) == "" {
+			return nil, ErrBusy
+		}
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+		keys = append(keys, identity)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.repositories == nil {
 		g.repositories = make(map[string]uint64)
 	}
-	if g.repositories[identity] != 0 {
-		return nil, ErrBusy
+	for _, identity := range keys {
+		if g.repositories[identity] != 0 {
+			return nil, ErrBusy
+		}
 	}
 	g.repositorySequence++
 	owner := g.repositorySequence
-	g.repositories[identity] = owner
+	for _, identity := range keys {
+		g.repositories[identity] = owner
+	}
 	released := false
 	return func() {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if !released {
 			released = true
-			if g.repositories[identity] == owner {
-				delete(g.repositories, identity)
+			for _, identity := range keys {
+				if g.repositories[identity] == owner {
+					delete(g.repositories, identity)
+				}
 			}
 		}
 	}, nil

@@ -90,8 +90,14 @@ describe('setup theme stylesheet contract', () => {
   it('keeps the repository move dialog isolated and usable on mobile', () => {
     expect(stylesheet).toContain('.move-command-preview code{font:11px/1.45 "Cascadia Code",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}')
     expect(stylesheet).toContain('.move-command-preview li{display:grid;grid-template-columns:55px minmax(0,1fr)')
-    expect(stylesheet).toContain('@media(max-width:720px){.move-dialog{padding:14px}')
+    expect(stylesheet).toContain('.move-dialog{padding:14px}')
     expect(stylesheet).toContain('.move-facts,.move-preview-facts{grid-template-columns:1fr}')
     expect(stylesheet).not.toContain('.move-dialog .rename-')
+  })
+
+  it('wraps lazy path-repair feedback on narrow repository rows', () => {
+    expect(stylesheet).toContain('.tracked-eligibility-message{display:block')
+    expect(stylesheet).toContain('overflow-wrap:anywhere')
+    expect(stylesheet).toContain('@media(max-width:720px){.tracked-eligibility-message{max-width:220px}.move-dialog')
   })
 })

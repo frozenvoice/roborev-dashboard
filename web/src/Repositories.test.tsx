@@ -774,20 +774,151 @@ describe('Repositories v2 inventory', () => {
     await waitFor(() => expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(2))
   })
 
-  it('shows Move only for stale inventory rows when the exact v0.64 move capability is available', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => response({ repositories: [
-      { name: 'stale', path: 'E:/old/project', jobCount: 2, dashboardRegistered: false },
-      { name: 'registered', path: 'E:/new/project', jobCount: 3, dashboardRegistered: true },
-    ], repositoryCount: 2, totalJobCount: 5 })))
+  it('shows lazy path repair eligibility only for stale inventory rows and never opens Move directly', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [
+        { name: 'stale', path: 'E:/old/project', jobCount: 2, dashboardRegistered: false },
+        { name: 'registered', path: 'E:/new/project', jobCount: 3, dashboardRegistered: true },
+      ], repositoryCount: 2, totalJobCount: 5 })
+      expect(url).toBe('/api/repository-moves/eligibility')
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBe(JSON.stringify({ sourcePath: 'E:/old/project' }))
+      return response({ eligible: true, sourcePath: 'E:/canonical/project', sourceName: 'canonical' })
+    }))
     render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
     await screen.findByText('stale')
-    expect(screen.getAllByRole('button', { name: 'Move' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Check path repair' })).toHaveLength(1)
+    expect(calls).toEqual(['/api/repository-inventory'])
     const rows = document.querySelectorAll('.tracked-table tbody tr')
     expect(rows).toHaveLength(2)
     expect(rows[0].querySelectorAll('td')).toHaveLength(rows[1].querySelectorAll('td').length)
     expect(rows[1].querySelector('.tracked-move')).toBeNull()
-    await userEvent.click(screen.getByRole('button', { name: 'Move' }))
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Check path repair' }))
     expect(screen.getByRole('dialog', { name: 'Repair RoboRev repository path' })).toBeInTheDocument()
+    expect(screen.getByText('canonical')).toBeInTheDocument()
+    expect(screen.getByText('E:/canonical/project')).toBeInTheDocument()
+  })
+
+  it('checks path repair lazily, shows the source-exists explanation, and never previews', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+      expect(url).toBe('/api/repository-moves/eligibility')
+      expect(init?.body).toBe(JSON.stringify({ sourcePath: 'E:/stale' }))
+      return response({ eligible: false, reason: 'source-exists' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    expect(await screen.findByText('This tracked path still exists on disk, so path repair is not needed.')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-moves/preview')).toHaveLength(0)
+  })
+
+  it('keeps a dashboard-registered eligibility race visible without opening Move', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/repository-inventory'
+      ? response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+      : response({ eligible: false, reason: 'dashboard-registered' })))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    expect(await screen.findByText('This repository is already registered in the Dashboard.')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Prepare move')).not.toBeInTheDocument()
+  })
+
+  it('shows an HTTP eligibility failure in the row without preview or dialog', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      return url === '/api/repository-inventory'
+        ? response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+        : response({ error: 'eligibility unavailable' }, 503)
+    }))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Path repair eligibility could not be checked.')
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-moves/preview')).toHaveLength(0)
+  })
+
+  it('keeps the checking action callable and same-row latest eligibility wins', async () => {
+    const eligibility: Array<(value: Response) => void> = []
+    let eligibilityCount = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+      eligibilityCount += 1
+      return new Promise<Response>(resolve => { eligibility.push(resolve) })
+    }))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    const initial = await screen.findByRole('button', { name: 'Check path repair' })
+    await userEvent.click(initial)
+    const checking = screen.getByRole('button', { name: 'Checking path repair…' })
+    expect(checking).toBeEnabled()
+    await userEvent.click(checking)
+    expect(eligibilityCount).toBe(2)
+    eligibility[1](await response({ eligible: true, sourcePath: 'E:/fresh', sourceName: 'fresh name' }))
+    expect(await screen.findByRole('dialog', { name: 'Repair RoboRev repository path' })).toBeInTheDocument()
+    expect(screen.getByText('fresh name')).toBeInTheDocument()
+    eligibility[0](await response({ eligible: false, reason: 'source-exists' }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByRole('dialog', { name: 'Repair RoboRev repository path' })).toBeInTheDocument()
+  })
+
+  it('discards a stale different-row eligibility response while keeping the newest feedback', async () => {
+    const eligibility: Array<(value: Response) => void> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response({ repositories: [
+        { name: 'first', path: 'E:/first', jobCount: 1, dashboardRegistered: false },
+        { name: 'second', path: 'E:/second', jobCount: 2, dashboardRegistered: false },
+      ], repositoryCount: 2, totalJobCount: 3 })
+      return new Promise<Response>(resolve => { eligibility.push(resolve) })
+    }))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    const actions = await screen.findAllByRole('button', { name: 'Check path repair' })
+    await userEvent.click(actions[0])
+    await userEvent.click(actions[1])
+    eligibility[1](await response({ eligible: false, reason: 'source-exists' }))
+    expect(await screen.findByText('This tracked path still exists on disk, so path repair is not needed.')).toBeInTheDocument()
+    eligibility[0](await response({ eligible: true, sourcePath: 'E:/stale-first', sourceName: 'stale first' }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
+    expect(screen.queryByText('stale first')).not.toBeInTheDocument()
+  })
+
+  it('renders malformed eligibility as component-owned row feedback and aborts it on unmount', async () => {
+    let eligibilitySignal: AbortSignal | undefined
+    let resolveEligibility!: (value: Response) => void
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+      eligibilitySignal = init?.signal ?? undefined
+      return new Promise<Response>(resolve => { resolveEligibility = resolve })
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    await waitFor(() => expect(eligibilitySignal).toBeDefined())
+    expect(eligibilitySignal?.aborted).toBe(false)
+    view.unmount()
+    expect(eligibilitySignal?.aborted).toBe(true)
+    resolveEligibility(await response({ eligible: true, sourcePath: 'E:/late' }))
+  })
+
+  it('shows malformed eligibility feedback without opening the Move dialog', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/repository-inventory'
+      ? response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+      : response({ eligible: true, sourcePath: 'E:/canonical' })))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not validate the path repair eligibility response')
+    expect(screen.queryByRole('dialog', { name: 'Repair RoboRev repository path' })).not.toBeInTheDocument()
   })
 
   it('keeps verified Move success and toast when the follow-up inventory refresh fails', async () => {
@@ -803,11 +934,13 @@ describe('Repositories v2 inventory', () => {
           ? response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
           : response({ error: 'refresh failed' }, 503)
       }
+      if (url === '/api/repository-moves/eligibility') return response({ eligible: true, sourcePath: 'E:/stale', sourceName: 'stale' })
       if (url.endsWith('/preview')) return response(movePreview)
       return response({ status: 'moved', sourcePath: 'E:/stale', destinationPath: 'E:\\repo' })
     }))
     render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
-    await userEvent.click(await screen.findByRole('button', { name: 'Move' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Check path repair' }))
+    await screen.findByRole('dialog', { name: 'Repair RoboRev repository path' })
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'repo-1')
     await userEvent.click(screen.getByRole('button', { name: 'Prepare move' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Confirm move' }))

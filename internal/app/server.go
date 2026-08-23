@@ -234,6 +234,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repository-renames/preview", s.mutationAuth(s.repositoryRenamePreview))
 	s.mux.HandleFunc("POST /api/repository-renames", s.mutation(s.repositoryRenameConfirm))
 	s.mux.HandleFunc("POST /api/repository-moves/preview", s.mutationAuth(s.repositoryMovePreview))
+	s.mux.HandleFunc("POST /api/repository-moves/eligibility", s.mutationAuth(s.repositoryMoveEligibility))
 	s.mux.HandleFunc("POST /api/repository-moves", s.mutation(s.repositoryMoveConfirm))
 	s.mux.HandleFunc("POST /api/insights/preview", s.mutationAuth(s.insightsPreview))
 	s.mux.HandleFunc("POST /api/insights", s.mutationAuth(s.startInsights))

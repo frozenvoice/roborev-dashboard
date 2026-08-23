@@ -395,6 +395,12 @@ export const en = {
   'repo.moveUnverified': 'The move process started, but the fresh inventory could not verify the final path. Refresh to inspect the current state. No retry was issued.',
   'repo.moveMalformed': 'The Dashboard could not validate the repository move response.',
   'repo.moveClose': 'Close repository move dialog',
+  'repo.moveEligibility': 'Check path repair',
+  'repo.moveEligibilityChecking': 'Checking path repair…',
+  'repo.moveEligibilitySourceExists': 'This tracked path still exists on disk, so path repair is not needed.',
+  'repo.moveEligibilityRegistered': 'This repository is already registered in the Dashboard.',
+  'repo.moveEligibilityFailed': 'Path repair eligibility could not be checked.',
+  'repo.moveEligibilityMalformed': 'The Dashboard could not validate the path repair eligibility response.',
   'panel.unavailable': 'Panel unavailable',
   'panel.unavailableNotInstalled': 'RoboRev is not installed.',
   'panel.unavailableDaemonOffline': 'The RoboRev daemon is not running.',
@@ -920,6 +926,12 @@ ko['repo.moveSuccess'] = 'RoboRev 저장소 경로를 복구했습니다.'
 ko['repo.moveUnverified'] = '경로 복구 프로세스는 시작했지만 새 경로를 inventory에서 확인하지 못했습니다. 새로고침하여 현재 상태를 확인하세요. 자동 재시도하지 않았습니다.'
 ko['repo.moveMalformed'] = 'Dashboard가 저장소 경로 복구 응답을 검증하지 못했습니다.'
 ko['repo.moveClose'] = '저장소 경로 복구 대화상자 닫기'
+ko['repo.moveEligibility'] = '경로 복구 확인'
+ko['repo.moveEligibilityChecking'] = '경로 복구 확인 중…'
+ko['repo.moveEligibilitySourceExists'] = '이 추적 경로가 디스크에 아직 존재하므로 경로 복구가 필요하지 않습니다.'
+ko['repo.moveEligibilityRegistered'] = '이 저장소는 이미 Dashboard에 등록되어 있습니다.'
+ko['repo.moveEligibilityFailed'] = '경로 복구 가능 여부를 확인하지 못했습니다.'
+ko['repo.moveEligibilityMalformed'] = 'Dashboard가 경로 복구 가능 여부 응답을 검증하지 못했습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

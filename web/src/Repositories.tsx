@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, GitBranch, Plus, RefreshCw, X } from 'lucide-react'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, request, validateRepositoryRenameName, type Bootstrap, type RepositoryInventoryResponse, type RepositoryInventoryRow, type RepositoryRenameNameError, type RepositoryRenamePreview } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMoveEligibility, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, request, validateRepositoryRenameName, type Bootstrap, type RepositoryInventoryResponse, type RepositoryInventoryRow, type RepositoryRenameNameError, type RepositoryRenamePreview } from './api'
 import { RepositoryMoveDialog, type RepositoryMoveAvailability } from './RepositoryMoveDialog'
 import { useI18n, type MessageKey } from './i18n'
 
 type InventoryState = 'idle' | 'loading' | 'loaded' | 'error' | 'unavailable'
 type InventoryError = { kind: 'malformed' | 'request'; message?: string }
 type RenameState = 'editing' | 'previewing' | 'ready' | 'confirming' | 'error' | 'unverified' | (string & {})
+type MoveEligibilityFeedback = { path: string; kind: 'source-exists' | 'dashboard-registered' | 'malformed' | 'request' }
 
 export type RepositoriesProps = {
   bootstrap: Bootstrap | null
@@ -68,12 +69,16 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const [renameError, setRenameError] = useState('')
   const [renameUnverifiedMessage, setRenameUnverifiedMessage] = useState('')
   const [moveTarget, setMoveTarget] = useState<RepositoryInventoryRow | null>(null)
+  const [moveEligibilityCheckingPath, setMoveEligibilityCheckingPath] = useState<string | null>(null)
+  const [moveEligibilityFeedback, setMoveEligibilityFeedback] = useState<MoveEligibilityFeedback | null>(null)
   const generation = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const previewGeneration = useRef(0)
   const previewAbortRef = useRef<AbortController | null>(null)
   const confirmGeneration = useRef(0)
   const confirmAbortRef = useRef<AbortController | null>(null)
+  const moveEligibilityGeneration = useRef(0)
+  const moveEligibilityAbortRef = useRef<AbortController | null>(null)
   const renameConfirming = useRef(false)
   const mounted = useRef(true)
   const { inventoryReady, canRename, reason: renameAvailabilityReason } = renameAvailability(bootstrap)
@@ -124,6 +129,10 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       confirmAbortRef.current?.abort()
       confirmAbortRef.current = null
       renameConfirming.current = false
+
+      moveEligibilityGeneration.current += 1
+      moveEligibilityAbortRef.current?.abort()
+      moveEligibilityAbortRef.current = null
     }
   }, [])
 
@@ -173,9 +182,41 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
     setRenameState('editing')
   }
 
-  function openMove(row: RepositoryInventoryRow) {
+  async function checkMoveEligibility(row: RepositoryInventoryRow) {
     if (row.dashboardRegistered || !mounted.current) return
-    setMoveTarget(row)
+    const currentGeneration = ++moveEligibilityGeneration.current
+    moveEligibilityAbortRef.current?.abort()
+    const controller = new AbortController()
+    moveEligibilityAbortRef.current = controller
+    setMoveTarget(null)
+    setMoveEligibilityCheckingPath(row.path)
+    setMoveEligibilityFeedback(null)
+    try {
+      const payload = await request<unknown>('/api/repository-moves/eligibility', { method: 'POST', body: JSON.stringify({ sourcePath: row.path }), signal: controller.signal })
+      const normalized = normalizeRepositoryMoveEligibility(payload)
+      if (!normalized) {
+        if (!mounted.current || currentGeneration !== moveEligibilityGeneration.current) return
+        setMoveEligibilityFeedback({ path: row.path, kind: 'malformed' })
+        return
+      }
+      if (!mounted.current || currentGeneration !== moveEligibilityGeneration.current) return
+      if (normalized.eligible) {
+        setMoveTarget({ ...row, path: normalized.sourcePath, name: normalized.sourceName, dashboardRegistered: false })
+        setMoveEligibilityFeedback(null)
+      } else {
+        setMoveTarget(null)
+        setMoveEligibilityFeedback({ path: row.path, kind: normalized.reason })
+      }
+    } catch (error) {
+      if (controller.signal.aborted || !mounted.current || currentGeneration !== moveEligibilityGeneration.current) return
+      setMoveTarget(null)
+      setMoveEligibilityFeedback({ path: row.path, kind: 'request' })
+    } finally {
+      if (mounted.current && currentGeneration === moveEligibilityGeneration.current) {
+        setMoveEligibilityCheckingPath(null)
+        if (moveEligibilityAbortRef.current === controller) moveEligibilityAbortRef.current = null
+      }
+    }
   }
 
   async function prepareRename(event: FormEvent<HTMLFormElement>) {
@@ -254,7 +295,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       <header className="section-heading tracked-heading"><div><span className="eyebrow">{t('repo.trackedEyebrow')}</span><h2 id="tracked-repositories-heading">{t('repo.trackedTitle')}</h2><p>{t('repo.trackedDescription')}</p></div>{inventoryReady && <button className="button" type="button" onClick={() => { void refreshInventory() }}><RefreshCw size={15} className={inventoryState === 'loading' ? 'spin' : undefined} />{t('repo.trackedRefresh')}</button>}</header>
       {!inventoryReady || inventoryState === 'unavailable' ? <div className="tracked-state tracked-unavailable" role="status"><strong>{t('repo.trackedUnavailable')}</strong><span>{t('repo.trackedUnavailableBody')}</span></div> : inventoryState === 'loading' && !inventory ? <div className="tracked-state" role="status"><RefreshCw className="spin" size={17} /><span>{t('repo.trackedLoading')}</span></div> : inventoryState === 'error' ? <div className="tracked-state tracked-error" role="alert"><strong>{t('repo.trackedError')}</strong><span>{inventoryError?.kind === 'malformed' ? t('repo.trackedMalformed') : inventoryError?.message || t('repo.trackedError')}</span></div> : inventory && inventory.repositories.length === 0 ? <div className="tracked-state" role="status"><span>{t('repo.trackedEmpty')}</span></div> : inventory && <>
         <div className="tracked-summary" aria-label={t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}>{t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}</div>
-        <div className="tracked-table-wrap"><table className="tracked-table"><thead><tr><th scope="col">{t('repo.trackedName')}</th><th scope="col">{t('repo.trackedPath')}</th><th scope="col">{t('repo.trackedJobs')}</th><th scope="col">{t('repo.trackedStatus')}</th>{canRename && <th scope="col">{t('repo.rename')}</th>}{showMoveColumn && <th scope="col">{t('repo.move')}</th>}</tr></thead><tbody>{inventory.repositories.map((repo, index) => <tr key={`${repo.path}:${index}`}><td><strong>{repo.name}</strong></td><td><code>{repo.path}</code></td><td>{repo.jobCount}</td><td><span className={`status ${repo.dashboardRegistered ? 'status-pass' : 'status-canceled'}`}><span className="status-dot" />{repo.dashboardRegistered ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</span></td>{canRename && <td><button className="button tracked-rename" type="button" onClick={() => openRename(repo)} disabled={busy || renameState === 'previewing' || renameState === 'confirming'}>{t('repo.rename')}</button></td>}{showMoveColumn && (repo.dashboardRegistered ? <td /> : <td><button className="button tracked-move" type="button" onClick={() => openMove(repo)} disabled={busy}>{t('repo.move')}</button></td>)}</tr>)}</tbody></table></div>
+        <div className="tracked-table-wrap"><table className="tracked-table"><thead><tr><th scope="col">{t('repo.trackedName')}</th><th scope="col">{t('repo.trackedPath')}</th><th scope="col">{t('repo.trackedJobs')}</th><th scope="col">{t('repo.trackedStatus')}</th>{canRename && <th scope="col">{t('repo.rename')}</th>}{showMoveColumn && <th scope="col">{t('repo.move')}</th>}</tr></thead><tbody>{inventory.repositories.map((repo, index) => { const feedback = moveEligibilityFeedback?.path === repo.path ? moveEligibilityFeedback.kind : null; const checking = moveEligibilityCheckingPath === repo.path; return <tr key={`${repo.path}:${index}`}><td><strong>{repo.name}</strong></td><td><code>{repo.path}</code></td><td>{repo.jobCount}</td><td><span className={`status ${repo.dashboardRegistered ? 'status-pass' : 'status-canceled'}`}><span className="status-dot" />{repo.dashboardRegistered ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</span></td>{canRename && <td><button className="button tracked-rename" type="button" onClick={() => openRename(repo)} disabled={busy || renameState === 'previewing' || renameState === 'confirming'}>{t('repo.rename')}</button></td>}{showMoveColumn && (repo.dashboardRegistered ? <td /> : <td><button className="button tracked-move" type="button" onClick={() => { void checkMoveEligibility(repo) }} disabled={busy} aria-busy={checking || undefined}>{checking ? t('repo.moveEligibilityChecking') : t('repo.moveEligibility')}</button>{feedback === 'source-exists' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilitySourceExists')}</span>}{feedback === 'dashboard-registered' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilityRegistered')}</span>}{feedback === 'malformed' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityMalformed')}</span>}{feedback === 'request' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityFailed')}</span>}</td>)}</tr> })}</tbody></table></div>
       </>}
     </section>
 

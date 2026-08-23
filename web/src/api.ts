@@ -95,8 +95,17 @@ export type RepositoryMoveResult =
   | { status: 'moved'; sourcePath: string; destinationPath: string }
   | { status: 'unverified'; sourcePath: string; destinationPath: string; message: string }
 
+export type RepositoryMoveEligibility =
+  | { eligible: true; sourcePath: string; sourceName: string }
+  | { eligible: false; reason: 'source-exists' | 'dashboard-registered' }
+
 function renameObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function hasExactKeys(object: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(object)
+  return keys.length === expected.length && expected.every(key => Object.prototype.hasOwnProperty.call(object, key))
 }
 
 function renameCommand(value: unknown): RepositoryRenameCommand | null {
@@ -135,6 +144,18 @@ export function normalizeRepositoryMoveResult(value: unknown): RepositoryMoveRes
     return { status: 'unverified', sourcePath: object.sourcePath, destinationPath: object.destinationPath, message: object.message }
   }
   return null
+}
+
+/** Normalize the strict server-owned preflight result for lazy path repair. */
+export function normalizeRepositoryMoveEligibility(value: unknown): RepositoryMoveEligibility | null {
+  const object = renameObject(value)
+  if (!object || typeof object.eligible !== 'boolean') return null
+  if (object.eligible === true) {
+    if (!hasExactKeys(object, ['eligible', 'sourcePath', 'sourceName']) || typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.sourceName !== 'string') return null
+    return { eligible: true, sourcePath: object.sourcePath, sourceName: object.sourceName }
+  }
+  if (!hasExactKeys(object, ['eligible', 'reason']) || (object.reason !== 'source-exists' && object.reason !== 'dashboard-registered')) return null
+  return { eligible: false, reason: object.reason }
 }
 
 /** Normalize the strict, server-owned repository rename preview. */

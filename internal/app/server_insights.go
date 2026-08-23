@@ -77,6 +77,12 @@ func (s *Server) startInsights(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Insights confirmation token is expired or already used", "insights")
 		return
 	}
+	releaseRepository, gateErr := s.Gate.AcquireRepository(gitx.RepositoryKey(identity))
+	if gateErr != nil {
+		writeError(w, http.StatusConflict, gateErr.Error(), "operation")
+		return
+	}
+	defer releaseRepository()
 	release, _, err := s.Registry.AcquireSelected(identity)
 	if err != nil {
 		writeError(w, http.StatusConflict, "selected repository changed; prepare Insights again", "repository")

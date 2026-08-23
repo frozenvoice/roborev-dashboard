@@ -58,7 +58,21 @@ func (s *repositoryMovePreviewStore) put(record repositoryMovePreviewRecord) (st
 	return token, nil
 }
 
-// claim atomically reserves both source and destination. A conflicting
+// peek reads a still-valid preview without consuming it or reserving either
+// path.  The caller must release the store lock before acquiring any other
+// lease; keeping this operation separate from claim avoids a lock-order
+// inversion with the process-wide repository gate.
+func (s *repositoryMovePreviewStore) peek(token string) (repositoryMovePreviewRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked(time.Now())
+	record, ok := s.pending[token]
+	return record, ok
+}
+
+// claim atomically consumes a token and reserves both source and destination
+// for this move store. Cross-feature ownership is provided by Gate; the local
+// active map retains move-specific same-feature semantics. A conflicting
 // operation leaves the token available for a later confirmation.
 func (s *repositoryMovePreviewStore) claim(token string) (repositoryMovePreviewRecord, bool, bool) {
 	s.mu.Lock()
@@ -206,15 +220,38 @@ func (s *Server) repositoryMoveConfirm(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "repository move preview is unavailable or expired", "repository-move")
 		return
 	}
-	record, claimed, busy := s.movePreviews.claim(body.Token)
+	record, ok := s.movePreviews.peek(body.Token)
+	if !ok {
+		writeError(w, http.StatusConflict, "repository move preview is unavailable or expired", "repository-move")
+		return
+	}
+	// The destination binding is part of the opaque token. Reject a malformed
+	// or stale record before reserving either repository lease.
+	if record.DestinationIdentity != gitx.RepositoryKey(record.Request.DestinationPath) {
+		writeError(w, http.StatusConflict, "repository move preview binding is invalid", "repository-move")
+		return
+	}
+	releaseGate, gateErr := s.Gate.AcquireRepositories(
+		gitx.RepositoryKey(record.Request.SourcePath),
+		gitx.RepositoryKey(record.Request.DestinationPath),
+	)
+	if gateErr != nil {
+		writeError(w, http.StatusConflict, gateErr.Error(), "operation")
+		return
+	}
+	claimedRecord, claimed, busy := s.movePreviews.claim(body.Token)
 	if busy {
+		releaseGate()
 		writeError(w, http.StatusConflict, "repository move is already in progress", "repository-move")
 		return
 	}
 	if !claimed {
+		releaseGate()
 		writeError(w, http.StatusConflict, "repository move preview is unavailable or expired", "repository-move")
 		return
 	}
+	record = claimedRecord
+	defer releaseGate()
 	defer s.movePreviews.release(record)
 	destination, err := s.Registry.InspectIdentity(r.Context(), record.DestinationIdentity)
 	if err != nil || !gitx.SameRepositoryPath(destination.Path, record.Request.DestinationPath) {

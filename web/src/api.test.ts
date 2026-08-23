@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
 
 const row = { name: 'repo', path: 'E:\\repo', jobCount: 2, dashboardRegistered: true }
 
@@ -74,6 +74,27 @@ describe('repository move API normalization', () => {
     expect(normalizeRepositoryMovePreview(preview)).toEqual(preview)
     expect(normalizeRepositoryMoveResult({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project' })).toEqual({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project' })
     expect(normalizeRepositoryMoveResult({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'refresh' })).toEqual({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'refresh' })
+  })
+
+  it('accepts only the exact lazy eligibility union and preserves canonical source values', () => {
+    expect(normalizeRepositoryMoveEligibility({ eligible: true, sourcePath: 'E:\\canonical', sourceName: 'canonical' })).toEqual({ eligible: true, sourcePath: 'E:\\canonical', sourceName: 'canonical' })
+    expect(normalizeRepositoryMoveEligibility({ eligible: true, sourcePath: 'E:\\canonical', sourceName: '' })).toEqual({ eligible: true, sourcePath: 'E:\\canonical', sourceName: '' })
+    expect(normalizeRepositoryMoveEligibility({ eligible: false, reason: 'source-exists' })).toEqual({ eligible: false, reason: 'source-exists' })
+    expect(normalizeRepositoryMoveEligibility({ eligible: false, reason: 'dashboard-registered' })).toEqual({ eligible: false, reason: 'dashboard-registered' })
+  })
+
+  it('rejects unknown fields and unsafe or malformed eligibility DTOs', () => {
+    const invalid: unknown[] = [
+      null, [], {}, { eligible: 'true', sourcePath: 'E:\\canonical', sourceName: 'canonical' },
+      { eligible: true, sourcePath: '', sourceName: 'canonical' },
+      { eligible: true, sourcePath: 'E:\\canonical' },
+      { eligible: true, sourcePath: 'E:\\canonical', sourceName: 'canonical', extra: true },
+      { eligible: false }, { eligible: false, reason: 'unknown' },
+      { eligible: false, reason: 'source-exists', sourcePath: 'E:\\canonical' },
+    ]
+    for (const value of invalid) expect(normalizeRepositoryMoveEligibility(value)).toBeNull()
+    const inherited = Object.create({ eligible: false, reason: 'source-exists' }) as Record<string, unknown>
+    expect(normalizeRepositoryMoveEligibility(inherited)).toBeNull()
   })
 
   it('rejects unknown fields, missing cwd, malformed identity and unsafe receipts', () => {
