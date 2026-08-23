@@ -14,18 +14,23 @@ export type RepositoriesProps = {
   onToast?: (kind: 'success' | 'error' | 'warning', message: string) => void
 }
 
-function inventoryAvailable(bootstrap: Bootstrap | null) {
-  return Boolean(bootstrap?.roborev?.installed && bootstrap.roborev.status?.running && bootstrap.roborev.capabilities?.repositoryInventory)
-}
-
 type RenameAvailabilityReason = 'runtime-unavailable' | 'unsupported'
 
 function renameAvailability(bootstrap: Bootstrap | null) {
-  const inventoryReady = inventoryAvailable(bootstrap)
+  const installed = bootstrap?.roborev?.installed === true
+  const inventorySupported = bootstrap?.roborev?.capabilities?.repositoryInventory === true
   const renameSupported = bootstrap?.roborev?.capabilities?.repositoryRename === true
+  const daemonRunning = bootstrap?.roborev?.status?.running === true
+  const inventoryReady = installed && inventorySupported && daemonRunning
   const canRename = inventoryReady && renameSupported
-  const reason: RenameAvailabilityReason | null = !inventoryReady ? 'runtime-unavailable' : !renameSupported ? 'unsupported' : null
-  return { inventoryReady, renameSupported, canRename, reason }
+  const reason: RenameAvailabilityReason | null = !installed
+    ? 'runtime-unavailable'
+    : !inventorySupported || !renameSupported
+      ? 'unsupported'
+      : !daemonRunning
+        ? 'runtime-unavailable'
+        : null
+  return { installed, inventorySupported, renameSupported, daemonRunning, inventoryReady, canRename, reason }
 }
 
 function renameValidationMessage(error: RepositoryRenameNameError | undefined, t: (key: MessageKey, values?: Record<string, string | number>) => string) {
@@ -42,7 +47,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const { t } = useI18n()
   const [path, setPath] = useState('')
   const [inventory, setInventory] = useState<RepositoryInventoryResponse | null>(null)
-  const [inventoryState, setInventoryState] = useState<InventoryState>(() => inventoryAvailable(bootstrap) ? 'idle' : 'unavailable')
+  const [inventoryState, setInventoryState] = useState<InventoryState>(() => renameAvailability(bootstrap).inventoryReady ? 'idle' : 'unavailable')
   const [inventoryError, setInventoryError] = useState<InventoryError | null>(null)
   const [renameTarget, setRenameTarget] = useState<RepositoryInventoryRow | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
