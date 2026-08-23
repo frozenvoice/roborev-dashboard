@@ -401,6 +401,40 @@ export const en = {
   'repo.moveEligibilityRegistered': 'This repository is already registered in the Dashboard.',
   'repo.moveEligibilityFailed': 'Path repair eligibility could not be checked.',
   'repo.moveEligibilityMalformed': 'The Dashboard could not validate the path repair eligibility response.',
+  'repo.merge': 'Merge',
+  'repo.mergeTitle': 'Merge stale RoboRev repository entry',
+  'repo.mergeDescription': 'Consolidate a stale RoboRev source entry into a repository already registered in this Dashboard.',
+  'repo.mergeSource': 'Stale source',
+  'repo.mergeSourcePath': 'Source path',
+  'repo.mergeSourceJobs': 'Source jobs',
+  'repo.mergeTarget': 'Registered target',
+  'repo.mergeTargetPlaceholder': 'Select a registered target',
+  'repo.mergeTargetName': 'Target name',
+  'repo.mergeTargetPath': 'Target path',
+  'repo.mergeTargetJobs': 'Target jobs',
+  'repo.mergeCommand': 'Exact executable, working directory, and argv',
+  'repo.mergeWorkingDirectory': 'Working directory',
+  'repo.mergeWarning': 'The stale RoboRev source entry will be removed and its jobs, reviews, and related metadata consolidated into the target.',
+  'repo.mergeWarningNoRollback': 'The target name/path stay unchanged. No filesystem, Git, Dashboard Registry, automatic rollback, or retry is performed.',
+  'repo.mergePrepare': 'Prepare merge',
+  'repo.mergePreparing': 'Preparing…',
+  'repo.mergeUnavailable': 'RoboRev is currently unavailable. When it becomes available again, prepare a new Merge Preview.',
+  'repo.mergeUnsupported': 'The installed RoboRev does not support repository merge.',
+  'repo.mergeConfirm': 'Confirm merge',
+  'repo.mergeConfirming': 'Merging…',
+  'repo.mergeSuccess': 'Stale RoboRev repository entry merged.',
+  'repo.mergeUnverified': 'The merge process started, but fresh RoboRev inventory could not verify the consolidated state. Refresh to inspect the current state. No retry was issued.',
+  'repo.mergeMalformed': 'The Dashboard could not validate the repository merge response.',
+  'repo.mergeClose': 'Close repository merge dialog',
+  'repo.mergeEligibility': 'Check merge',
+  'repo.mergeEligibilityChecking': 'Checking merge eligibility…',
+  'repo.mergeEligibilitySourceExists': 'This source path still exists on disk, so it is not a stale entry.',
+  'repo.mergeEligibilityRegistered': 'This repository is already registered in the Dashboard.',
+  'repo.mergeEligibilityEmpty': 'This stale entry has no jobs to merge.',
+  'repo.mergeEligibilityActive': 'This stale entry has queued or running jobs, so it cannot be merged safely yet.',
+  'repo.mergeEligibilityNoTargets': 'No registered RoboRev-tracked target is available.',
+  'repo.mergeEligibilityFailed': 'Merge eligibility could not be checked.',
+  'repo.mergeEligibilityMalformed': 'The Dashboard could not validate the merge eligibility response.',
   'panel.unavailable': 'Panel unavailable',
   'panel.unavailableNotInstalled': 'RoboRev is not installed.',
   'panel.unavailableDaemonOffline': 'The RoboRev daemon is not running.',
@@ -926,6 +960,40 @@ ko['repo.moveSuccess'] = 'RoboRev 저장소 경로를 복구했습니다.'
 ko['repo.moveUnverified'] = '경로 복구 프로세스는 시작했지만 새 경로를 inventory에서 확인하지 못했습니다. 새로고침하여 현재 상태를 확인하세요. 자동 재시도하지 않았습니다.'
 ko['repo.moveMalformed'] = 'Dashboard가 저장소 경로 복구 응답을 검증하지 못했습니다.'
 ko['repo.moveClose'] = '저장소 경로 복구 대화상자 닫기'
+ko['repo.merge'] = '병합'
+ko['repo.mergeTitle'] = '오래된 RoboRev 저장소 항목 병합'
+ko['repo.mergeDescription'] = '오래된 RoboRev source 항목을 이 Dashboard에 이미 등록된 저장소로 통합합니다.'
+ko['repo.mergeSource'] = '오래된 source'
+ko['repo.mergeSourcePath'] = 'source 경로'
+ko['repo.mergeSourceJobs'] = 'source 작업'
+ko['repo.mergeTarget'] = '등록된 target'
+ko['repo.mergeTargetPlaceholder'] = '등록된 target 선택'
+ko['repo.mergeTargetName'] = 'target 이름'
+ko['repo.mergeTargetPath'] = 'target 경로'
+ko['repo.mergeTargetJobs'] = 'target 작업'
+ko['repo.mergeCommand'] = '정확한 실행 파일, working directory 및 argv'
+ko['repo.mergeWorkingDirectory'] = 'Working directory'
+ko['repo.mergeWarning'] = '오래된 RoboRev source 항목을 제거하고 작업, 리뷰 및 관련 메타데이터를 target으로 통합합니다.'
+ko['repo.mergeWarningNoRollback'] = 'target 이름/경로는 유지됩니다. 파일 시스템, Git, Dashboard Registry를 변경하지 않으며 자동 rollback/retry를 하지 않습니다.'
+ko['repo.mergePrepare'] = '병합 준비'
+ko['repo.mergePreparing'] = '준비 중…'
+ko['repo.mergeUnavailable'] = '현재 RoboRev를 사용할 수 없습니다. 다시 사용 가능해지면 새 Merge Preview를 준비하세요.'
+ko['repo.mergeUnsupported'] = '설치된 RoboRev는 저장소 병합을 지원하지 않습니다.'
+ko['repo.mergeConfirm'] = '병합 확인'
+ko['repo.mergeConfirming'] = '병합 중…'
+ko['repo.mergeSuccess'] = '오래된 RoboRev 저장소 항목을 병합했습니다.'
+ko['repo.mergeUnverified'] = '병합 프로세스는 시작했지만 새 RoboRev inventory에서 통합 상태를 확인하지 못했습니다. 새로고침하여 현재 상태를 확인하세요. 자동 재시도하지 않았습니다.'
+ko['repo.mergeMalformed'] = 'Dashboard가 저장소 병합 응답을 검증하지 못했습니다.'
+ko['repo.mergeClose'] = '저장소 병합 대화상자 닫기'
+ko['repo.mergeEligibility'] = '병합 확인'
+ko['repo.mergeEligibilityChecking'] = '병합 가능 여부 확인 중…'
+ko['repo.mergeEligibilitySourceExists'] = '이 source 경로가 디스크에 아직 존재하므로 오래된 항목이 아닙니다.'
+ko['repo.mergeEligibilityRegistered'] = '이 저장소는 이미 Dashboard에 등록되어 있습니다.'
+ko['repo.mergeEligibilityEmpty'] = '이 오래된 항목에는 병합할 작업 기록이 없습니다.'
+ko['repo.mergeEligibilityActive'] = '대기 중이거나 실행 중인 작업이 있어 안전하게 병합할 수 없습니다.'
+ko['repo.mergeEligibilityNoTargets'] = '등록되어 있고 RoboRev가 추적 중인 target이 없습니다.'
+ko['repo.mergeEligibilityFailed'] = '병합 가능 여부를 확인하지 못했습니다.'
+ko['repo.mergeEligibilityMalformed'] = 'Dashboard가 병합 가능 여부 응답을 검증하지 못했습니다.'
 ko['repo.moveEligibility'] = '경로 복구 확인'
 ko['repo.moveEligibilityChecking'] = '경로 복구 확인 중…'
 ko['repo.moveEligibilitySourceExists'] = '이 추적 경로가 디스크에 아직 존재하므로 경로 복구가 필요하지 않습니다.'

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { moveAvailability, Repositories } from './Repositories'
+import { mergeAvailability, moveAvailability, Repositories } from './Repositories'
 import type { Bootstrap } from './api'
 import { I18nProvider, useI18n } from './i18n'
 
@@ -948,5 +948,106 @@ describe('Repositories v2 inventory', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(await screen.findByRole('alert')).toHaveTextContent('refresh failed')
     expect(calls.filter(url => url === '/api/repository-moves')).toHaveLength(1)
+  })
+})
+
+describe('Repositories v3C safe merge', () => {
+  const mergeBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryMerge: true } } }
+  const inventory = { repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 7, dashboardRegistered: false }, { name: 'target', path: 'E:\\target', jobCount: 3, dashboardRegistered: true }], repositoryCount: 2, totalJobCount: 10 }
+  const eligibility = { eligible: true, source: { path: 'E:/stale', name: 'stale', jobCount: 7 }, targets: [{ repositoryIdentity: 'repo-1', name: 'target', path: 'E:\\target', jobCount: 3 }] }
+  const preview = { source: eligibility.source, target: { repositoryIdentity: 'repo-1', name: 'target', path: 'E:\\target', jobCount: 3 }, command: { executable: 'roborev.exe', args: ['repo', 'merge', '--yes', 'E:/stale', 'E:\\target'], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
+
+  it.each([
+    ['binary/install absent', { ...mergeBootstrap, roborev: { ...mergeBootstrap.roborev, installed: false, status: { running: false }, capabilities: { ...mergeBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false, repositoryMove: false, repositoryMerge: false } } }, false, 'runtime-unavailable'],
+    ['unsupported RoboRev version', { ...mergeBootstrap, roborev: { ...mergeBootstrap.roborev, version: 'v0.63.0', status: { running: false }, capabilities: { ...mergeBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false, repositoryMove: false, repositoryMerge: false } } }, false, 'unsupported'],
+    ['exact v0.64 daemon offline', { ...mergeBootstrap, roborev: { ...mergeBootstrap.roborev, status: { running: false } } }, false, 'runtime-unavailable'],
+    ['exact v0.64 daemon online', mergeBootstrap, true, null],
+    ['defensive unsupported capability with daemon-looking state', { ...mergeBootstrap, roborev: { ...mergeBootstrap.roborev, status: { running: true }, capabilities: { ...mergeBootstrap.roborev.capabilities, repositoryMerge: false } } }, false, 'unsupported'],
+  ] as const)('uses the production merge availability truth table: %s', (_label, fixture, canMerge, reason) => {
+    expect(mergeAvailability(fixture)).toEqual({ canMerge, reason })
+  })
+
+  it('does not probe on inventory load, checks eligibility first, and opens only when eligible', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => { calls.push({ url: String(input), init }); return String(input) === '/api/repository-inventory' ? response(inventory) : response(eligibility) }))
+    render(<I18nProvider><Repositories bootstrap={mergeBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(await screen.findByRole('button', { name: 'Check merge' })).toBeInTheDocument()
+    expect(calls).toHaveLength(1)
+    expect(screen.queryByRole('dialog', { name: 'Merge stale RoboRev repository entry' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Check merge' }))
+    expect(await screen.findByRole('dialog', { name: 'Merge stale RoboRev repository entry' })).toBeInTheDocument()
+    expect(calls).toHaveLength(2)
+    expect(calls[1].url).toBe('/api/repository-merges/eligibility')
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ sourcePath: 'E:/stale' })
+    expect(screen.getByRole('combobox', { name: 'Registered target' })).toHaveValue('')
+  })
+
+  it('keeps only the newest overlapping eligibility response and aborts it on unmount', async () => {
+    const responses: Array<{ resolve: (value: Response) => void; signal?: AbortSignal }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/repository-inventory') return response(inventory)
+      let resolve!: (value: Response) => void
+      const pending = new Promise<Response>(next => { resolve = next })
+      responses.push({ resolve, signal: init?.signal ?? undefined })
+      return pending
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={mergeBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    const action = await screen.findByRole('button', { name: 'Check merge' })
+    await userEvent.click(action)
+    await userEvent.click(screen.getByRole('button', { name: 'Checking merge eligibility…' }))
+    expect(responses).toHaveLength(2)
+    responses[1].resolve(await response(eligibility))
+    expect(await screen.findByRole('dialog', { name: 'Merge stale RoboRev repository entry' })).toBeInTheDocument()
+    responses[0].resolve(await response({ eligible: false, reason: 'source-exists' }))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(screen.getByRole('dialog', { name: 'Merge stale RoboRev repository entry' })).toBeInTheDocument()
+    view.unmount()
+    expect(responses[0].signal?.aborted).toBe(true)
+    expect(responses[1].signal?.aborted).toBe(false)
+  })
+
+  it('aborts an in-flight eligibility request when the page unmounts', async () => {
+    let signal: AbortSignal | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => String(input) === '/api/repository-inventory' ? response(inventory) : (signal = init?.signal ?? undefined, new Promise<Response>(() => {}))))
+    const view = render(<I18nProvider><Repositories bootstrap={mergeBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check merge' }))
+    await waitFor(() => expect(signal).toBeDefined())
+    expect(signal?.aborted).toBe(false)
+    view.unmount()
+    expect(signal?.aborted).toBe(true)
+  })
+
+  it.each([
+    ['source-exists', 'This source path still exists on disk'],
+    ['dashboard-registered', 'already registered in the Dashboard'],
+    ['source-empty', 'has no jobs to merge'],
+    ['active-source-jobs', 'queued or running jobs'],
+    ['no-targets', 'No registered RoboRev-tracked target'],
+  ] as const)('shows visible eligibility feedback for %s without opening a dialog', async (reason, text) => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/repository-inventory' ? response(inventory) : response({ eligible: false, reason })))
+    render(<I18nProvider><Repositories bootstrap={mergeBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check merge' }))
+    expect(await screen.findByText(new RegExp(text))).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps verified merge success when the independent inventory refresh fails', async () => {
+    let inventoryReads = 0
+    const toast = vi.fn()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return ++inventoryReads === 1 ? response(inventory) : response({ error: 'refresh failed' }, 503)
+      if (url === '/api/repository-merges/eligibility') return response(eligibility)
+      if (url.endsWith('/preview')) return response(preview)
+      return response({ status: 'merged' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={mergeBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Check merge' }))
+    await userEvent.selectOptions(await screen.findByRole('combobox', { name: 'Registered target' }), 'repo-1')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare merge' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm merge' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('success', 'Stale RoboRev repository entry merged.'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('refresh failed')
   })
 })

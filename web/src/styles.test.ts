@@ -100,4 +100,12 @@ describe('setup theme stylesheet contract', () => {
     expect(stylesheet).toContain('overflow-wrap:anywhere')
     expect(stylesheet).toContain('@media(max-width:720px){.tracked-eligibility-message{max-width:220px}.move-dialog')
   })
+
+  it('keeps the repository merge dialog isolated and usable on mobile', () => {
+    expect(stylesheet).toContain('.merge-command-preview code{font:11px/1.45 "Cascadia Code",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}')
+    expect(stylesheet).toContain('.merge-command-preview li{display:grid;grid-template-columns:55px minmax(0,1fr)')
+    expect(stylesheet).toContain('.merge-dialog{padding:14px}')
+    expect(stylesheet).toContain('.merge-facts,.merge-preview-facts{grid-template-columns:1fr}')
+    expect(stylesheet).not.toContain('.merge-dialog .move-')
+  })
 })

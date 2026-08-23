@@ -6,6 +6,7 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
+	"github.com/froze/roborev-dashboard/internal/repomerge"
 	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 )
@@ -73,6 +74,7 @@ type Capabilities struct {
 	RepositoryInventory bool `json:"repositoryInventory"`
 	RepositoryRename    bool `json:"repositoryRename"`
 	RepositoryMove      bool `json:"repositoryMove"`
+	RepositoryMerge     bool `json:"repositoryMerge"`
 }
 
 // RepositoryInventoryService is deliberately optional: the base Service
@@ -96,6 +98,16 @@ type RepositoryRenameService interface {
 type RepositoryMoveService interface {
 	RepositoryMovePreflight(context.Context, repomove.Request) (repomove.Preflight, error)
 	RepositoryMove(context.Context, repomove.Request, repomove.Preflight) (repomove.ExecutionResult, error)
+}
+
+// RepositoryMergeService is optional so the long-lived base Service remains
+// source-compatible with existing fakes. Implementations must revalidate the
+// complete source/target inventory and active-job safety facts immediately
+// before admitting the one typed CLI mutation.
+type RepositoryMergeService interface {
+	RepositoryMergeEligibility(context.Context, string) (repomerge.Eligibility, error)
+	RepositoryMergePreflight(context.Context, repomerge.Request) (repomerge.Preflight, error)
+	RepositoryMerge(context.Context, repomerge.Request, repomerge.Preflight) (repomerge.ExecutionResult, error)
 }
 
 // InsightsService is deliberately optional: the base Service interface is

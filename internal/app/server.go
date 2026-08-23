@@ -53,6 +53,7 @@ type Server struct {
 	configPreviews *configPreviewStore
 	renamePreviews *repositoryRenamePreviewStore
 	movePreviews   *repositoryMovePreviewStore
+	mergePreviews  *repositoryMergePreviewStore
 	// repositoryMoveFS is nil in production and exists only to make the
 	// read-only stale-source boundary deterministic in app tests.
 	repositoryMoveFS repomove.FileSystem
@@ -141,7 +142,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -236,6 +237,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repository-moves/preview", s.mutationAuth(s.repositoryMovePreview))
 	s.mux.HandleFunc("POST /api/repository-moves/eligibility", s.mutationAuth(s.repositoryMoveEligibility))
 	s.mux.HandleFunc("POST /api/repository-moves", s.mutation(s.repositoryMoveConfirm))
+	s.mux.HandleFunc("POST /api/repository-merges/eligibility", s.mutationAuth(s.repositoryMergeEligibility))
+	s.mux.HandleFunc("POST /api/repository-merges/preview", s.mutationAuth(s.repositoryMergePreview))
+	s.mux.HandleFunc("POST /api/repository-merges", s.mutation(s.repositoryMergeConfirm))
 	s.mux.HandleFunc("POST /api/insights/preview", s.mutationAuth(s.insightsPreview))
 	s.mux.HandleFunc("POST /api/insights", s.mutationAuth(s.startInsights))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))

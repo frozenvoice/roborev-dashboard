@@ -12,6 +12,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
+	"github.com/froze/roborev-dashboard/internal/repomerge"
 	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -37,6 +38,10 @@ type coordinationService struct {
 
 	moveStarted chan struct{}
 	moveBlock   <-chan struct{}
+
+	mergeStarted chan struct{}
+	mergeBlock   <-chan struct{}
+	mergeCalls   int
 }
 
 func (s *coordinationService) RepositoryRenamePreflight(_ context.Context, request reporename.Request) (reporename.Preflight, error) {
@@ -78,6 +83,56 @@ func (s *coordinationService) RepositoryMove(_ context.Context, _ repomove.Reque
 	return repomove.ExecutionResult{Started: true, Verified: true}, nil
 }
 
+func (s *coordinationService) RepositoryMergeEligibility(_ context.Context, sourcePath string) (repomerge.Eligibility, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var source repomerge.RepositorySnapshot
+	for _, row := range s.inventory.Repositories {
+		if gitx.SameRepositoryPath(row.RootPath, sourcePath) {
+			source = repomerge.RepositorySnapshot{Path: row.RootPath, Name: row.Name, JobCount: row.Count}
+			break
+		}
+	}
+	return repomerge.Eligibility{Source: source, Inventory: s.inventory}, nil
+}
+
+func (s *coordinationService) RepositoryMergePreflight(_ context.Context, request repomerge.Request) (repomerge.Preflight, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var source, target repomerge.RepositorySnapshot
+	for _, row := range s.inventory.Repositories {
+		if gitx.SameRepositoryPath(row.RootPath, request.SourcePath) {
+			source = repomerge.RepositorySnapshot{Path: row.RootPath, Name: row.Name, JobCount: row.Count}
+		}
+		if gitx.SameRepositoryPath(row.RootPath, request.TargetPath) {
+			target = repomerge.RepositorySnapshot{Path: row.RootPath, Name: row.Name, JobCount: row.Count}
+		}
+	}
+	if source.Path == "" {
+		source = repomerge.RepositorySnapshot{Path: request.SourcePath, Name: "source", JobCount: 7}
+	}
+	if target.Path == "" {
+		target = repomerge.RepositorySnapshot{Path: request.TargetPath, Name: "target", JobCount: 3}
+	}
+	return repomerge.Preflight{Source: source, Target: target, Command: repomerge.Command{Executable: "roborev", Args: []string{"repo", "merge", "--yes", request.SourcePath, request.TargetPath}}}, nil
+}
+
+func (s *coordinationService) RepositoryMerge(_ context.Context, _ repomerge.Request, _ repomerge.Preflight) (repomerge.ExecutionResult, error) {
+	if s.mergeStarted != nil {
+		select {
+		case s.mergeStarted <- struct{}{}:
+		default:
+		}
+	}
+	if s.mergeBlock != nil {
+		<-s.mergeBlock
+	}
+	s.mu.Lock()
+	s.mergeCalls++
+	s.mu.Unlock()
+	return repomerge.ExecutionResult{Started: true, Verified: true}, nil
+}
+
 func (s *coordinationService) Review(ctx context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
 	if s.reviewStarted != nil {
 		select {
@@ -113,6 +168,7 @@ func (s *coordinationService) Insights(context.Context, insights.Request, insigh
 
 var _ roborev.RepositoryRenameService = (*coordinationService)(nil)
 var _ roborev.RepositoryMoveService = (*coordinationService)(nil)
+var _ roborev.RepositoryMergeService = (*coordinationService)(nil)
 var _ roborev.InsightsService = (*coordinationService)(nil)
 
 func coordinationServer(t *testing.T, service *coordinationService, inventory repoinventory.Inventory, paths ...string) *Server {

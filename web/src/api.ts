@@ -40,6 +40,8 @@ export type Installation = {
     repositoryRename?: boolean
     /** Optional because older bootstrap responses predate repository move. */
     repositoryMove?: boolean
+    /** Optional because older bootstrap responses predate repository merge. */
+    repositoryMerge?: boolean
   }
 }
 
@@ -99,6 +101,24 @@ export type RepositoryMoveEligibility =
   | { eligible: true; sourcePath: string; sourceName: string }
   | { eligible: false; reason: 'source-exists' | 'dashboard-registered' }
 
+export type RepositoryMergeSnapshot = { path: string; name: string; jobCount: number }
+export type RepositoryMergeCandidate = RepositoryMergeSnapshot & { repositoryIdentity: string }
+export type RepositoryMergeEligibility =
+  | { eligible: true; source: RepositoryMergeSnapshot; targets: RepositoryMergeCandidate[] }
+  | { eligible: false; reason: 'source-exists' | 'dashboard-registered' | 'source-empty' | 'active-source-jobs' | 'no-targets' }
+export type RepositoryMergeEligibilityReason = Exclude<RepositoryMergeEligibility, { eligible: true }>['reason']
+export type RepositoryMergeCommand = { executable: string; args: string[]; workingDirectory: string }
+export type RepositoryMergePreview = {
+  source: RepositoryMergeSnapshot
+  target: RepositoryMergeCandidate
+  command: RepositoryMergeCommand
+  token: string
+  expiresAt: string
+}
+export type RepositoryMergeResult =
+  | { status: 'merged' }
+  | { status: 'unverified'; message: string }
+
 function renameObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
@@ -120,6 +140,69 @@ function moveCommand(value: unknown): RepositoryMoveCommand | null {
   if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || typeof command.workingDirectory !== 'string' || !command.workingDirectory) return null
   if (Object.keys(command).some(key => !['executable', 'args', 'workingDirectory'].includes(key))) return null
   return { executable: command.executable, args: command.args as string[], workingDirectory: command.workingDirectory }
+}
+
+function mergeCommand(value: unknown): RepositoryMergeCommand | null {
+  const command = renameObject(value)
+  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || command.workingDirectory !== '') return null
+  if (Object.keys(command).some(key => !['executable', 'args', 'workingDirectory'].includes(key))) return null
+  return { executable: command.executable, args: command.args as string[], workingDirectory: command.workingDirectory }
+}
+
+function mergeSnapshot(value: unknown): RepositoryMergeSnapshot | null {
+  const object = renameObject(value)
+  if (!object || !hasExactKeys(object, ['path', 'name', 'jobCount']) || typeof object.path !== 'string' || object.path.length === 0 || typeof object.name !== 'string' || !nonNegativeSafeInteger(object.jobCount)) return null
+  return { path: object.path, name: object.name, jobCount: object.jobCount }
+}
+
+function mergeCandidate(value: unknown): RepositoryMergeCandidate | null {
+  const object = renameObject(value)
+  if (!object || !hasExactKeys(object, ['repositoryIdentity', 'path', 'name', 'jobCount']) || typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || typeof object.path !== 'string' || object.path.length === 0 || typeof object.name !== 'string' || !nonNegativeSafeInteger(object.jobCount)) return null
+  return { path: object.path, name: object.name, jobCount: object.jobCount, repositoryIdentity: object.repositoryIdentity }
+}
+
+/** Normalize the strict, server-owned repository merge eligibility result. */
+export function normalizeRepositoryMergeEligibility(value: unknown): RepositoryMergeEligibility | null {
+  const object = renameObject(value)
+  if (!object || typeof object.eligible !== 'boolean') return null
+  if (object.eligible) {
+    if (!hasExactKeys(object, ['eligible', 'source', 'targets']) || !Array.isArray(object.targets)) return null
+    const source = mergeSnapshot(object.source)
+    if (!source) return null
+    const targets: RepositoryMergeCandidate[] = []
+    const identities = new Set<string>()
+    for (const item of object.targets) {
+      const target = mergeCandidate(item)
+      if (!target) return null
+      if (identities.has(target.repositoryIdentity)) return null
+      identities.add(target.repositoryIdentity)
+      targets.push(target)
+    }
+    if (targets.length === 0) return null
+    return { eligible: true, source, targets }
+  }
+  if (!hasExactKeys(object, ['eligible', 'reason']) || !['source-exists', 'dashboard-registered', 'source-empty', 'active-source-jobs', 'no-targets'].includes(object.reason as string)) return null
+  return { eligible: false, reason: object.reason as RepositoryMergeEligibilityReason }
+}
+
+/** Normalize the strict, server-owned repository merge preview. */
+export function normalizeRepositoryMergePreview(value: unknown): RepositoryMergePreview | null {
+  const object = renameObject(value)
+  if (!object || !hasExactKeys(object, ['source', 'target', 'command', 'token', 'expiresAt'])) return null
+  const source = mergeSnapshot(object.source)
+  const target = mergeCandidate(object.target)
+  const command = mergeCommand(object.command)
+  if (!source || !target || !command || command.args.length !== 5 || command.args[0] !== 'repo' || command.args[1] !== 'merge' || command.args[2] !== '--yes' || command.args[3] !== source.path || command.args[4] !== target.path || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  return { source, target, command, token: object.token, expiresAt: object.expiresAt }
+}
+
+/** Normalize the post-confirm repository merge receipt. */
+export function normalizeRepositoryMergeResult(value: unknown): RepositoryMergeResult | null {
+  const object = renameObject(value)
+  if (!object || typeof object.status !== 'string') return null
+  if (object.status === 'merged' && hasExactKeys(object, ['status'])) return { status: 'merged' }
+  if (object.status === 'unverified' && hasExactKeys(object, ['status', 'message']) && typeof object.message === 'string' && object.message.trim()) return { status: 'unverified', message: object.message }
+  return null
 }
 
 /** Normalize the strict, server-owned repository move preview. */

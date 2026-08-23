@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, GitBranch, Plus, RefreshCw, X } from 'lucide-react'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryMoveEligibility, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, request, validateRepositoryRenameName, type Bootstrap, type RepositoryInventoryResponse, type RepositoryInventoryRow, type RepositoryRenameNameError, type RepositoryRenamePreview } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositoryMoveEligibility, request, validateRepositoryRenameName, type Bootstrap, type RepositoryInventoryResponse, type RepositoryInventoryRow, type RepositoryMergeCandidate, type RepositoryMergeSnapshot, type RepositoryRenameNameError, type RepositoryRenamePreview } from './api'
 import { RepositoryMoveDialog, type RepositoryMoveAvailability } from './RepositoryMoveDialog'
+import { RepositoryMergeDialog, type RepositoryMergeAvailability } from './RepositoryMergeDialog'
 import { useI18n, type MessageKey } from './i18n'
 
 type InventoryState = 'idle' | 'loading' | 'loaded' | 'error' | 'unavailable'
 type InventoryError = { kind: 'malformed' | 'request'; message?: string }
 type RenameState = 'editing' | 'previewing' | 'ready' | 'confirming' | 'error' | 'unverified' | (string & {})
 type MoveEligibilityFeedback = { path: string; kind: 'source-exists' | 'dashboard-registered' | 'malformed' | 'request' }
+type MergeEligibilityFeedback = { path: string; kind: 'source-exists' | 'dashboard-registered' | 'source-empty' | 'active-source-jobs' | 'no-targets' | 'malformed' | 'request' }
 
 export type RepositoriesProps = {
   bootstrap: Bootstrap | null
@@ -46,6 +48,17 @@ export function moveAvailability(bootstrap: Bootstrap | null): RepositoryMoveAva
   }
 }
 
+export function mergeAvailability(bootstrap: Bootstrap | null): RepositoryMergeAvailability {
+  const installed = bootstrap?.roborev?.installed === true
+  const inventorySupported = bootstrap?.roborev?.capabilities?.repositoryInventory === true
+  const mergeSupported = bootstrap?.roborev?.capabilities?.repositoryMerge === true
+  const daemonRunning = bootstrap?.roborev?.status?.running === true
+  return {
+    canMerge: installed && inventorySupported && mergeSupported && daemonRunning,
+    reason: !installed ? 'runtime-unavailable' : !inventorySupported || !mergeSupported ? 'unsupported' : !daemonRunning ? 'runtime-unavailable' : null,
+  }
+}
+
 function renameValidationMessage(error: RepositoryRenameNameError | undefined, t: (key: MessageKey, values?: Record<string, string | number>) => string) {
   if (error === 'empty') return t('repo.renameInvalidEmpty')
   if (error === 'tooLong') return t('repo.renameInvalidTooLong')
@@ -71,6 +84,10 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const [moveTarget, setMoveTarget] = useState<RepositoryInventoryRow | null>(null)
   const [moveEligibilityCheckingPath, setMoveEligibilityCheckingPath] = useState<string | null>(null)
   const [moveEligibilityFeedback, setMoveEligibilityFeedback] = useState<MoveEligibilityFeedback | null>(null)
+  const [mergeSource, setMergeSource] = useState<RepositoryMergeSnapshot | null>(null)
+  const [mergeTargets, setMergeTargets] = useState<RepositoryMergeCandidate[]>([])
+  const [mergeEligibilityCheckingPath, setMergeEligibilityCheckingPath] = useState<string | null>(null)
+  const [mergeEligibilityFeedback, setMergeEligibilityFeedback] = useState<MergeEligibilityFeedback | null>(null)
   const generation = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const previewGeneration = useRef(0)
@@ -79,11 +96,15 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const confirmAbortRef = useRef<AbortController | null>(null)
   const moveEligibilityGeneration = useRef(0)
   const moveEligibilityAbortRef = useRef<AbortController | null>(null)
+  const mergeEligibilityGeneration = useRef(0)
+  const mergeEligibilityAbortRef = useRef<AbortController | null>(null)
   const renameConfirming = useRef(false)
   const mounted = useRef(true)
   const { inventoryReady, canRename, reason: renameAvailabilityReason } = renameAvailability(bootstrap)
   const movePolicy = moveAvailability(bootstrap)
+  const mergePolicy = mergeAvailability(bootstrap)
   const showMoveColumn = movePolicy.canMove && Boolean(inventory?.repositories.some(repo => !repo.dashboardRegistered))
+  const showMergeColumn = mergePolicy.canMerge && Boolean(inventory?.repositories.some(repo => !repo.dashboardRegistered))
   const availableRef = useRef(inventoryReady)
   availableRef.current = inventoryReady
 
@@ -133,6 +154,10 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       moveEligibilityGeneration.current += 1
       moveEligibilityAbortRef.current?.abort()
       moveEligibilityAbortRef.current = null
+
+      mergeEligibilityGeneration.current += 1
+      mergeEligibilityAbortRef.current?.abort()
+      mergeEligibilityAbortRef.current = null
     }
   }, [])
 
@@ -219,6 +244,48 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
     }
   }
 
+  async function checkMergeEligibility(row: RepositoryInventoryRow) {
+    if (row.dashboardRegistered || !mergePolicy.canMerge || !mounted.current) return
+    const currentGeneration = ++mergeEligibilityGeneration.current
+    mergeEligibilityAbortRef.current?.abort()
+    const controller = new AbortController()
+    mergeEligibilityAbortRef.current = controller
+    setMergeSource(null)
+    setMergeTargets([])
+    setMergeEligibilityCheckingPath(row.path)
+    setMergeEligibilityFeedback(null)
+    try {
+      const payload = await request<unknown>('/api/repository-merges/eligibility', { method: 'POST', body: JSON.stringify({ sourcePath: row.path }), signal: controller.signal })
+      const normalized = normalizeRepositoryMergeEligibility(payload)
+      if (!normalized) {
+        if (!mounted.current || currentGeneration !== mergeEligibilityGeneration.current) return
+        setMergeEligibilityFeedback({ path: row.path, kind: 'malformed' })
+        return
+      }
+      if (!mounted.current || currentGeneration !== mergeEligibilityGeneration.current) return
+      if (normalized.eligible) {
+        setMergeSource(normalized.source)
+        setMergeTargets(normalized.targets)
+        setMergeEligibilityFeedback(null)
+      } else {
+        setMergeEligibilityFeedback({ path: row.path, kind: normalized.reason })
+      }
+    } catch {
+      if (controller.signal.aborted || !mounted.current || currentGeneration !== mergeEligibilityGeneration.current) return
+      setMergeEligibilityFeedback({ path: row.path, kind: 'request' })
+    } finally {
+      if (mounted.current && currentGeneration === mergeEligibilityGeneration.current) {
+        setMergeEligibilityCheckingPath(null)
+        if (mergeEligibilityAbortRef.current === controller) mergeEligibilityAbortRef.current = null
+      }
+    }
+  }
+
+  function closeMerge() {
+    setMergeSource(null)
+    setMergeTargets([])
+  }
+
   async function prepareRename(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!renameTarget || !canRename || renameState === 'previewing' || renameState === 'confirming') return
@@ -295,11 +362,12 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       <header className="section-heading tracked-heading"><div><span className="eyebrow">{t('repo.trackedEyebrow')}</span><h2 id="tracked-repositories-heading">{t('repo.trackedTitle')}</h2><p>{t('repo.trackedDescription')}</p></div>{inventoryReady && <button className="button" type="button" onClick={() => { void refreshInventory() }}><RefreshCw size={15} className={inventoryState === 'loading' ? 'spin' : undefined} />{t('repo.trackedRefresh')}</button>}</header>
       {!inventoryReady || inventoryState === 'unavailable' ? <div className="tracked-state tracked-unavailable" role="status"><strong>{t('repo.trackedUnavailable')}</strong><span>{t('repo.trackedUnavailableBody')}</span></div> : inventoryState === 'loading' && !inventory ? <div className="tracked-state" role="status"><RefreshCw className="spin" size={17} /><span>{t('repo.trackedLoading')}</span></div> : inventoryState === 'error' ? <div className="tracked-state tracked-error" role="alert"><strong>{t('repo.trackedError')}</strong><span>{inventoryError?.kind === 'malformed' ? t('repo.trackedMalformed') : inventoryError?.message || t('repo.trackedError')}</span></div> : inventory && inventory.repositories.length === 0 ? <div className="tracked-state" role="status"><span>{t('repo.trackedEmpty')}</span></div> : inventory && <>
         <div className="tracked-summary" aria-label={t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}>{t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}</div>
-        <div className="tracked-table-wrap"><table className="tracked-table"><thead><tr><th scope="col">{t('repo.trackedName')}</th><th scope="col">{t('repo.trackedPath')}</th><th scope="col">{t('repo.trackedJobs')}</th><th scope="col">{t('repo.trackedStatus')}</th>{canRename && <th scope="col">{t('repo.rename')}</th>}{showMoveColumn && <th scope="col">{t('repo.move')}</th>}</tr></thead><tbody>{inventory.repositories.map((repo, index) => { const feedback = moveEligibilityFeedback?.path === repo.path ? moveEligibilityFeedback.kind : null; const checking = moveEligibilityCheckingPath === repo.path; return <tr key={`${repo.path}:${index}`}><td><strong>{repo.name}</strong></td><td><code>{repo.path}</code></td><td>{repo.jobCount}</td><td><span className={`status ${repo.dashboardRegistered ? 'status-pass' : 'status-canceled'}`}><span className="status-dot" />{repo.dashboardRegistered ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</span></td>{canRename && <td><button className="button tracked-rename" type="button" onClick={() => openRename(repo)} disabled={busy || renameState === 'previewing' || renameState === 'confirming'}>{t('repo.rename')}</button></td>}{showMoveColumn && (repo.dashboardRegistered ? <td /> : <td><button className="button tracked-move" type="button" onClick={() => { void checkMoveEligibility(repo) }} disabled={busy} aria-busy={checking || undefined}>{checking ? t('repo.moveEligibilityChecking') : t('repo.moveEligibility')}</button>{feedback === 'source-exists' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilitySourceExists')}</span>}{feedback === 'dashboard-registered' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilityRegistered')}</span>}{feedback === 'malformed' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityMalformed')}</span>}{feedback === 'request' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityFailed')}</span>}</td>)}</tr> })}</tbody></table></div>
+        <div className="tracked-table-wrap"><table className="tracked-table"><thead><tr><th scope="col">{t('repo.trackedName')}</th><th scope="col">{t('repo.trackedPath')}</th><th scope="col">{t('repo.trackedJobs')}</th><th scope="col">{t('repo.trackedStatus')}</th>{canRename && <th scope="col">{t('repo.rename')}</th>}{showMoveColumn && <th scope="col">{t('repo.move')}</th>}{showMergeColumn && <th scope="col">{t('repo.merge')}</th>}</tr></thead><tbody>{inventory.repositories.map((repo, index) => { const feedback = moveEligibilityFeedback?.path === repo.path ? moveEligibilityFeedback.kind : null; const checking = moveEligibilityCheckingPath === repo.path; const mergeFeedback = mergeEligibilityFeedback?.path === repo.path ? mergeEligibilityFeedback.kind : null; const mergeChecking = mergeEligibilityCheckingPath === repo.path; return <tr key={`${repo.path}:${index}`}><td><strong>{repo.name}</strong></td><td><code>{repo.path}</code></td><td>{repo.jobCount}</td><td><span className={`status ${repo.dashboardRegistered ? 'status-pass' : 'status-canceled'}`}><span className="status-dot" />{repo.dashboardRegistered ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</span></td>{canRename && <td><button className="button tracked-rename" type="button" onClick={() => openRename(repo)} disabled={busy || renameState === 'previewing' || renameState === 'confirming'}>{t('repo.rename')}</button></td>}{showMoveColumn && (repo.dashboardRegistered ? <td /> : <td><button className="button tracked-move" type="button" onClick={() => { void checkMoveEligibility(repo) }} disabled={busy} aria-busy={checking || undefined}>{checking ? t('repo.moveEligibilityChecking') : t('repo.moveEligibility')}</button>{feedback === 'source-exists' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilitySourceExists')}</span>}{feedback === 'dashboard-registered' && <span className="tracked-eligibility-message" role="status">{t('repo.moveEligibilityRegistered')}</span>}{feedback === 'malformed' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityMalformed')}</span>}{feedback === 'request' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.moveEligibilityFailed')}</span>}</td>)}{showMergeColumn && (repo.dashboardRegistered ? <td /> : <td><button className="button tracked-merge" type="button" onClick={() => { void checkMergeEligibility(repo) }} disabled={busy} aria-busy={mergeChecking || undefined}>{mergeChecking ? t('repo.mergeEligibilityChecking') : t('repo.mergeEligibility')}</button>{mergeFeedback === 'source-exists' && <span className="tracked-eligibility-message" role="status">{t('repo.mergeEligibilitySourceExists')}</span>}{mergeFeedback === 'dashboard-registered' && <span className="tracked-eligibility-message" role="status">{t('repo.mergeEligibilityRegistered')}</span>}{mergeFeedback === 'source-empty' && <span className="tracked-eligibility-message" role="status">{t('repo.mergeEligibilityEmpty')}</span>}{mergeFeedback === 'active-source-jobs' && <span className="tracked-eligibility-message" role="status">{t('repo.mergeEligibilityActive')}</span>}{mergeFeedback === 'no-targets' && <span className="tracked-eligibility-message" role="status">{t('repo.mergeEligibilityNoTargets')}</span>}{mergeFeedback === 'malformed' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.mergeEligibilityMalformed')}</span>}{mergeFeedback === 'request' && <span className="tracked-eligibility-message tracked-eligibility-error" role="alert">{t('repo.mergeEligibilityFailed')}</span>}</td>)}</tr> })}</tbody></table></div>
       </>}
     </section>
 
     {moveTarget && <RepositoryMoveDialog source={moveTarget} destinations={bootstrap?.repositories ?? []} availability={movePolicy} onClose={() => setMoveTarget(null)} onSuccess={() => { onToast?.('success', t('repo.moveSuccess')); void refreshInventory() }} onRefresh={refreshInventory} />}
+    {mergeSource && <RepositoryMergeDialog source={mergeSource} targets={mergeTargets} availability={mergePolicy} onClose={closeMerge} onSuccess={() => { closeMerge(); onToast?.('success', t('repo.mergeSuccess')); void refreshInventory() }} onRefresh={refreshInventory} />}
     {renameTarget && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog rename-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-rename-title"><header><div><span className="eyebrow">{t('repo.rename')}</span><h2 id="repository-rename-title">{t('repo.renameTitle')}</h2><p>{t('repo.renameDescription')}</p></div><button className="icon-button" type="button" aria-label={t('repo.renameClose')} onClick={closeRename} disabled={renameState === 'confirming'}><X /></button></header>
       <form onSubmit={prepareRename}>
         <div className="rename-facts"><span><b>{t('repo.renameCurrentName')}</b><strong>{(renamePreview?.currentName ?? renameTarget.name) || t('common.none')}</strong></span><span><b>{t('repo.renamePath')}</b><code>{renamePreview?.path || renameTarget.path}</code></span><span><b>{t('repo.renameJobs')}</b><strong>{renamePreview?.jobCount ?? renameTarget.jobCount}</strong></span><span><b>{t('repo.renameDashboardStatus')}</b><strong>{(renamePreview?.dashboardRegistered ?? renameTarget.dashboardRegistered) ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</strong></span></div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
 
 const row = { name: 'repo', path: 'E:\\repo', jobCount: 2, dashboardRegistered: true }
 
@@ -104,5 +104,42 @@ describe('repository move API normalization', () => {
     expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, extra: true } })).toBeNull()
     expect(normalizeRepositoryMoveResult({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'unexpected' })).toBeNull()
     expect(normalizeRepositoryMoveResult({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: '' })).toBeNull()
+  })
+})
+
+describe('repository merge API normalization', () => {
+  const source = { path: 'E:/old/project', name: 'old-name', jobCount: 7 }
+  const target = { repositoryIdentity: 'dashboard-target', path: 'E:\\new\\project', name: 'new-name', jobCount: 3 }
+  const preview = { source, target, command: { executable: 'roborev.exe', args: ['repo', 'merge', '--yes', source.path, target.path], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
+
+  it('accepts server-provided source and opaque target candidates', () => {
+    expect(normalizeRepositoryMergeEligibility({ eligible: true, source, targets: [target] })).toEqual({ eligible: true, source, targets: [target] })
+    expect(normalizeRepositoryMergePreview(preview)).toEqual(preview)
+    expect(normalizeRepositoryMergeResult({ status: 'merged' })).toEqual({ status: 'merged' })
+    expect(normalizeRepositoryMergeResult({ status: 'unverified', message: 'refresh' })).toEqual({ status: 'unverified', message: 'refresh' })
+  })
+
+  it('accepts every ineligible reason and rejects unknown fields, identities, counts, and command drift', () => {
+    for (const reason of ['source-exists', 'dashboard-registered', 'source-empty', 'active-source-jobs', 'no-targets'] as const) {
+      expect(normalizeRepositoryMergeEligibility({ eligible: false, reason })).toEqual({ eligible: false, reason })
+    }
+    const invalid: unknown[] = [
+      { eligible: true, source, targets: [] },
+      { eligible: true, source, targets: [{ ...target, repositoryIdentity: '' }] },
+      { eligible: true, source, targets: [target, { ...target, path: 'E:\\other\\project' }] },
+      { eligible: true, source: { ...source, jobCount: Number.MAX_SAFE_INTEGER + 1 }, targets: [target] },
+      { eligible: false, reason: 'unknown' },
+      { ...preview, extra: true },
+      { ...preview, target: { ...target, repositoryIdentity: '' } },
+      { ...preview, command: { ...preview.command, workingDirectory: 'C:\\' } },
+      { ...preview, command: { ...preview.command, args: ['repo', 'merge'] } },
+      { status: 'unverified', message: '' },
+      { status: 'merged', message: 'unexpected' },
+    ]
+    for (const value of invalid) {
+      expect(normalizeRepositoryMergeEligibility(value)).toBeNull()
+      expect(normalizeRepositoryMergePreview(value)).toBeNull()
+      expect(normalizeRepositoryMergeResult(value)).toBeNull()
+    }
   })
 })
