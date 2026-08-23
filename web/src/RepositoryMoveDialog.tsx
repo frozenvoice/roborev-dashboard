@@ -19,11 +19,6 @@ export type RepositoryMoveDialogProps = {
 
 type MoveState = 'editing' | 'previewing' | 'ready' | 'confirming' | 'error' | 'unverified'
 
-function sameRepositoryPath(left: string, right: string): boolean {
-  const normalized = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/$/, '')
-  return normalized(left).toLocaleLowerCase() === normalized(right).toLocaleLowerCase()
-}
-
 export function RepositoryMoveDialog({ source, destinations, availability, onClose, onSuccess, onRefresh }: RepositoryMoveDialogProps) {
   const { t } = useI18n()
   const [destinationIdentity, setDestinationIdentity] = useState('')
@@ -38,8 +33,8 @@ export function RepositoryMoveDialog({ source, destinations, availability, onClo
   const confirming = useRef(false)
   const mounted = useRef(true)
 
-  const options = destinations.filter(repo => !sameRepositoryPath(repo.path, source.path))
-  const selected = options.find(repo => repo.identity === destinationIdentity) ?? null
+  const options = destinations
+  const selected = destinations.find(repo => repo.identity === destinationIdentity) ?? null
 
   useEffect(() => {
     mounted.current = true
@@ -138,7 +133,7 @@ export function RepositoryMoveDialog({ source, destinations, availability, onClo
     <section className="prompt-dialog move-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-move-title">
       <header><div><span className="eyebrow">{t('repo.move')}</span><h2 id="repository-move-title">{t('repo.moveTitle')}</h2><p>{t('repo.moveDescription')}</p></div><button className="icon-button" type="button" aria-label={t('repo.moveClose')} onClick={close} disabled={state === 'confirming'}><X /></button></header>
       <form onSubmit={prepare}>
-        <div className="move-facts"><span><b>{t('repo.moveSource')}</b><strong>{source.name || t('common.none')}</strong></span><span><b>{t('repo.moveSourcePath')}</b><code>{source.path}</code></span><span><b>{t('repo.moveJobs')}</b><strong>{source.jobCount}</strong></span><span><b>{t('repo.moveStatus')}</b><strong>{t('repo.trackedNotRegistered')}</strong></span></div>
+        <div className="move-facts"><span><b>{t('repo.moveSource')}</b><strong>{(preview?.sourceName ?? source.name) || t('common.none')}</strong></span><span><b>{t('repo.moveSourcePath')}</b><code>{preview?.sourcePath ?? source.path}</code></span><span><b>{t('repo.moveJobs')}</b><strong>{preview?.jobCount ?? source.jobCount}</strong></span><span><b>{t('repo.moveStatus')}</b><strong>{t('repo.trackedNotRegistered')}</strong></span></div>
         <label className="move-destination-label" htmlFor="repository-move-destination">{t('repo.moveDestination')}<select id="repository-move-destination" value={destinationIdentity} onChange={event => updateDestination(event.target.value)} disabled={state === 'previewing' || state === 'confirming' || state === 'unverified'}><option value="">{t('repo.moveDestinationPlaceholder')}</option>{options.map(repo => <option key={repo.identity} value={repo.identity}>{repo.name} · {repo.path}</option>)}</select></label>
         {preview && <div className="move-preview-facts"><span><b>{t('repo.moveDestinationPath')}</b><code>{preview.destinationPath}</code></span><span><b>{t('repo.moveDestinationName')}</b><strong>{preview.destinationName || t('common.none')}</strong></span><span><b>{t('repo.moveWorkingDirectory')}</b><code>{preview.command.workingDirectory}</code></span></div>}
         {preview && <div className="move-command-preview"><strong>{t('repo.moveCommand')}</strong><code className="move-executable">{preview.command.executable}</code><code className="move-working-directory">{t('repo.moveWorkingDirectory')}: {preview.command.workingDirectory}</code><ol>{preview.command.args.map((arg, index) => <li key={`${index}:${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div>}

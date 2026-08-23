@@ -6,16 +6,16 @@ import { RepositoryMoveDialog, type RepositoryMoveAvailability } from './Reposit
 import type { Repository, RepositoryInventoryRow } from './api'
 import { I18nProvider } from './i18n'
 
-const source: RepositoryInventoryRow = { name: 'old-name', path: 'E:/old/project', jobCount: 7, dashboardRegistered: false }
+const source: RepositoryInventoryRow = { name: 'old-name', path: '/old/path', jobCount: 10, dashboardRegistered: false }
 const destinations: Repository[] = [
   { identity: 'destination-1', name: 'new-name', path: 'E:\\new\\project', branch: 'main', head: 'abc', headShort: 'abc', commitSubject: 'Initial', dirty: false, hasConfig: true },
   { identity: 'same-path', name: 'same', path: 'e:\\old\\project', branch: 'main', head: 'def', headShort: 'def', commitSubject: 'Same', dirty: false, hasConfig: true },
 ]
 const available: RepositoryMoveAvailability = { canMove: true, reason: null }
 const preview = {
-  sourcePath: 'E:/old/project', sourceName: 'old-name', jobCount: 7,
+  sourcePath: '/fresh/path', sourceName: 'fresh-name', jobCount: 11,
   destinationRepositoryIdentity: 'destination-1', destinationPath: 'E:\\new\\project', destinationName: 'new-name',
-  command: { executable: 'C:\\bin\\roborev.exe', args: ['repo', 'move', 'E:/old/project', '.'], workingDirectory: 'E:\\new\\project' },
+  command: { executable: 'C:\\bin\\roborev.exe', args: ['repo', 'move', '/fresh/path', '.'], workingDirectory: 'E:\\new\\project' },
   token: 'move-token', expiresAt: '2026-08-23T01:02:03Z',
 }
 
@@ -34,34 +34,53 @@ beforeEach(() => { window.localStorage.setItem('roborev-dashboard-language', 'en
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('RepositoryMoveDialog', () => {
-  it('uses only registered opaque identities, excludes the source path, and has no free-text or merge controls', () => {
+  it('uses every registered opaque identity and has no free-text or merge controls', () => {
     renderDialog()
     const select = screen.getByRole('combobox', { name: 'Registered destination' })
     expect(select).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'new-name · E:\\new\\project' })).toHaveValue('destination-1')
-    expect(screen.queryByRole('option', { name: 'same · e:\\old\\project' })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'same · e:\\old\\project' })).toHaveValue('same-path')
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
     expect(screen.queryByText('Delete')).not.toBeInTheDocument()
     expect(screen.queryByText('Merge')).not.toBeInTheDocument()
   })
 
-  it('does not submit an identity that becomes excluded after destination props drift', async () => {
-    const fetchSpy = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/preview') ? response(preview) : response({ status: 'moved', sourcePath: source.path, destinationPath: 'E:\\new\\project' }))
+  it('keeps the selected opaque identity after destination path props drift', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      return response(preview)
+    })
     vi.stubGlobal('fetch', fetchSpy)
     const view = renderDialog()
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'destination-1')
     view.rerender(<I18nProvider><RepositoryMoveDialog source={source} destinations={[{ ...destinations[0], path: 'E:\\old\\project' }]} availability={available} onClose={vi.fn()} onSuccess={vi.fn()} onRefresh={vi.fn()} /></I18nProvider>)
-    expect(screen.getByRole('button', { name: 'Prepare move' })).toBeDisabled()
-    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('combobox', { name: 'Registered destination' })).toHaveValue('destination-1')
+    expect(screen.getByRole('button', { name: 'Prepare move' })).toBeEnabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare move' }))
+    await screen.findByRole('button', { name: 'Confirm move' })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ sourcePath: source.path, destinationRepositoryIdentity: 'destination-1' })
   })
 
   it('previews exactly once with source path and destination identity, rendering executable cwd and argv', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => { calls.push({ url: String(input), init }); return response(preview) }))
     renderDialog()
+    const initialFacts = document.querySelector('.move-facts')
+    expect(initialFacts).toHaveTextContent('old-name')
+    expect(initialFacts).toHaveTextContent('/old/path')
+    expect(initialFacts).toHaveTextContent('10')
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'destination-1')
     await userEvent.click(screen.getByRole('button', { name: 'Prepare move' }))
     expect(await screen.findByRole('button', { name: 'Confirm move' })).toBeInTheDocument()
+    const authoritativeFacts = document.querySelector('.move-facts')
+    expect(authoritativeFacts).toHaveTextContent('fresh-name')
+    expect(authoritativeFacts).toHaveTextContent('/fresh/path')
+    expect(authoritativeFacts).toHaveTextContent('11')
+    expect(authoritativeFacts).not.toHaveTextContent('old-name')
+    expect(authoritativeFacts).not.toHaveTextContent('/old/path')
+    expect(authoritativeFacts).not.toHaveTextContent('10')
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe('/api/repository-moves/preview')
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({ sourcePath: source.path, destinationRepositoryIdentity: 'destination-1' })
@@ -71,6 +90,37 @@ describe('RepositoryMoveDialog', () => {
     expect(screen.getByText('repo')).toBeInTheDocument()
     expect(screen.getByText('argv[3]')).toBeInTheDocument()
     expect(screen.getByText('.')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['/work/Repo', '/work/repo'],
+    ['E:\\Repo', 'e:\\repo'],
+  ])('keeps path variants as selectable registered destinations: %s and %s', async (sourcePath, destinationPath) => {
+    const variantSource = { ...source, path: sourcePath }
+    const variantDestination = { ...destinations[0], identity: 'path-variant', path: destinationPath }
+    renderDialog({ source: variantSource, destinations: [variantDestination] })
+    const option = screen.getByRole('option', { name: `new-name · ${destinationPath}` })
+    expect(option).toHaveValue('path-variant')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'path-variant')
+    expect(screen.getByRole('combobox', { name: 'Registered destination' })).toHaveValue('path-variant')
+  })
+
+  it('lets an exact same-path identity reach Preview and surfaces the backend rejection', async () => {
+    const samePath = '/work/Repo'
+    const samePathDestination = { ...destinations[0], identity: 'exact-same-path', path: samePath }
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      return response({ error: 'source and destination paths must differ' }, 409)
+    }))
+    renderDialog({ source: { ...source, path: samePath }, destinations: [samePathDestination] })
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'exact-same-path')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare move' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('source and destination paths must differ')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/repository-moves/preview')
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({ sourcePath: samePath, destinationRepositoryIdentity: 'exact-same-path' })
+    expect(screen.queryByRole('button', { name: 'Confirm move' })).not.toBeInTheDocument()
   })
 
   it('does not call preview or confirm when canceled', async () => {
@@ -85,7 +135,11 @@ describe('RepositoryMoveDialog', () => {
 
   it('confirms a ready preview exactly once even after browser availability disappears', async () => {
     let confirmResolve!: (value: Response) => void
-    const fetchSpy = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/preview') ? response(preview) : new Promise<Response>(resolve => { confirmResolve = resolve }))
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetchSpy = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      return String(input).endsWith('/preview') ? response(preview) : new Promise<Response>(resolve => { confirmResolve = resolve })
+    })
     vi.stubGlobal('fetch', fetchSpy)
     const onSuccess = vi.fn()
     const view = renderDialog({ onSuccess })
@@ -99,6 +153,9 @@ describe('RepositoryMoveDialog', () => {
     fireEvent.click(confirmButton)
     expect(screen.getByRole('button', { name: 'Moving…' })).toBeDisabled()
     expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(calls[1].url).toBe('/api/repository-moves')
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ token: preview.token })
+    expect(Object.keys(JSON.parse(String(calls[1].init?.body)))).toEqual(['token'])
     confirmResolve(await response({ status: 'moved', sourcePath: source.path, destinationPath: 'E:\\new\\project' }))
     await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce())
   })
