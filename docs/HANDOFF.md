@@ -106,3 +106,22 @@ Jobs 301/302 hardening 검증 기록: targeted `internal/roborevcompat`, `intern
 5. Agent Status + Runtime Control 실제 E2E는 사용자 검증 대기: agent detection 확인, 선택한 agent 하나만 Run check, Pause/Resume, Restart, 마지막 Stop/Start 순서
 6. clean-machine Windows에서 RoboRev v0.64.0 daemon online 상태로 stream relay를 수동 smoke test: Review enqueue/complete event, browser reconnect/sleep/network flap, repository switch isolation, SSE unavailable 시 4초 polling fallback과 Dashboard shutdown/child cleanup 확인
 7. Stats & Insights v1의 clean-machine Windows manual smoke와 사용자 수동 `dashboard_cross` 외부 gate를 수행한다. 향후 all-repositories aggregate나 LLM-powered `insights`는 별도 명시 checkpoint로만 검토한다. Tasks 실행 재검토 조건은 upstream이 daemon effective safety attestation을 공식 machine-readable 계약으로 제공하고 capability로 확인될 때뿐이다. Analyze가 지원하지 않는 `--fix`/per-file/arbitrary path와 일반 `run`은 별도 계약으로 남겨 둔다. Configuration v1 이후 후보 확장: allowlist key 추가, daemon hot-reload 상태별 안내, config history/diff.
+# Guideline Insights v1 handoff (2026-08-23)
+
+Implemented isolated `internal/insights` contract/workflow and optional `roborev.InsightsService` for exact v0.64.0 `insights --json`. The selected registered repository is the only scope; windows are 7d/30d/90d (default 30d), branch scope is all/current, and current resolves fresh branch state. Preview returns backend-owned executable/argv and a three-minute cryptographic single-use token. Confirm revalidates repository, branch, binding, CLI/daemon version and health, consumes the token atomically, then allows one shell-free launch. Post-launch uncertainty is `unverified` and never retried. Receipt parsing is strict, duplicate/unknown/trailing rejecting, bounded to 64 KiB, JS-safe positive IDs and RFC3339 timestamps.
+
+Pre-flight semantic impact map:
+
+| Surface | Existing meaning | Insights meaning | Change |
+| --- | --- | --- | --- |
+| App daemonRunning / Setup readiness | existing reachability and typed health semantics | capability/preflight gate only | unchanged |
+| Stats Summary/Cost | independent AbortController/generation lifecycle | isolated child component | unchanged |
+| Repository switching | existing selected identity coordinator | selected lease during confirm; stale UI invalidation | no coordinator rewrite |
+| Review polling / Tasks / Panel Refine / Configuration | existing source-of-truth behavior | Insights is not mixed into their policies | unchanged |
+| Operation gate / global busy | existing mutation and setup leases | Insights token single-flight only | unchanged |
+
+Status/result endpoints authorize the registered repository and `job_type=insights` on every request; queued/running responses contain no prompt/output and done returns bounded Markdown only. The React `GuidelineInsights` component does not auto-launch on mount, Stats refresh, scope/locale/suspension changes, SSE or timers; it polls only after its own receipt. It has no history discovery, Apply/Save, config mutation, agent override, or cancel action.
+
+Approved Insights-only shared-policy exception: ReviewDetail hides generic Cancel/Rerun for Insights jobs; backend generic rerun rejects `job_type=insights` fail-closed. Generic cancel backend policy, task predicate/history, ordinary review rerun, Setup/health, Stats lifecycle, repository switch semantics and global operation gate remain unchanged.
+
+Validation performed after the final upstream-shaped result-parser fix: targeted `go test -count=1 ./internal/insights ./internal/roborev ./internal/app`; focused frontend Vitest 6 files/51 tests; full `scripts/test.ps1`; `scripts/build.ps1`; and `git diff --check` all passed. A local browser smoke at 390px verified document-width containment, internal table scrolling, the Guideline Insights card, and zero console errors without clicking Prepare or launching Insights/LLM. The fresh internal reviewer finding about distinct upstream review `id` versus `job_id` was fixed with the exact v0.64 `show --json` shape and re-reviewed.

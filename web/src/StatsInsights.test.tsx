@@ -78,6 +78,7 @@ describe('StatsInsights', () => {
     const beforeRefresh = calls.length
     await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => expect(calls.length).toBeGreaterThan(beforeRefresh))
+    expect(calls.some(path => path.includes('/api/insights'))).toBe(false)
   })
 
   it('keeps summary and cost errors independent and supports retry', async () => {

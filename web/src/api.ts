@@ -33,6 +33,7 @@ export type Installation = {
     /** Optional because older bootstrap responses predate the config surface. */
     configIntrospection?: boolean
     configMutation?: boolean
+    guidelineInsights?: boolean
   }
 }
 
@@ -75,6 +76,77 @@ export type StatsCostResponse = {
     jobs_total: number
     complete: boolean
   }
+}
+
+export type InsightsWindow = '7d' | '30d' | '90d'
+export type InsightsBranchScope = 'all' | 'current'
+export type InsightsCommand = { executable: string; args: string[] }
+export type GuidelineInsightsPreview = {
+  repositoryIdentity: string
+  repositoryName: string
+  window: InsightsWindow
+  branchScope: InsightsBranchScope
+  branch?: string
+  command: InsightsCommand
+  warnings: string[]
+  token: string
+  expiresAt: string
+}
+export type GuidelineInsightsLaunch = {
+  status: 'queued' | 'skipped' | 'unverified'
+  jobId?: number
+  agent?: string
+  since?: string
+  skipped?: boolean
+  reason?: string
+  message?: string
+}
+export type GuidelineInsightsStatus = { jobId: number; status: 'queued' | 'running' | 'done' | 'failed' | 'canceled' }
+export type GuidelineInsightsResult = { jobId: number; status: 'done'; markdown: string }
+
+const maxGuidelineInsightsMarkdown = 4 * 1024 * 1024
+function rfc3339(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
+function insightsWindow(value: unknown): InsightsWindow | null {
+  return value === '7d' || value === '30d' || value === '90d' ? value : null
+}
+function insightsBranchScope(value: unknown): InsightsBranchScope | null {
+  return value === 'all' || value === 'current' ? value : null
+}
+export function normalizeGuidelineInsightsPreview(value: unknown): GuidelineInsightsPreview | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  const window = insightsWindow(object.window)
+  const branchScope = insightsBranchScope(object.branchScope)
+  const command = object.command && typeof object.command === 'object' && !Array.isArray(object.command) ? object.command as Record<string, unknown> : null
+  if (typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || typeof object.repositoryName !== 'string' || !object.repositoryName.trim() || !window || !branchScope || !command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || !Array.isArray(object.warnings) || !object.warnings.every(item => typeof item === 'string') || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  if (branchScope === 'current' && (typeof object.branch !== 'string' || !object.branch.trim())) return null
+  return { repositoryIdentity: object.repositoryIdentity, repositoryName: object.repositoryName, window, branchScope, branch: typeof object.branch === 'string' ? object.branch : undefined, command: { executable: command.executable, args: command.args as string[] }, warnings: object.warnings as string[], token: object.token, expiresAt: object.expiresAt }
+}
+export function normalizeGuidelineInsightsLaunch(value: unknown): GuidelineInsightsLaunch | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (object.status !== 'queued' && object.status !== 'skipped' && object.status !== 'unverified') return null
+  if (object.jobId !== undefined && (typeof object.jobId !== 'number' || !Number.isSafeInteger(object.jobId) || object.jobId <= 0)) return null
+  if (object.status === 'queued' && object.jobId === undefined) return null
+  if (object.status === 'skipped' && (object.skipped !== true || typeof object.reason !== 'string' || !object.reason.trim() || !rfc3339(object.since))) return null
+  if (object.status === 'unverified' && (typeof object.message !== 'string' || !object.message.trim())) return null
+  if (object.status === 'queued' && (typeof object.agent !== 'string' || !object.agent.trim() || !rfc3339(object.since))) return null
+  return { status: object.status, jobId: object.jobId as number | undefined, agent: typeof object.agent === 'string' ? object.agent : undefined, since: typeof object.since === 'string' ? object.since : undefined, skipped: object.skipped === true ? true : undefined, reason: typeof object.reason === 'string' ? object.reason : undefined, message: typeof object.message === 'string' ? object.message : undefined }
+}
+export function normalizeGuidelineInsightsStatus(value: unknown): GuidelineInsightsStatus | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (typeof object.jobId !== 'number' || !Number.isSafeInteger(object.jobId) || object.jobId <= 0 || !['queued', 'running', 'done', 'failed', 'canceled'].includes(String(object.status))) return null
+  return { jobId: object.jobId, status: object.status as GuidelineInsightsStatus['status'] }
+}
+export function normalizeGuidelineInsightsResult(value: unknown): GuidelineInsightsResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  if (typeof object.jobId !== 'number' || !Number.isSafeInteger(object.jobId) || object.jobId <= 0 || object.status !== 'done' || typeof object.markdown !== 'string' || object.markdown.length > maxGuidelineInsightsMarkdown) return null
+  return { jobId: object.jobId, status: 'done', markdown: object.markdown }
 }
 
 export type SetupPhase = 'idle' | 'checking' | 'downloading' | 'verifying' | 'extracting' | 'installing' | 'binding' | 'starting_daemon' | 'waiting_for_daemon' | 'ready' | 'failed' | 'blocked' | 'unsupported' | 'canceled'

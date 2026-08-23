@@ -397,3 +397,16 @@ func (r *Registry) acquireSelected(expectedIdentity string) (*selectedRepository
 	r.mu.RUnlock()
 	return &selectedRepositoryLease{path: path, identity: identity, release: r.selectionMu.RUnlock}, nil
 }
+
+// AcquireSelected holds the selected-repository read lease through a
+// repository-scoped acceptance/launch boundary. It is intentionally narrow:
+// callers receive only an idempotent release function and the canonical path;
+// ordinary repository switching semantics remain unchanged outside the
+// bounded lease.
+func (r *Registry) AcquireSelected(expectedIdentity string) (func(), string, error) {
+	lease, err := r.acquireSelected(strings.TrimSpace(expectedIdentity))
+	if err != nil {
+		return nil, "", err
+	}
+	return lease.Release, lease.path, nil
+}

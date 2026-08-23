@@ -2,9 +2,11 @@ import { RefreshCw, TriangleAlert } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { request, type StatsBranchScope, type StatsCostResponse, type StatsSummaryResponse, type StatsWindow } from './api'
 import { useI18n } from './i18n'
+import { GuidelineInsights } from './GuidelineInsights'
 
 export type StatsInsightsProps = {
   selectedRepositoryIdentity: string
+  repositoryName?: string
   capabilities?: Record<string, unknown>
   daemonRunning: boolean
   repoSwitching?: boolean
@@ -36,7 +38,7 @@ function statusFor<T>(state: LoadState<T>, t: (key: any, values?: any) => string
   return null
 }
 
-export function StatsInsights({ selectedRepositoryIdentity, capabilities = {}, daemonRunning, repoSwitching = false, suspended = false, onOpenSetup }: StatsInsightsProps) {
+export function StatsInsights({ selectedRepositoryIdentity, repositoryName, capabilities = {}, daemonRunning, repoSwitching = false, suspended = false, onOpenSetup }: StatsInsightsProps) {
   const { t } = useI18n()
   const [windowValue, setWindowValue] = useState<StatsWindow>('7d')
   const [branchScope, setBranchScope] = useState<StatsBranchScope>('all')
@@ -128,7 +130,7 @@ export function StatsInsights({ selectedRepositoryIdentity, capabilities = {}, d
       {summary.status === 'success' && <div className="stats-two-column"><section className="stats-panel"><header><h2>{t('stats.agents')}</h2></header><div className="stats-table-scroll"><table><thead><tr><th>{t('stats.agent')}</th><th>{t('stats.jobs')}</th><th>{t('stats.passed')}</th><th>{t('stats.failed')}</th><th>{t('stats.errors')}</th><th>{t('stats.passRate')}</th><th>{t('stats.median')}</th></tr></thead><tbody>{agents.map(agent => <tr key={agent.agent}><td>{agent.agent}</td><td>{agent.total}</td><td>{agent.passed}</td><td>{agent.failed}</td><td>{agent.errors}</td><td>{percent(agent.pass_rate)}</td><td>{formatDuration(agent.median_duration_secs)}</td></tr>)}</tbody></table></div>{agents.length === 0 && <p className="stats-muted">{t('stats.noData')}</p>}</section><section className="stats-panel"><header><h2>{t('stats.jobTypes')}</h2></header><ul className="stats-list">{jobTypes.map(item => <li key={item.type}><span>{item.type}</span><strong>{item.count}</strong><small>{item.applied ?? 0} / {item.rebased ?? 0}</small></li>)}</ul>{jobTypes.length === 0 && <p className="stats-muted">{t('stats.noData')}</p>}</section></div>}
       {summary.status === 'success' && <section className="stats-panel"><header><h2>{t('stats.failures')}</h2></header><div className="stats-cards"><div><span>{t('stats.failureTotal')}</span><strong>{failures?.total ?? '—'}</strong></div><div><span>{t('stats.retries')}</span><strong>{failures?.retries ?? '—'}</strong></div></div><ul className="stats-list">{Object.entries(failures?.errors ?? {}).map(([name, count]) => <li key={name}><span>{name}</span><strong>{count}</strong></li>)}</ul>{failures && Object.keys(failures.errors).length === 0 && <p className="stats-muted">{t('stats.noFailures')}</p>}</section>}
       <section className="stats-panel"><header><div><span className="eyebrow">{t('stats.cost')}</span><h2>{t('stats.costTitle')}</h2></div>{costStatus}{cost.status === 'error' && <button className="button" disabled={controlsDisabled} onClick={loadCost}>{t('common.retry')}</button>}</header>{cost.status === 'success' && cost.data?.cost.jobs_total === 0 ? <p className="stats-empty">{t('stats.costEmpty')}</p> : cost.status === 'success' && cost.data?.cost && <><div className="stats-cards"><div><span>{t('stats.allTimeCost')}</span><strong>{formatCost(cost.data.cost.total_usd)}</strong></div><div><span>{t('stats.jobsWithCost')}</span><strong>{cost.data.cost.jobs_with_cost}</strong></div><div><span>{t('stats.costJobsTotal')}</span><strong>{cost.data.cost.jobs_total}</strong></div></div><p className="stats-muted">{t('stats.costCoverageCount', { withCost: cost.data.cost.jobs_with_cost, total: cost.data.cost.jobs_total })}</p></>}{cost.status === 'success' && cost.data?.cost && cost.data.cost.jobs_total > 0 && cost.data.cost.complete === false && <p className="stats-warning">{t('stats.costIncomplete')}</p>}{cost.status === 'success' && cost.data?.cost?.jobs_total !== 0 && <p className="stats-muted">{t('stats.costCoverage')}</p>}</section>
-      <section className="stats-panel stats-insights"><header><h2>{t('stats.insights')}</h2></header><p>{t('stats.insightsDisabled')}</p></section>
+      <GuidelineInsights selectedRepositoryIdentity={selectedRepositoryIdentity} repositoryName={repositoryName} capabilities={capabilities} daemonRunning={daemonRunning} repoSwitching={repoSwitching} suspended={suspended} />
     </>}
     {totalJobs === 0 && summary.status === 'success' && <p className="stats-empty">{t('stats.empty')}</p>}
   </section>

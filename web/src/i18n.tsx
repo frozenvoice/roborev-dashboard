@@ -79,6 +79,38 @@ export const en = {
   'stats.costEmpty': 'No eligible cost-reporting jobs are in this scope yet.',
   'stats.insights': 'Insights',
   'stats.insightsDisabled': 'Guideline Insights are not enabled for this checkpoint.',
+  'stats.guidelineTitle': 'Guideline Insights',
+  'stats.guidelineDescription': 'Analyze recent failing reviews and current guidelines for recurring patterns and read-only recommendations.',
+  'stats.guidelineQuota': 'LLM quota or provider cost may be used.',
+  'stats.guidelineNoConfig': 'Recommendations only. Dashboard will not change configuration or .roborev.toml.',
+  'stats.guidelineWarningUnknown': 'An additional Insights safety warning applies.',
+  'stats.guidelinePrepare': 'Prepare Insights',
+  'stats.guidelineRun': 'Run Insights',
+  'stats.guidelineConfirmEyebrow': 'Explicit confirmation',
+  'stats.guidelineConfirmTitle': 'Confirm Guideline Insights',
+  'stats.guidelineExecutable': 'Executable',
+  'stats.guidelineArguments': 'Arguments',
+  'stats.guidelineState.queued': 'Queued',
+  'stats.guidelineState.running': 'Running',
+  'stats.guidelineState.done': 'Done',
+  'stats.guidelineState.failed': 'Failed',
+  'stats.guidelineState.canceled': 'Canceled',
+  'stats.guidelineState.skipped': 'Skipped',
+  'stats.guidelineState.unverified': 'Unverified',
+  'stats.guidelineAmbiguous': 'Launch outcome could not be verified. A RoboRev Insights job may already have been queued. Do not retry automatically; prepare a new run if needed.',
+  'stats.guidelineRepository': 'Repository',
+  'stats.guidelineWindow': 'Insights window',
+  'stats.guidelineBranch': 'Insights branch scope',
+  'stats.guidelineAgent': 'Agent configuration',
+  'stats.guidelineDefaultAgent': 'Use RoboRev configured default agent/model/reasoning',
+  'stats.guidelineDisclosure': 'RoboRev may send recent failing review outputs, metadata, comments, addressed state, and resolved review guidelines for analysis.',
+  'stats.guidelineLifetime': 'The daemon job continues independently if this page is closed. This page tracks only the current run.',
+  'stats.guidelineSkipped': 'No failing reviews found in this time window. No LLM job was launched.',
+  'stats.guidelineUnverified': 'Launch outcome could not be verified. A RoboRev Insights job may already have been queued. Do not retry automatically; prepare a new run if needed.',
+  'stats.guidelineJobRunning': 'Insights job #{id} is {status}.',
+  'stats.guidelineReceipt': 'Current Insights job: #{id}. The daemon continues independently of this page.',
+  'stats.insightsMalformed': 'The Dashboard could not validate the Insights response.',
+  'stats.insightsCopyFailed': 'Clipboard access was unavailable.',
   'stats.loading': 'Loading…',
   'stats.unavailable': 'Stats unavailable',
   'stats.unavailableBody': 'Stats require a running daemon and a supported backend capability.',
@@ -601,7 +633,7 @@ export type MessageKey = keyof typeof en
 // The catalog is intentionally kept compact in one literal.  Starting with
 // the English source also makes an omitted translation safe while the typed
 // override list below remains easy to audit.
-export const ko: Record<MessageKey, string> = {
+export const ko: Record<MessageKey, string> = { ...en,
   'review.fix': '수정', 'review.openFixRefine': '수정 및 반복 검증 열기', 'review.panelRefineSummary': 'Panel Refine 상태', 'review.panelRefineActive': 'Panel Refine 실행 중', 'review.panelRefineWorking': '패널 workflow가 실행 중입니다. 자세한 내용은 수정 및 반복 검증에서 확인하세요.', 'review.panelRefineNeedsAttention': '최근 패널 실행에 확인이 필요합니다. 수정 및 반복 검증에서 확인하세요.',
   'fix.eyebrow': '안전한 변경 workflow', 'fix.aria': '수정 및 반복 검증', 'fix.title': '수정 및 반복 검증', 'fix.description': '열린 문제에 대한 typed RoboRev 수정을 미리 확인한 뒤 명시적으로 실행합니다.', 'fix.target': '수정 대상', 'fix.targetDescription': '단일 리뷰 또는 패널 종합의 종료된 열린 문제만 수정할 수 있습니다.', 'fix.selectTarget': '수정할 문제', 'fix.chooseTarget': '열린 문제 선택', 'fix.single': '단일 리뷰', 'fix.synthesis': '패널 종합', 'fix.noTargets': '수정 가능한 문제가 없습니다', 'fix.noTargetsBody': 'HEAD 리뷰를 실행하거나 Reviews에서 문제를 열어 안전한 수정을 준비하세요.', 'fix.job': '작업', 'fix.gitRef': 'Git ref', 'fix.branch': '브랜치', 'fix.targetKind': '대상 유형', 'fix.reviewPreview': '실행 미리보기 확인', 'fix.loadingPreview': '미리보기 불러오는 중…', 'fix.previewReady': '백엔드 미리보기가 준비되었습니다. 아직 명령을 실행하지 않았습니다.', 'fix.previewFailed': '수정을 준비하지 못했습니다: {error}', 'fix.executionPreview': '실행 미리보기', 'fix.confirmTitle': 'RoboRev 수정 확인', 'fix.confirmDescription': '백엔드는 프로세스를 시작하기 전에 이 대상을 다시 검증합니다.', 'fix.repository': '저장소', 'fix.command': '정확한 실행 파일과 argv', 'fix.safety': '이 작업은 파일을 수정하고 커밋을 만들 수 있습니다. 저장소를 깨끗하게 유지하고 완료 후 결과를 확인하세요.', 'fix.startingHead': '시작 HEAD', 'fix.endingHead': '종료 HEAD', 'fix.endingBranch': '종료 브랜치', 'fix.endingDirty': '종료 작업 트리', 'fix.operation': '수정 작업 #{id}', 'fix.starting': '시작 중', 'fix.confirmAction': '확인하고 수정 실행', 'fix.confirming': '시작 중…', 'fix.started': '수정 작업을 시작했습니다.', 'fix.cancel': '수정 취소', 'fix.canceling': '취소 중…', 'fix.cancelRequested': '수정 취소를 요청했습니다.', 'fix.openReview': '결과 리뷰 열기', 'fix.closePreview': '수정 미리보기 닫기', 'error.fixPreviewMalformed': '수정 미리보기 응답 형식이 올바르지 않습니다.', 'error.fixOperationMalformed': '수정 작업 응답 형식이 올바르지 않습니다.',
   'review.panelAria': '리뷰 패널',
@@ -731,6 +763,38 @@ export const ko: Record<MessageKey, string> = {
 ko['stats.costIncomplete'] = '일부 적격 작업에 비용이 보고되지 않아 실제 사용액은 이 하한선보다 높을 수 있습니다.'
 ko['stats.costEmpty'] = '이 범위에 비용을 보고할 수 있는 적격 작업이 아직 없습니다.'
 ko['stats.insightsDisabled'] = '이 체크포인트에서는 Guideline Insights가 활성화되지 않았습니다.'
+ko['stats.guidelineTitle'] = 'Guideline Insights'
+ko['stats.guidelineDescription'] = '최근 실패 리뷰와 현재 guideline을 분석해 반복 패턴과 읽기 전용 개선안을 제안합니다.'
+ko['stats.guidelineQuota'] = 'LLM 할당량 또는 provider 비용이 사용될 수 있습니다.'
+ko['stats.guidelineNoConfig'] = '추천만 제공하며 구성이나 .roborev.toml은 변경하지 않습니다.'
+ko['stats.guidelineWarningUnknown'] = '추가 Insights 안전 경고가 적용됩니다.'
+ko['stats.guidelinePrepare'] = 'Insights 준비'
+ko['stats.guidelineRun'] = 'Insights 실행'
+ko['stats.guidelineConfirmEyebrow'] = '명시적 확인'
+ko['stats.guidelineConfirmTitle'] = 'Guideline Insights 실행 확인'
+ko['stats.guidelineExecutable'] = '실행 파일'
+ko['stats.guidelineArguments'] = '인자 배열'
+ko['stats.guidelineState.queued'] = '대기 중'
+ko['stats.guidelineState.running'] = '실행 중'
+ko['stats.guidelineState.done'] = '완료'
+ko['stats.guidelineState.failed'] = '실패'
+ko['stats.guidelineState.canceled'] = '취소됨'
+ko['stats.guidelineState.skipped'] = '건너뜀'
+ko['stats.guidelineState.unverified'] = '확인되지 않음'
+ko['stats.guidelineAmbiguous'] = '실행 결과를 확인하지 못했습니다. RoboRev Insights 작업이 이미 대기열에 추가되었을 수 있습니다. 자동 재시도하지 말고 필요하면 새 실행을 준비하세요.'
+ko['stats.guidelineRepository'] = '저장소'
+ko['stats.guidelineWindow'] = 'Insights 기간'
+ko['stats.guidelineBranch'] = 'Insights 브랜치 범위'
+ko['stats.guidelineAgent'] = '에이전트 구성'
+ko['stats.guidelineDefaultAgent'] = 'RoboRev에 구성된 기본 agent/model/reasoning 사용'
+ko['stats.guidelineDisclosure'] = '분석을 위해 최근 실패 리뷰 output, 메타데이터, comments, addressed 상태 및 resolved review guidelines가 RoboRev로 전송될 수 있습니다.'
+ko['stats.guidelineLifetime'] = '페이지를 닫아도 daemon 작업은 계속됩니다. 이 페이지는 현재 실행만 추적합니다.'
+ko['stats.guidelineSkipped'] = '이 기간에 실패 리뷰가 없습니다. LLM 작업을 실행하지 않았습니다.'
+ko['stats.guidelineUnverified'] = '실행 결과를 확인하지 못했습니다. RoboRev Insights 작업이 이미 대기열에 추가되었을 수 있습니다. 자동 재시도하지 말고 필요하면 새 실행을 준비하세요.'
+ko['stats.guidelineJobRunning'] = 'Insights 작업 #{id}이(가) {status} 상태입니다.'
+ko['stats.guidelineReceipt'] = '현재 Insights 작업: #{id}. daemon은 이 페이지와 독립적으로 계속 실행됩니다.'
+ko['stats.insightsMalformed'] = 'Dashboard가 Insights 응답을 검증하지 못했습니다.'
+ko['stats.insightsCopyFailed'] = '클립보드에 접근할 수 없습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

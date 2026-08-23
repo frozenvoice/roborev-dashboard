@@ -62,4 +62,8 @@ describe('setup theme stylesheet contract', () => {
     expect(mobileAnalyze).toContain('.analyze-inline-actions .button{width:100%}')
     expect(mobileAnalyze).toContain('.analyze-execution-disabled .button[disabled]{min-height:40px}')
   })
+
+  it('contains narrow Stats grid panels while preserving internal table scrolling', () => {
+    expect(stylesheet).toContain('@media(max-width:390px){.stats-two-column{min-width:0}.stats-two-column>.stats-panel{min-width:0;max-width:100%}.stats-two-column>.stats-panel .stats-table-scroll{min-width:0;max-width:100%;overflow-x:auto}}')
+  })
 })

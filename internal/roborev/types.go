@@ -1,6 +1,11 @@
 package roborev
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/froze/roborev-dashboard/internal/insights"
+)
 
 type Installation struct {
 	Installed    bool            `json:"installed"`
@@ -61,6 +66,17 @@ type Capabilities struct {
 	ConfigMutation      bool `json:"configMutation"`
 	SummaryStats        bool `json:"summaryStats"`
 	CostStats           bool `json:"costStats"`
+	GuidelineInsights   bool `json:"guidelineInsights"`
+}
+
+// InsightsService is deliberately optional: the base Service interface is
+// shared by existing review/task consumers and must not acquire a new
+// lifecycle operation. Implementations must preflight again immediately
+// before launching and must return an unverified result for any post-launch
+// ambiguity because v0.64 enqueues a daemon job before returning its receipt.
+type InsightsService interface {
+	InsightsPreflight(context.Context, insights.Request) (insights.Preflight, error)
+	Insights(context.Context, insights.Request, insights.Preflight) (insights.LaunchResult, error)
 }
 
 type JobMetadata struct {

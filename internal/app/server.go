@@ -21,6 +21,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/fixoperation"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/operation"
 	"github.com/froze/roborev-dashboard/internal/refine"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -49,6 +50,7 @@ type Server struct {
 	// bindings. The browser only ever receives the opaque token; every bound
 	// field is revalidated fresh before a config set executes.
 	configPreviews *configPreviewStore
+	Insights       *insights.Manager
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -116,6 +118,13 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return nil, err
 		}
 	}
+	var guidelineInsights *insights.Manager
+	if insightsService, ok := service.(roborev.InsightsService); ok {
+		guidelineInsights, err = insights.NewManager(insightsService, registry)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var events EventRelay
 	if source, ok := service.(streamrelay.Source); ok {
 		events = streamrelay.NewManager(source, func(ctx context.Context, identity string) (string, error) {
@@ -126,7 +135,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -211,8 +220,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/configuration", s.configurationSnapshot)
 	s.mux.HandleFunc("GET /api/stats/summary", s.statsSummary)
 	s.mux.HandleFunc("GET /api/stats/cost", s.statsCost)
+	s.mux.HandleFunc("GET /api/insights/{id}/result", s.insightsResult)
+	s.mux.HandleFunc("GET /api/insights/{id}", s.insightsStatus)
 	s.mux.HandleFunc("POST /api/configuration/preview", s.mutationAuth(s.configurationPreview))
 	s.mux.HandleFunc("POST /api/configuration/set", s.mutationAuth(s.configurationSet))
+	s.mux.HandleFunc("POST /api/insights/preview", s.mutationAuth(s.insightsPreview))
+	s.mux.HandleFunc("POST /api/insights", s.mutationAuth(s.startInsights))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))
 	s.mux.HandleFunc("GET /api/tasks/preview", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "task preview requires POST", "method")
@@ -1631,6 +1644,13 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 	// explicit confirmation; otherwise this route would bypass that boundary.
 	if strings.TrimSpace(job.JobType) == "task" || strings.TrimSpace(job.GitRef) == "run" {
 		writeError(w, http.StatusConflict, "Tasks v1 does not support rerun; generic frozen rerun is unavailable for task jobs", "task-rerun-unsupported")
+		return
+	}
+	// Insights enqueue is an LLM/quota-bearing workflow with its own
+	// preview/confirmation boundary. Generic frozen rerun must fail closed so
+	// a stored Insights prompt cannot be replayed without a fresh preview.
+	if strings.TrimSpace(job.JobType) == "insights" {
+		writeError(w, http.StatusConflict, "Guideline Insights requires a fresh preview and explicit confirmation; generic rerun is unavailable", "insights-rerun-unsupported")
 		return
 	}
 	var releaseReviewLease func()
