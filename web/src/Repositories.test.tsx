@@ -19,6 +19,15 @@ function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }))
 }
 
+const trackedInventory = { repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 }
+
+async function prepareReadyRename() {
+  await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+  await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+  await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+  return screen.findByRole('button', { name: 'Confirm rename' })
+}
+
 function Harness({ registerRepository = async () => true }: { registerRepository?: (path: string) => Promise<boolean> }) {
   const { setLocale } = useI18n()
   return <><Repositories bootstrap={bootstrap} registerRepository={registerRepository} busy={false} /><button onClick={() => setLocale('ko')}>한국어</button></>
@@ -197,6 +206,76 @@ describe('Repositories v2 inventory', () => {
     expect(calls).toEqual(['/api/repository-inventory'])
   })
 
+  it('confirms an issued ready preview after the rename capability disappears and surfaces a 503', async () => {
+    const calls: string[] = []
+    const capabilityUnavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryRename: false } } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response(trackedInventory)
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ error: 'RoboRev is unavailable' }, 503)
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await prepareReadyRename()
+    view.rerender(<I18nProvider><Repositories bootstrap={capabilityUnavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('RoboRev is unavailable')
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+  })
+
+  it('confirms an issued ready preview after daemon availability disappears and handles renamed success', async () => {
+    const calls: string[] = []
+    const daemonUnavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response(trackedInventory)
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ status: 'renamed', path: 'E:\\tracked', previousName: 'tracked', name: 'Renamed 저장소' })
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await prepareReadyRename()
+    view.rerender(<I18nProvider><Repositories bootstrap={daemonUnavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByText('RoboRev inventory unavailable')).toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('keeps an issued ready preview confirmable after capability loss when the server returns unverified', async () => {
+    const calls: string[] = []
+    const capabilityUnavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryRename: false } } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response(trackedInventory)
+      if (url.endsWith('/preview')) return response(renamePreview)
+      return response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' })
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await prepareReadyRename()
+    view.rerender(<I18nProvider><Repositories bootstrap={capabilityUnavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Readback unavailable')
+    expect(screen.getAllByRole('button', { name: 'Refresh' })[1]).toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+  })
+
+  it('does not expose a new rename or preview while rename availability is false', async () => {
+    const calls: string[] = []
+    const unavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return response(trackedInventory)
+    }))
+    render(<I18nProvider><Repositories bootstrap={unavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await waitFor(() => expect(screen.getByText('RoboRev inventory unavailable')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument()
+    expect(calls).toEqual([])
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('confirms once, closes on verified success, toasts, and refreshes inventory independently', async () => {
     const calls: string[] = []
     let inventoryCount = 0
@@ -281,6 +360,7 @@ describe('Repositories v2 inventory', () => {
     let previewSignal: AbortSignal | undefined
     let resolvePreview!: (value: Response) => void
     let inventoryReads = 0
+    let confirmCalls = 0
     const previewResponse = new Promise<Response>(resolve => { resolvePreview = resolve })
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
@@ -290,8 +370,12 @@ describe('Repositories v2 inventory', () => {
         inventorySignal = init?.signal ?? undefined
         return new Promise<Response>(() => {})
       }
-      previewSignal = init?.signal ?? undefined
-      return previewResponse
+      if (url.endsWith('/preview')) {
+        previewSignal = init?.signal ?? undefined
+        return previewResponse
+      }
+      confirmCalls += 1
+      return response({ status: 'renamed', path: 'E:\\tracked', previousName: 'tracked', name: 'Renamed 저장소' })
     }))
     const unavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
     const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
@@ -306,7 +390,9 @@ describe('Repositories v2 inventory', () => {
     expect(inventorySignal?.aborted).toBe(true)
     expect(previewSignal?.aborted).toBe(false)
     resolvePreview(await response(renamePreview))
-    expect(await screen.findByRole('button', { name: 'Confirm rename' })).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(confirmCalls).toBe(1))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('keeps an unverified confirm terminal after availability loss without retrying or refreshing', async () => {

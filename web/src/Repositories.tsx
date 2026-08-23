@@ -181,7 +181,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   }
 
   async function confirmRename() {
-    if (!renameTarget || !renamePreview || renameState !== 'ready' || !canRename || renameConfirming.current) return
+    if (!renameTarget || !renamePreview || renameState !== 'ready' || !mounted.current || renameConfirming.current) return
     renameConfirming.current = true
     const currentGeneration = ++confirmGeneration.current
     const controller = new AbortController()

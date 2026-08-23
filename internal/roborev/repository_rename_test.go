@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"syscall"
 	"testing"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
@@ -15,16 +17,25 @@ import (
 )
 
 type repositoryRenameRunner struct {
-	renameCalls  int
-	versionCalls int
-	started      bool
-	exitErr      error
+	renameCalls    int
+	versionCalls   int
+	started        bool
+	exitErr        error
+	versionOutputs []string
+	versionIndex   int
 }
 
 func (r *repositoryRenameRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	if len(command.Args) == 2 && command.Args[0] == "version" {
 		r.versionCalls++
-		return proc.Result{Started: true, Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
+		version := "v0.64.0"
+		if len(r.versionOutputs) > 0 {
+			version = r.versionOutputs[r.versionIndex]
+			if r.versionIndex+1 < len(r.versionOutputs) {
+				r.versionIndex++
+			}
+		}
+		return proc.Result{Started: true, Stdout: fmt.Sprintf(`{"name":"roborev","version":%q}`, version)}, nil
 	}
 	if len(command.Args) == 4 && command.Args[0] == "repo" && command.Args[1] == "rename" {
 		r.renameCalls++
@@ -294,10 +305,192 @@ func TestRepositoryRenameReadbackOutcomeMatrix(t *testing.T) {
 	}
 }
 
+func TestRepositoryRenamePreProcessTargetDriftDoesNotLaunch(t *testing.T) {
+	tests := []struct {
+		name      string
+		inventory string
+		want      error
+	}{
+		{
+			name:      "current name drift",
+			inventory: `{"repos":[{"name":"renamed elsewhere","root_path":"E:\\repo","count":0}],"total_count":0}`,
+			want:      ErrRepositoryRenameStale,
+		},
+		{
+			name:      "target missing",
+			inventory: `{"repos":[{"name":"other","root_path":"E:\\other","count":0}],"total_count":0}`,
+			want:      ErrRepositoryRenameStale,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/health":
+					_, _ = io.WriteString(w, `{"healthy":true,"version":"v0.64.0"}`)
+				case "/api/repos":
+					_, _ = io.WriteString(w, test.inventory)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer daemon.Close()
+			runner := &repositoryRenameRunner{started: true}
+			client, err := NewClient("roborev", runner, daemon.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := reporename.Request{Path: `E:\repo`, CurrentName: "old", NewName: "new"}
+			preview, err := client.RepositoryRenamePreflight(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.versionCalls = 0
+			result, err := client.RepositoryRename(context.Background(), request, preview)
+			if !errors.Is(err, test.want) || result.Started || runner.renameCalls != 0 {
+				t.Fatalf("result=%#v err=%v renameCalls=%d", result, err, runner.renameCalls)
+			}
+		})
+	}
+}
+
+func TestRepositoryRenamePreProcessInventoryUnavailableDoesNotLaunch(t *testing.T) {
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			_, _ = io.WriteString(w, `{"healthy":true,"version":"v0.64.0"}`)
+		case "/api/repos":
+			_, _ = io.WriteString(w, `{"repos":[{"name":"old","root_path":"E:\\repo","count":0}],"total_count":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer daemon.Close()
+	runner := &repositoryRenameRunner{started: true}
+	client, err := NewClient("roborev", runner, daemon.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP.Transport = repositoryRenameFailingInventoryTransport{base: http.DefaultTransport}
+	request := reporename.Request{Path: `E:\repo`, CurrentName: "old", NewName: "new"}
+	preview, err := client.RepositoryRenamePreflight(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.RepositoryRename(context.Background(), request, preview)
+	if !errors.Is(err, ErrRepositoryRenameOffline) || result.Started || runner.renameCalls != 0 {
+		t.Fatalf("result=%#v err=%v renameCalls=%d", result, err, runner.renameCalls)
+	}
+}
+
+type repositoryRenameFailingInventoryTransport struct {
+	base http.RoundTripper
+}
+
+func (t repositoryRenameFailingInventoryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Path == "/api/repos" {
+		return nil, &url.Error{Op: request.Method, URL: request.URL.String(), Err: syscall.ECONNREFUSED}
+	}
+	return t.base.RoundTrip(request)
+}
+
+func TestRepositoryRenameCLIAndDaemonVersionDriftDoNotLaunch(t *testing.T) {
+	tests := []struct {
+		name          string
+		runner        *repositoryRenameRunner
+		healthVersion func(int) string
+		want          error
+	}{
+		{
+			name:   "CLI version drift",
+			runner: &repositoryRenameRunner{started: true, versionOutputs: []string{"v0.64.0", "v0.63.0"}},
+			healthVersion: func(_ int) string {
+				return "v0.64.0"
+			},
+			want: ErrUnsupportedRepositoryRename,
+		},
+		{
+			name:   "daemon version drift",
+			runner: &repositoryRenameRunner{started: true},
+			healthVersion: func(call int) string {
+				if call == 1 {
+					return "v0.64.0"
+				}
+				return "v0.63.0"
+			},
+			want: ErrUnsupportedRepositoryRename,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			healthCalls := 0
+			daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/health":
+					healthCalls++
+					_, _ = io.WriteString(w, fmt.Sprintf(`{"healthy":true,"version":%q}`, test.healthVersion(healthCalls)))
+				case "/api/repos":
+					_, _ = io.WriteString(w, `{"repos":[{"name":"old","root_path":"E:\\repo","count":0}],"total_count":0}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer daemon.Close()
+			client, err := NewClient("roborev", test.runner, daemon.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := reporename.Request{Path: `E:\repo`, CurrentName: "old", NewName: "new"}
+			preview, err := client.RepositoryRenamePreflight(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.runner.versionCalls = 0
+			result, err := client.RepositoryRename(context.Background(), request, preview)
+			if !errors.Is(err, test.want) || result.Started || test.runner.renameCalls != 0 {
+				t.Fatalf("result=%#v err=%v renameCalls=%d", result, err, test.runner.renameCalls)
+			}
+		})
+	}
+}
+
+func TestRepositoryRenamePreProcessBindingGenerationDriftDoesNotLaunch(t *testing.T) {
+	var client *Client
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			_, _ = io.WriteString(w, `{"healthy":true,"version":"v0.64.0"}`)
+		case "/api/repos":
+			client.bindingMu.Lock()
+			client.binding.generation++
+			client.bindingMu.Unlock()
+			_, _ = io.WriteString(w, `{"repos":[{"name":"old","root_path":"E:\\repo","count":0}],"total_count":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer daemon.Close()
+	runner := &repositoryRenameRunner{started: true}
+	var err error
+	client, err = NewClient("roborev", runner, daemon.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := reporename.Request{Path: `E:\repo`, CurrentName: "old", NewName: "new"}
+	preview, err := client.RepositoryRenamePreflight(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.RepositoryRename(context.Background(), request, preview)
+	if !errors.Is(err, ErrBindingChanged) || result.Started || runner.renameCalls != 0 {
+		t.Fatalf("result=%#v err=%v renameCalls=%d", result, err, runner.renameCalls)
+	}
+}
+
 func TestRepositoryRenamePreProcessMismatchesDoNotLaunch(t *testing.T) {
 	// The explicit command/binding mismatch is the important process-boundary
-	// guard; target drift and fallback ambiguity are covered by the existing
-	// inventory revalidation test above.
+	// guard; current-name/target drift and fallback ambiguity are covered by
+	// the inventory revalidation tests above.
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/health":
