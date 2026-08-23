@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
 
 const row = { name: 'repo', path: 'E:\\repo', jobCount: 2, dashboardRegistered: true }
 
@@ -59,5 +59,29 @@ describe('repository rename API normalization and validation', () => {
     expect(validateRepositoryRenameName('-new', 'Old').error).toBe('leadingDash')
     expect(validateRepositoryRenameName('Old', 'Old').error).toBe('same')
     expect(validateRepositoryRenameName('\ud800', 'Old').error).toBe('invalidUtf8')
+  })
+})
+
+describe('repository move API normalization', () => {
+  const preview = {
+    sourcePath: 'E:/old/project', sourceName: 'old-name', jobCount: 4,
+    destinationRepositoryIdentity: 'opaque-destination', destinationPath: 'E:\\new\\project', destinationName: 'new-name',
+    command: { executable: 'roborev.exe', args: ['repo', 'move', 'E:/old/project', '.'], workingDirectory: 'E:\\new\\project' },
+    token: 'move-token', expiresAt: '2026-08-23T01:02:03Z',
+  }
+
+  it('accepts the strict preview and moved/unverified receipts while preserving raw strings', () => {
+    expect(normalizeRepositoryMovePreview(preview)).toEqual(preview)
+    expect(normalizeRepositoryMoveResult({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project' })).toEqual({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project' })
+    expect(normalizeRepositoryMoveResult({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'refresh' })).toEqual({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'refresh' })
+  })
+
+  it('rejects unknown fields, missing cwd, malformed identity and unsafe receipts', () => {
+    expect(normalizeRepositoryMovePreview({ ...preview, extra: true })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, destinationRepositoryIdentity: '' })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, workingDirectory: '' } })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, extra: true } })).toBeNull()
+    expect(normalizeRepositoryMoveResult({ status: 'moved', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: 'unexpected' })).toBeNull()
+    expect(normalizeRepositoryMoveResult({ status: 'unverified', sourcePath: 'E:/old/project', destinationPath: 'E:\\new\\project', message: '' })).toBeNull()
   })
 })

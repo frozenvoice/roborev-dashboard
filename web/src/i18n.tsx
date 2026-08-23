@@ -370,6 +370,31 @@ export const en = {
   'repo.renameInvalidLeadingDash': 'Names beginning with “-” are not allowed.',
   'repo.renameInvalidSame': 'Enter a different display name.',
   'repo.renameClose': 'Close rename dialog',
+  'repo.move': 'Move',
+  'repo.moveTitle': 'Repair RoboRev repository path',
+  'repo.moveDescription': 'Reconnect a stale RoboRev path to a repository already registered in this Dashboard.',
+  'repo.moveSource': 'Stale tracked repository',
+  'repo.moveSourcePath': 'Stale tracked path',
+  'repo.moveJobs': 'Jobs',
+  'repo.moveStatus': 'Dashboard status',
+  'repo.moveDestination': 'Registered destination',
+  'repo.moveDestinationPlaceholder': 'Select a registered repository',
+  'repo.moveDestinationPath': 'Destination path',
+  'repo.moveDestinationName': 'Destination name',
+  'repo.moveWorkingDirectory': 'Working directory',
+  'repo.moveCommand': 'Exact executable, working directory, and argv',
+  'repo.moveWarning': 'This does not move a folder. It reconnects an already-moved repository in RoboRev records.',
+  'repo.moveRegistrationWarning': 'The new path must already be registered in the Dashboard.',
+  'repo.movePrepare': 'Prepare move',
+  'repo.movePreparing': 'Preparing…',
+  'repo.moveUnavailable': 'RoboRev is currently unavailable. When it becomes available again, prepare a new Move Preview.',
+  'repo.moveUnsupported': 'The installed RoboRev does not support repository path repair.',
+  'repo.moveConfirm': 'Confirm move',
+  'repo.moveConfirming': 'Moving…',
+  'repo.moveSuccess': 'RoboRev repository path repaired.',
+  'repo.moveUnverified': 'The move process started, but the fresh inventory could not verify the final path. Refresh to inspect the current state. No retry was issued.',
+  'repo.moveMalformed': 'The Dashboard could not validate the repository move response.',
+  'repo.moveClose': 'Close repository move dialog',
   'panel.unavailable': 'Panel unavailable',
   'panel.unavailableNotInstalled': 'RoboRev is not installed.',
   'panel.unavailableDaemonOffline': 'The RoboRev daemon is not running.',
@@ -870,6 +895,31 @@ ko['repo.renameInvalidControl'] = '제어 문자는 사용할 수 없습니다.'
 ko['repo.renameInvalidLeadingDash'] = '“-”로 시작하는 이름은 사용할 수 없습니다.'
 ko['repo.renameInvalidSame'] = '현재와 다른 표시 이름을 입력하세요.'
 ko['repo.renameClose'] = '이름 변경 대화상자 닫기'
+ko['repo.move'] = '경로 복구'
+ko['repo.moveTitle'] = 'RoboRev 저장소 경로 복구'
+ko['repo.moveDescription'] = 'RoboRev의 오래된 경로 기록을 Dashboard에 이미 등록된 저장소에 다시 연결합니다.'
+ko['repo.moveSource'] = '오래된 추적 저장소'
+ko['repo.moveSourcePath'] = '오래된 추적 경로'
+ko['repo.moveJobs'] = '작업'
+ko['repo.moveStatus'] = 'Dashboard 상태'
+ko['repo.moveDestination'] = '등록된 대상'
+ko['repo.moveDestinationPlaceholder'] = '등록된 저장소를 선택하세요'
+ko['repo.moveDestinationPath'] = '대상 경로'
+ko['repo.moveDestinationName'] = '대상 이름'
+ko['repo.moveWorkingDirectory'] = '작업 디렉터리'
+ko['repo.moveCommand'] = '정확한 실행 파일, 작업 디렉터리 및 argv'
+ko['repo.moveWarning'] = '폴더를 이동하지 않습니다. 이미 이동한 저장소를 RoboRev 기록의 새 경로에 다시 연결합니다.'
+ko['repo.moveRegistrationWarning'] = '새 경로는 먼저 Dashboard에 등록되어 있어야 합니다.'
+ko['repo.movePrepare'] = '경로 복구 준비'
+ko['repo.movePreparing'] = '준비 중…'
+ko['repo.moveUnavailable'] = '현재 RoboRev를 사용할 수 없습니다. 다시 사용 가능해지면 새 Move Preview를 준비하세요.'
+ko['repo.moveUnsupported'] = '설치된 RoboRev는 저장소 경로 복구를 지원하지 않습니다.'
+ko['repo.moveConfirm'] = '경로 복구 확인'
+ko['repo.moveConfirming'] = '이동 중…'
+ko['repo.moveSuccess'] = 'RoboRev 저장소 경로를 복구했습니다.'
+ko['repo.moveUnverified'] = '경로 복구 프로세스는 시작했지만 새 경로를 inventory에서 확인하지 못했습니다. 새로고침하여 현재 상태를 확인하세요. 자동 재시도하지 않았습니다.'
+ko['repo.moveMalformed'] = 'Dashboard가 저장소 경로 복구 응답을 검증하지 못했습니다.'
+ko['repo.moveClose'] = '저장소 경로 복구 대화상자 닫기'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

@@ -38,6 +38,8 @@ export type Installation = {
     repositoryInventory?: boolean
     /** Optional because older bootstrap responses predate repository rename. */
     repositoryRename?: boolean
+    /** Optional because older bootstrap responses predate repository move. */
+    repositoryMove?: boolean
   }
 }
 
@@ -77,6 +79,22 @@ export type RepositoryRenameResult =
   | { status: 'renamed'; path: string; previousName: string; name: string }
   | { status: 'unverified'; path: string; message: string }
 
+export type RepositoryMoveCommand = { executable: string; args: string[]; workingDirectory: string }
+export type RepositoryMovePreview = {
+  sourcePath: string
+  sourceName: string
+  jobCount: number
+  destinationRepositoryIdentity: string
+  destinationPath: string
+  destinationName: string
+  command: RepositoryMoveCommand
+  token: string
+  expiresAt: string
+}
+export type RepositoryMoveResult =
+  | { status: 'moved'; sourcePath: string; destinationPath: string }
+  | { status: 'unverified'; sourcePath: string; destinationPath: string; message: string }
+
 function renameObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
 }
@@ -86,6 +104,37 @@ function renameCommand(value: unknown): RepositoryRenameCommand | null {
   if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string')) return null
   if (Object.keys(command).some(key => !['executable', 'args'].includes(key))) return null
   return { executable: command.executable, args: command.args as string[] }
+}
+
+function moveCommand(value: unknown): RepositoryMoveCommand | null {
+  const command = renameObject(value)
+  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || typeof command.workingDirectory !== 'string' || !command.workingDirectory) return null
+  if (Object.keys(command).some(key => !['executable', 'args', 'workingDirectory'].includes(key))) return null
+  return { executable: command.executable, args: command.args as string[], workingDirectory: command.workingDirectory }
+}
+
+/** Normalize the strict, server-owned repository move preview. */
+export function normalizeRepositoryMovePreview(value: unknown): RepositoryMovePreview | null {
+  const object = renameObject(value)
+  if (!object || Object.keys(object).some(key => !['sourcePath', 'sourceName', 'jobCount', 'destinationRepositoryIdentity', 'destinationPath', 'destinationName', 'command', 'token', 'expiresAt'].includes(key))) return null
+  const command = moveCommand(object.command)
+  if (typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.sourceName !== 'string' || typeof object.destinationRepositoryIdentity !== 'string' || !object.destinationRepositoryIdentity.trim() || typeof object.destinationPath !== 'string' || object.destinationPath.length === 0 || typeof object.destinationName !== 'string' || !nonNegativeSafeInteger(object.jobCount) || !command || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  return { sourcePath: object.sourcePath, sourceName: object.sourceName, jobCount: object.jobCount, destinationRepositoryIdentity: object.destinationRepositoryIdentity, destinationPath: object.destinationPath, destinationName: object.destinationName, command, token: object.token, expiresAt: object.expiresAt }
+}
+
+/** Normalize the post-confirm move receipt. Both outcomes carry the server's path evidence. */
+export function normalizeRepositoryMoveResult(value: unknown): RepositoryMoveResult | null {
+  const object = renameObject(value)
+  if (!object || typeof object.status !== 'string') return null
+  if (object.status === 'moved') {
+    if (Object.keys(object).some(key => !['status', 'sourcePath', 'destinationPath'].includes(key)) || typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.destinationPath !== 'string' || object.destinationPath.length === 0) return null
+    return { status: 'moved', sourcePath: object.sourcePath, destinationPath: object.destinationPath }
+  }
+  if (object.status === 'unverified') {
+    if (Object.keys(object).some(key => !['status', 'sourcePath', 'destinationPath', 'message'].includes(key)) || typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.destinationPath !== 'string' || object.destinationPath.length === 0 || typeof object.message !== 'string' || !object.message.trim()) return null
+    return { status: 'unverified', sourcePath: object.sourcePath, destinationPath: object.destinationPath, message: object.message }
+  }
+  return null
 }
 
 /** Normalize the strict, server-owned repository rename preview. */

@@ -86,4 +86,12 @@ describe('setup theme stylesheet contract', () => {
     expect(stylesheet).toContain('.rename-dialog footer .button{flex:1;min-width:120px}')
     expect(stylesheet).toContain('.rename-command-preview{max-height:300px;overflow:auto}')
   })
+
+  it('keeps the repository move dialog isolated and usable on mobile', () => {
+    expect(stylesheet).toContain('.move-command-preview code{font:11px/1.45 "Cascadia Code",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}')
+    expect(stylesheet).toContain('.move-command-preview li{display:grid;grid-template-columns:55px minmax(0,1fr)')
+    expect(stylesheet).toContain('@media(max-width:720px){.move-dialog{padding:14px}')
+    expect(stylesheet).toContain('.move-facts,.move-preview-facts{grid-template-columns:1fr}')
+    expect(stylesheet).not.toContain('.move-dialog .rename-')
+  })
 })

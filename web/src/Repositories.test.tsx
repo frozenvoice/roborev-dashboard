@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Repositories } from './Repositories'
+import { moveAvailability, Repositories } from './Repositories'
 import type { Bootstrap } from './api'
 import { I18nProvider, useI18n } from './i18n'
 
@@ -16,8 +16,14 @@ const renameOfflineBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...re
 const renameUnsupportedBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, version: 'v0.63.0', status: { running: false }, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false } } }
 const renameNotInstalledBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, installed: false, status: { running: false }, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false } } }
 const renameDefensiveMixedBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: true }, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryInventory: true, repositoryRename: false } } }
+const moveBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryMove: true } } }
+const moveUnsupportedBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, version: 'v0.63.0', status: { running: false }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false, repositoryMove: false } } }
+const moveNotInstalledBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, installed: false, status: { running: false }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false, repositoryMove: false } } }
+const moveOfflineBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, status: { running: false }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: true, repositoryRename: true, repositoryMove: true } } }
+const moveDefensiveMixedBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, status: { running: true }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: true, repositoryRename: true, repositoryMove: false } } }
 
 const renamePreview = { path: 'E:\\tracked', currentName: 'tracked', newName: 'Renamed 저장소', jobCount: 3, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\tracked', 'Renamed 저장소'] }, token: 'rename-token', expiresAt: '2026-08-23T01:02:03Z' }
+const movePreview = { sourcePath: 'E:/stale', sourceName: 'stale', jobCount: 2, destinationRepositoryIdentity: 'repo-1', destinationPath: 'E:\\repo', destinationName: 'registered', command: { executable: 'roborev.exe', args: ['repo', 'move', 'E:/stale', '.'], workingDirectory: 'E:\\repo' }, token: 'move-token', expiresAt: '2026-08-23T01:02:03Z' }
 
 function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }))
@@ -41,6 +47,16 @@ beforeEach(() => { window.localStorage.setItem('roborev-dashboard-language', 'en
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Repositories v2 inventory', () => {
+  it.each([
+    ['binary/install absent', moveNotInstalledBootstrap, false, 'runtime-unavailable'],
+    ['unsupported RoboRev version', moveUnsupportedBootstrap, false, 'unsupported'],
+    ['exact v0.64 daemon offline', moveOfflineBootstrap, false, 'runtime-unavailable'],
+    ['exact v0.64 daemon online', moveBootstrap, true, null],
+    ['defensive mixed capability state', moveDefensiveMixedBootstrap, false, 'unsupported'],
+  ] as const)('uses the production Bootstrap truth table for Move availability: %s', (_label, fixture, canMove, reason) => {
+    expect(moveAvailability(fixture)).toMatchObject({ canMove, reason })
+  })
+
   it('loads exactly once when mounted and preserves registered form/cards', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => { calls.push(String(input)); return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 2, dashboardRegistered: true }, { name: 'tracked', path: 'E:\\other', jobCount: 0, dashboardRegistered: false }], repositoryCount: 2, totalJobCount: 2 }) }))
@@ -756,5 +772,48 @@ describe('Repositories v2 inventory', () => {
     expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
     await userEvent.click(screen.getAllByRole('button', { name: 'Refresh' })[1])
     await waitFor(() => expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(2))
+  })
+
+  it('shows Move only for stale inventory rows when the exact v0.64 move capability is available', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({ repositories: [
+      { name: 'stale', path: 'E:/old/project', jobCount: 2, dashboardRegistered: false },
+      { name: 'registered', path: 'E:/new/project', jobCount: 3, dashboardRegistered: true },
+    ], repositoryCount: 2, totalJobCount: 5 })))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await screen.findByText('stale')
+    expect(screen.getAllByRole('button', { name: 'Move' })).toHaveLength(1)
+    const rows = document.querySelectorAll('.tracked-table tbody tr')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].querySelectorAll('td')).toHaveLength(rows[1].querySelectorAll('td').length)
+    expect(rows[1].querySelector('.tracked-move')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Move' }))
+    expect(screen.getByRole('dialog', { name: 'Repair RoboRev repository path' })).toBeInTheDocument()
+  })
+
+  it('keeps verified Move success and toast when the follow-up inventory refresh fails', async () => {
+    let inventoryReads = 0
+    const calls: string[] = []
+    const toast = vi.fn()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') {
+        inventoryReads += 1
+        return inventoryReads === 1
+          ? response({ repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 2, dashboardRegistered: false }], repositoryCount: 1, totalJobCount: 2 })
+          : response({ error: 'refresh failed' }, 503)
+      }
+      if (url.endsWith('/preview')) return response(movePreview)
+      return response({ status: 'moved', sourcePath: 'E:/stale', destinationPath: 'E:\\repo' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={moveBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Move' }))
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered destination' }), 'repo-1')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare move' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm move' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('success', 'RoboRev repository path repaired.'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('refresh failed')
+    expect(calls.filter(url => url === '/api/repository-moves')).toHaveLength(1)
   })
 })

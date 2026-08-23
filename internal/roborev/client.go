@@ -22,6 +22,7 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
@@ -83,6 +84,9 @@ func DecodePanelEnqueueResponse(raw json.RawMessage, request ReviewRequest) (Pan
 
 type Client struct {
 	Runner proc.Runner
+	// repositoryMoveFS is injectable only for deterministic adapter tests. A
+	// nil value uses the production os.Lstat implementation.
+	repositoryMoveFS repomove.FileSystem
 	// StreamRunner is injectable for deterministic tests.  A nil value uses
 	// the same ExecRunner implementation as short-lived commands.
 	StreamRunner      proc.StreamRunner
@@ -251,7 +255,7 @@ func decodeRaw(output string) (json.RawMessage, error) {
 
 func capabilities(version string) Capabilities {
 	v64 := roborevcompat.IsSupportedVersion(version)
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, RepositoryMove: v64, PromptLazyLoad: true, RawLog: true}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {

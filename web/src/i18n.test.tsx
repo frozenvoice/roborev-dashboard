@@ -13,6 +13,8 @@ function Harness() {
     <output data-testid="rename-title">{t('repo.renameTitle')}</output>
     <output data-testid="rename-unavailable">{t('repo.renameUnavailable')}</output>
     <output data-testid="rename-unsupported">{t('repo.renameUnsupported')}</output>
+    <output data-testid="move-title">{t('repo.moveTitle')}</output>
+    <output data-testid="move-warning">{t('repo.moveWarning')}</output>
     <output data-testid="formatted">{format('review.runningCount', { count: 2 })}</output>
     <output data-testid="stable-t">{String(firstT.current === t)}</output>
     <output data-testid="stable-format">{String(firstFormat.current === format)}</output>
@@ -75,6 +77,8 @@ describe('frontend locale provider', () => {
     expect(screen.getByTestId('rename-title')).toHaveTextContent('Rename RoboRev repository')
     expect(screen.getByTestId('rename-unavailable')).toHaveTextContent('RoboRev is currently unavailable')
     expect(screen.getByTestId('rename-unsupported')).toHaveTextContent('installed RoboRev does not support repository rename')
+    expect(screen.getByTestId('move-title')).toHaveTextContent('Repair RoboRev repository path')
+    expect(screen.getByTestId('move-warning')).toHaveTextContent('does not move a folder')
     expect(screen.getByTestId('formatted')).toHaveTextContent('2 running')
     expect(document.documentElement.lang).toBe('en')
     act(() => screen.getByRole('button', { name: '한국어' }).click())
@@ -83,6 +87,8 @@ describe('frontend locale provider', () => {
     expect(screen.getByTestId('rename-title')).toHaveTextContent('RoboRev 저장소 이름 변경')
     expect(screen.getByTestId('rename-unavailable')).toHaveTextContent('현재 RoboRev를 사용할 수 없습니다')
     expect(screen.getByTestId('rename-unsupported')).toHaveTextContent('설치된 RoboRev는 저장소 이름 변경을 지원하지 않습니다')
+    expect(screen.getByTestId('move-title')).toHaveTextContent('RoboRev 저장소 경로 복구')
+    expect(screen.getByTestId('move-warning')).toHaveTextContent('폴더를 이동하지 않습니다')
     expect(screen.getByTestId('formatted')).toHaveTextContent('2개 실행 중')
     expect(screen.getByTestId('stable-t')).toHaveTextContent('true')
     expect(screen.getByTestId('stable-format')).toHaveTextContent('true')

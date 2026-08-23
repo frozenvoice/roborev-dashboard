@@ -6,6 +6,7 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
+	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 )
 
@@ -71,6 +72,7 @@ type Capabilities struct {
 	GuidelineInsights   bool `json:"guidelineInsights"`
 	RepositoryInventory bool `json:"repositoryInventory"`
 	RepositoryRename    bool `json:"repositoryRename"`
+	RepositoryMove      bool `json:"repositoryMove"`
 }
 
 // RepositoryInventoryService is deliberately optional: the base Service
@@ -86,6 +88,14 @@ type RepositoryInventoryService interface {
 type RepositoryRenameService interface {
 	RepositoryRenamePreflight(context.Context, reporename.Request) (reporename.Preflight, error)
 	RepositoryRename(context.Context, reporename.Request, reporename.Preflight) (reporename.ExecutionResult, error)
+}
+
+// RepositoryMoveService is optional so existing Service fakes remain source
+// compatible. Implementations must perform a fresh process-boundary
+// validation and one authoritative inventory readback after a started CLI.
+type RepositoryMoveService interface {
+	RepositoryMovePreflight(context.Context, repomove.Request) (repomove.Preflight, error)
+	RepositoryMove(context.Context, repomove.Request, repomove.Preflight) (repomove.ExecutionResult, error)
 }
 
 // InsightsService is deliberately optional: the base Service interface is

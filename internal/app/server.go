@@ -24,6 +24,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/operation"
 	"github.com/froze/roborev-dashboard/internal/refine"
+	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 	"github.com/froze/roborev-dashboard/internal/setup"
@@ -51,7 +52,11 @@ type Server struct {
 	// field is revalidated fresh before a config set executes.
 	configPreviews *configPreviewStore
 	renamePreviews *repositoryRenamePreviewStore
-	Insights       *insights.Manager
+	movePreviews   *repositoryMovePreviewStore
+	// repositoryMoveFS is nil in production and exists only to make the
+	// read-only stale-source boundary deterministic in app tests.
+	repositoryMoveFS repomove.FileSystem
+	Insights         *insights.Manager
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -136,7 +141,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 			return repo.Path, nil
 		})
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -228,6 +233,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/configuration/set", s.mutationAuth(s.configurationSet))
 	s.mux.HandleFunc("POST /api/repository-renames/preview", s.mutationAuth(s.repositoryRenamePreview))
 	s.mux.HandleFunc("POST /api/repository-renames", s.mutation(s.repositoryRenameConfirm))
+	s.mux.HandleFunc("POST /api/repository-moves/preview", s.mutationAuth(s.repositoryMovePreview))
+	s.mux.HandleFunc("POST /api/repository-moves", s.mutation(s.repositoryMoveConfirm))
 	s.mux.HandleFunc("POST /api/insights/preview", s.mutationAuth(s.insightsPreview))
 	s.mux.HandleFunc("POST /api/insights", s.mutationAuth(s.startInsights))
 	s.mux.HandleFunc("POST /api/tasks/preview", s.mutationAuth(s.taskPreview))
