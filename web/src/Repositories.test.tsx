@@ -12,6 +12,8 @@ const bootstrap: Bootstrap = {
   roborev: { installed: true, version: 'v0.64.0', status: { running: true }, capabilities },
 }
 const renameBootstrap: Bootstrap = { ...bootstrap, roborev: { ...bootstrap.roborev, capabilities: { ...bootstrap.roborev.capabilities, repositoryRename: true } } }
+const renameUnsupportedBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryRename: false } } }
+const renameRuntimeUnavailableBootstrap: Bootstrap = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
 
 const renamePreview = { path: 'E:\\tracked', currentName: 'tracked', newName: 'Renamed 저장소', jobCount: 3, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\tracked', 'Renamed 저장소'] }, token: 'rename-token', expiresAt: '2026-08-23T01:02:03Z' }
 
@@ -224,7 +226,8 @@ describe('Repositories v2 inventory', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('RoboRev is unavailable')
     expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeDisabled()
-    expect(screen.getByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).toBeInTheDocument()
+    expect(screen.getByText('The installed RoboRev does not support repository rename.')).toBeInTheDocument()
+    expect(screen.queryByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
     expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
   })
@@ -244,11 +247,11 @@ describe('Repositories v2 inventory', () => {
     await prepareReadyRename()
     view.rerender(<I18nProvider><Repositories bootstrap={capabilityUnavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
     await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
-    await screen.findByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')
+    await screen.findByText('The installed RoboRev does not support repository rename.')
     view.rerender(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
     expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeEnabled()
     expect(previewCount).toBe(1)
-    expect(screen.queryByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).not.toBeInTheDocument()
+    expect(screen.queryByText('The installed RoboRev does not support repository rename.')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
     await waitFor(() => expect(previewCount).toBe(2))
     expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
@@ -290,6 +293,51 @@ describe('Repositories v2 inventory', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Readback unavailable')
     expect(screen.getAllByRole('button', { name: 'Refresh' })[1]).toBeInTheDocument()
     expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
+  })
+
+  it.each([
+    ['runtime unavailable', renameRuntimeUnavailableBootstrap, 'RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.', 'The installed RoboRev does not support repository rename.'],
+    ['rename unsupported', renameUnsupportedBootstrap, 'The installed RoboRev does not support repository rename.', 'RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.'],
+  ] as const)('distinguishes %s while the rename dialog is editing', async (_label, unavailableBootstrap, hint, otherHint) => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => String(input) === '/api/repository-inventory' ? response(trackedInventory) : response(renamePreview)))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    view.rerender(<I18nProvider><Repositories bootstrap={unavailableBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeDisabled()
+    expect(screen.getByText(hint)).toBeInTheDocument()
+    expect(screen.queryByText(otherHint)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm rename' })).not.toBeInTheDocument()
+  })
+
+  it('keeps Prepare enabled and hides both availability hints when all rename capabilities are available', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response(trackedInventory)))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeEnabled()
+    expect(screen.queryByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).not.toBeInTheDocument()
+    expect(screen.queryByText('The installed RoboRev does not support repository rename.')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['runtime unavailable', renameRuntimeUnavailableBootstrap, 'RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.', 'The installed RoboRev does not support repository rename.'],
+    ['rename unsupported', renameUnsupportedBootstrap, 'The installed RoboRev does not support repository rename.', 'RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.'],
+  ] as const)('keeps the %s hint alongside a preview error', async (_label, unavailableBootstrap, hint, otherHint) => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response(trackedInventory)
+      return response({ error: 'preview failed' }, 502)
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('preview failed')
+    view.rerender(<I18nProvider><Repositories bootstrap={unavailableBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeDisabled()
+    expect(screen.getByText(hint)).toBeInTheDocument()
+    expect(screen.queryByText(otherHint)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Confirm rename' })).not.toBeInTheDocument()
   })
 
   it('does not expose a new rename or preview while rename availability is false', async () => {
@@ -347,6 +395,31 @@ describe('Repositories v2 inventory', () => {
     expect(calls.filter(url => url === '/api/repository-renames')).toHaveLength(1)
   })
 
+  it('recovers runtime availability only through an explicit new preview without an automatic preview', async () => {
+    let previewCount = 0
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') return response(trackedInventory)
+      if (url.endsWith('/preview')) { previewCount += 1; return response(renamePreview) }
+      return response({ error: 'RoboRev is unavailable' }, 503)
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await prepareReadyRename()
+    view.rerender(<I18nProvider><Repositories bootstrap={renameRuntimeUnavailableBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('RoboRev is unavailable')
+    expect(screen.getByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).toBeInTheDocument()
+    expect(screen.queryByText('The installed RoboRev does not support repository rename.')).not.toBeInTheDocument()
+    view.rerender(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeEnabled()
+    expect(previewCount).toBe(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await waitFor(() => expect(previewCount).toBe(2))
+    expect(calls.filter(url => url.endsWith('/preview'))).toHaveLength(2)
+  })
+
   it('disables prepare after editing a ready preview when availability is false', async () => {
     const calls: string[] = []
     const capabilityUnavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, capabilities: { ...renameBootstrap.roborev.capabilities, repositoryRename: false } } }
@@ -365,7 +438,7 @@ describe('Repositories v2 inventory', () => {
     expect(screen.queryByRole('button', { name: 'Confirm rename' })).not.toBeInTheDocument()
     view.rerender(<I18nProvider><Repositories bootstrap={capabilityUnavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
     expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeDisabled()
-    expect(screen.getByText('RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.')).toBeInTheDocument()
+    expect(screen.getByText('The installed RoboRev does not support repository rename.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
     expect(calls.filter(url => url.endsWith('/preview'))).toHaveLength(1)
   })

@@ -356,6 +356,7 @@ export const en = {
   'repo.renamePrepare': 'Prepare rename',
   'repo.renamePreparing': 'Preparing…',
   'repo.renameUnavailable': 'RoboRev is currently unavailable. When it becomes available again, prepare a new Rename Preview.',
+  'repo.renameUnsupported': 'The installed RoboRev does not support repository rename.',
   'repo.renameConfirm': 'Confirm rename',
   'repo.renameConfirming': 'Renaming…',
   'repo.renameSuccess': 'Repository display name changed.',
@@ -855,6 +856,7 @@ ko['repo.renameWarning'] = '표시 이름만 변경합니다. 파일 시스템 �
 ko['repo.renamePrepare'] = '이름 변경 준비'
 ko['repo.renamePreparing'] = '준비 중…'
 ko['repo.renameUnavailable'] = '현재 RoboRev를 사용할 수 없습니다. 다시 사용 가능해지면 새 Rename Preview를 준비하세요.'
+ko['repo.renameUnsupported'] = '설치된 RoboRev는 저장소 이름 변경을 지원하지 않습니다.'
 ko['repo.renameConfirm'] = '이름 변경 확인'
 ko['repo.renameConfirming'] = '이름 변경 중…'
 ko['repo.renameSuccess'] = '저장소 표시 이름을 변경했습니다.'

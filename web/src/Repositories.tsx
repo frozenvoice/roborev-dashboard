@@ -18,8 +18,14 @@ function inventoryAvailable(bootstrap: Bootstrap | null) {
   return Boolean(bootstrap?.roborev?.installed && bootstrap.roborev.status?.running && bootstrap.roborev.capabilities?.repositoryInventory)
 }
 
-function renameAvailable(bootstrap: Bootstrap | null) {
-  return Boolean(inventoryAvailable(bootstrap) && bootstrap?.roborev?.capabilities?.repositoryRename)
+type RenameAvailabilityReason = 'runtime-unavailable' | 'unsupported'
+
+function renameAvailability(bootstrap: Bootstrap | null) {
+  const inventoryReady = inventoryAvailable(bootstrap)
+  const renameSupported = bootstrap?.roborev?.capabilities?.repositoryRename === true
+  const canRename = inventoryReady && renameSupported
+  const reason: RenameAvailabilityReason | null = !inventoryReady ? 'runtime-unavailable' : !renameSupported ? 'unsupported' : null
+  return { inventoryReady, renameSupported, canRename, reason }
 }
 
 function renameValidationMessage(error: RepositoryRenameNameError | undefined, t: (key: MessageKey, values?: Record<string, string | number>) => string) {
@@ -52,10 +58,9 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const confirmAbortRef = useRef<AbortController | null>(null)
   const renameConfirming = useRef(false)
   const mounted = useRef(true)
-  const available = inventoryAvailable(bootstrap)
-  const availableRef = useRef(available)
-  availableRef.current = available
-  const canRename = renameAvailable(bootstrap)
+  const { inventoryReady, canRename, reason: renameAvailabilityReason } = renameAvailability(bootstrap)
+  const availableRef = useRef(inventoryReady)
+  availableRef.current = inventoryReady
 
   const refreshInventory = useCallback(async () => {
     if (!availableRef.current || !mounted.current) return
@@ -80,7 +85,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
         ? { kind: 'malformed' }
         : { kind: 'request', message: error instanceof Error && error.message ? error.message : undefined })
     }
-  }, [available])
+  }, [inventoryReady])
 
   useEffect(() => {
     mounted.current = true
@@ -103,7 +108,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   }, [])
 
   useEffect(() => {
-    if (available) {
+    if (inventoryReady) {
       void refreshInventory()
       return
     }
@@ -113,7 +118,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
     setInventory(null)
     setInventoryError(null)
     setInventoryState('unavailable')
-  }, [available, refreshInventory])
+  }, [inventoryReady, refreshInventory])
 
   async function handleRegistration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -221,8 +226,8 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
     <form className="add-repo" onSubmit={handleRegistration}><label htmlFor="repo-path">{t('repo.addLocal')}</label><div><input id="repo-path" value={path} onChange={event => setPath(event.target.value)} placeholder={t('repo.pathPlaceholder')} /><button className="button primary" disabled={busy || !path.trim()}><Plus size={16} />{t('repo.register')}</button></div></form>
 
     <section className="tracked-repositories" aria-labelledby="tracked-repositories-heading">
-      <header className="section-heading tracked-heading"><div><span className="eyebrow">{t('repo.trackedEyebrow')}</span><h2 id="tracked-repositories-heading">{t('repo.trackedTitle')}</h2><p>{t('repo.trackedDescription')}</p></div>{available && <button className="button" type="button" onClick={() => { void refreshInventory() }}><RefreshCw size={15} className={inventoryState === 'loading' ? 'spin' : undefined} />{t('repo.trackedRefresh')}</button>}</header>
-      {!available || inventoryState === 'unavailable' ? <div className="tracked-state tracked-unavailable" role="status"><strong>{t('repo.trackedUnavailable')}</strong><span>{t('repo.trackedUnavailableBody')}</span></div> : inventoryState === 'loading' && !inventory ? <div className="tracked-state" role="status"><RefreshCw className="spin" size={17} /><span>{t('repo.trackedLoading')}</span></div> : inventoryState === 'error' ? <div className="tracked-state tracked-error" role="alert"><strong>{t('repo.trackedError')}</strong><span>{inventoryError?.kind === 'malformed' ? t('repo.trackedMalformed') : inventoryError?.message || t('repo.trackedError')}</span></div> : inventory && inventory.repositories.length === 0 ? <div className="tracked-state" role="status"><span>{t('repo.trackedEmpty')}</span></div> : inventory && <>
+      <header className="section-heading tracked-heading"><div><span className="eyebrow">{t('repo.trackedEyebrow')}</span><h2 id="tracked-repositories-heading">{t('repo.trackedTitle')}</h2><p>{t('repo.trackedDescription')}</p></div>{inventoryReady && <button className="button" type="button" onClick={() => { void refreshInventory() }}><RefreshCw size={15} className={inventoryState === 'loading' ? 'spin' : undefined} />{t('repo.trackedRefresh')}</button>}</header>
+      {!inventoryReady || inventoryState === 'unavailable' ? <div className="tracked-state tracked-unavailable" role="status"><strong>{t('repo.trackedUnavailable')}</strong><span>{t('repo.trackedUnavailableBody')}</span></div> : inventoryState === 'loading' && !inventory ? <div className="tracked-state" role="status"><RefreshCw className="spin" size={17} /><span>{t('repo.trackedLoading')}</span></div> : inventoryState === 'error' ? <div className="tracked-state tracked-error" role="alert"><strong>{t('repo.trackedError')}</strong><span>{inventoryError?.kind === 'malformed' ? t('repo.trackedMalformed') : inventoryError?.message || t('repo.trackedError')}</span></div> : inventory && inventory.repositories.length === 0 ? <div className="tracked-state" role="status"><span>{t('repo.trackedEmpty')}</span></div> : inventory && <>
         <div className="tracked-summary" aria-label={t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}>{t('repo.trackedSummary', { count: inventory.repositoryCount, jobs: inventory.totalJobCount })}</div>
         <div className="tracked-table-wrap"><table className="tracked-table"><thead><tr><th scope="col">{t('repo.trackedName')}</th><th scope="col">{t('repo.trackedPath')}</th><th scope="col">{t('repo.trackedJobs')}</th><th scope="col">{t('repo.trackedStatus')}</th>{canRename && <th scope="col">{t('repo.rename')}</th>}</tr></thead><tbody>{inventory.repositories.map((repo, index) => <tr key={`${repo.path}:${index}`}><td><strong>{repo.name}</strong></td><td><code>{repo.path}</code></td><td>{repo.jobCount}</td><td><span className={`status ${repo.dashboardRegistered ? 'status-pass' : 'status-canceled'}`}><span className="status-dot" />{repo.dashboardRegistered ? t('repo.trackedRegistered') : t('repo.trackedNotRegistered')}</span></td>{canRename && <td><button className="button tracked-rename" type="button" onClick={() => openRename(repo)} disabled={busy || renameState === 'previewing' || renameState === 'confirming'}>{t('repo.rename')}</button></td>}</tr>)}</tbody></table></div>
       </>}
@@ -234,7 +239,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
         <label className="rename-input-label" htmlFor="repository-rename-new-name">{t('repo.renameNewName')}<input id="repository-rename-new-name" value={renameDraft} onChange={event => { setRenameDraft(event.target.value); if (renameState !== 'confirming') { setRenameState('editing'); setRenameError(''); setRenamePreview(null); setRenameUnverifiedMessage('') } }} disabled={renameState === 'previewing' || renameState === 'confirming' || renameState === 'unverified'} autoFocus /></label>
         {renamePreview && <div className="rename-command-preview"><strong>{t('repo.renameCommand')}</strong><code className="rename-executable">{renamePreview.command.executable}</code><ol>{renamePreview.command.args.map((arg, index) => <li key={`${index}:${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div>}
         <p className="rename-warning"><AlertTriangle size={16} />{t('repo.renameWarning')}</p>
-        {renameState !== 'ready' && renameState !== 'confirming' && renameState !== 'unverified' && !canRename && <p className="rename-availability" role="status">{t('repo.renameUnavailable')}</p>}
+        {renameState !== 'ready' && renameState !== 'confirming' && renameState !== 'unverified' && !canRename && <p className="rename-availability" role="status">{renameAvailabilityReason === 'unsupported' ? t('repo.renameUnsupported') : t('repo.renameUnavailable')}</p>}
         {renameState === 'unverified' && <p className="rename-unverified" role="alert">{renameUnverifiedMessage || t('repo.renameUnverified')}</p>}
         {renameError && <p className="rename-error" role="alert">{renameError}</p>}
         <footer>{renameState === 'unverified' ? <><button className="button" type="button" onClick={closeRename}>{t('common.close')}</button><button className="button primary" type="button" onClick={() => { closeRename(); void refreshInventory() }}>{t('repo.trackedRefresh')}</button></> : <><button className="button" type="button" onClick={closeRename} disabled={renameState === 'confirming'}>{t('common.cancel')}</button>{renameState === 'confirming' ? <button className="button primary" type="button" disabled>{t('repo.renameConfirming')}</button> : renameState === 'ready' ? <button className="button primary" type="button" onClick={() => { void confirmRename() }}>{t('repo.renameConfirm')}</button> : <button className="button primary" type="submit" disabled={!canRename || renameState === 'previewing'}>{renameState === 'previewing' ? t('repo.renamePreparing') : t('repo.renamePrepare')}</button>}</>}</footer>
