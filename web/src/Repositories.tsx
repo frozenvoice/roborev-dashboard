@@ -46,15 +46,19 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   const [renameUnverifiedMessage, setRenameUnverifiedMessage] = useState('')
   const generation = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
-  const renameGeneration = useRef(0)
-  const renameAbortRef = useRef<AbortController | null>(null)
+  const previewGeneration = useRef(0)
+  const previewAbortRef = useRef<AbortController | null>(null)
+  const confirmGeneration = useRef(0)
+  const confirmAbortRef = useRef<AbortController | null>(null)
   const renameConfirming = useRef(false)
   const mounted = useRef(true)
   const available = inventoryAvailable(bootstrap)
+  const availableRef = useRef(available)
+  availableRef.current = available
   const canRename = renameAvailable(bootstrap)
 
   const refreshInventory = useCallback(async () => {
-    if (!available || !mounted.current) return
+    if (!availableRef.current || !mounted.current) return
     const currentGeneration = ++generation.current
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -80,23 +84,35 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
 
   useEffect(() => {
     mounted.current = true
-    if (available) void refreshInventory()
-    else {
-      generation.current += 1
-      abortRef.current?.abort()
-      setInventory(null)
-      setInventoryError(null)
-      setInventoryState('unavailable')
-    }
     return () => {
       mounted.current = false
+
       generation.current += 1
       abortRef.current?.abort()
       abortRef.current = null
-      renameGeneration.current += 1
-      renameAbortRef.current?.abort()
-      renameAbortRef.current = null
+
+      previewGeneration.current += 1
+      previewAbortRef.current?.abort()
+      previewAbortRef.current = null
+
+      confirmGeneration.current += 1
+      confirmAbortRef.current?.abort()
+      confirmAbortRef.current = null
+      renameConfirming.current = false
     }
+  }, [])
+
+  useEffect(() => {
+    if (available) {
+      void refreshInventory()
+      return
+    }
+    generation.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
+    setInventory(null)
+    setInventoryError(null)
+    setInventoryState('unavailable')
   }, [available, refreshInventory])
 
   async function handleRegistration(event: FormEvent<HTMLFormElement>) {
@@ -108,10 +124,9 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   }
 
   function closeRename() {
-    renameGeneration.current += 1
-    renameAbortRef.current?.abort()
-    renameAbortRef.current = null
-    renameConfirming.current = false
+    previewGeneration.current += 1
+    previewAbortRef.current?.abort()
+    previewAbortRef.current = null
     setRenameTarget(null)
     setRenameDraft('')
     setRenamePreview(null)
@@ -122,10 +137,9 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
 
   function openRename(row: RepositoryInventoryRow) {
     if (!canRename || !mounted.current) return
-    renameGeneration.current += 1
-    renameAbortRef.current?.abort()
-    renameAbortRef.current = null
-    renameConfirming.current = false
+    previewGeneration.current += 1
+    previewAbortRef.current?.abort()
+    previewAbortRef.current = null
     setRenameTarget(row)
     setRenameDraft('')
     setRenamePreview(null)
@@ -143,10 +157,10 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       setRenameState('error')
       return
     }
-    const currentGeneration = ++renameGeneration.current
-    renameAbortRef.current?.abort()
+    const currentGeneration = ++previewGeneration.current
+    previewAbortRef.current?.abort()
     const controller = new AbortController()
-    renameAbortRef.current = controller
+    previewAbortRef.current = controller
     setRenameState('previewing')
     setRenameError('')
     setRenameUnverifiedMessage('')
@@ -155,12 +169,12 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       const payload = await request<unknown>('/api/repository-renames/preview', { method: 'POST', body: JSON.stringify({ path: renameTarget.path, newName: validation.value }), signal: controller.signal })
       const normalized = normalizeRepositoryRenamePreview(payload)
       if (!normalized) throw new Error(t('repo.renameMalformed'))
-      if (!mounted.current || currentGeneration !== renameGeneration.current) return
+      if (!mounted.current || currentGeneration !== previewGeneration.current) return
       setRenamePreview(normalized)
       setRenameDraft(normalized.newName)
       setRenameState('ready')
     } catch (error) {
-      if (controller.signal.aborted || !mounted.current || currentGeneration !== renameGeneration.current) return
+      if (controller.signal.aborted || !mounted.current || currentGeneration !== previewGeneration.current) return
       setRenameError(error instanceof Error && error.message ? error.message : t('repo.renameMalformed'))
       setRenameState('error')
     }
@@ -169,17 +183,16 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
   async function confirmRename() {
     if (!renameTarget || !renamePreview || renameState !== 'ready' || !canRename || renameConfirming.current) return
     renameConfirming.current = true
-    const currentGeneration = ++renameGeneration.current
-    renameAbortRef.current?.abort()
+    const currentGeneration = ++confirmGeneration.current
     const controller = new AbortController()
-    renameAbortRef.current = controller
+    confirmAbortRef.current = controller
     setRenameState('confirming')
     setRenameError('')
     try {
       const payload = await request<unknown>('/api/repository-renames', { method: 'POST', body: JSON.stringify({ token: renamePreview.token }), signal: controller.signal })
       const normalized = normalizeRepositoryRenameResult(payload)
       if (!normalized) throw new Error(t('repo.renameMalformed'))
-      if (!mounted.current || currentGeneration !== renameGeneration.current) return
+      if (!mounted.current || currentGeneration !== confirmGeneration.current) return
       if (normalized.status === 'unverified') {
         setRenameUnverifiedMessage(normalized.message)
         setRenameState('unverified')
@@ -189,10 +202,14 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
       onToast?.('success', t('repo.renameSuccess'))
       void refreshInventory()
     } catch (error) {
-      if (controller.signal.aborted || !mounted.current || currentGeneration !== renameGeneration.current) return
+      if (controller.signal.aborted || !mounted.current || currentGeneration !== confirmGeneration.current) return
       setRenameError(error instanceof Error && error.message ? error.message : t('repo.renameMalformed'))
       setRenameState('error')
-      renameConfirming.current = false
+    } finally {
+      if (mounted.current && currentGeneration === confirmGeneration.current) {
+        renameConfirming.current = false
+        if (confirmAbortRef.current === controller) confirmAbortRef.current = null
+      }
     }
   }
 
@@ -219,7 +236,7 @@ export function Repositories({ bootstrap, registerRepository, busy, onToast }: R
         <p className="rename-warning"><AlertTriangle size={16} />{t('repo.renameWarning')}</p>
         {renameState === 'unverified' && <p className="rename-unverified" role="alert">{renameUnverifiedMessage || t('repo.renameUnverified')}</p>}
         {renameError && <p className="rename-error" role="alert">{renameError}</p>}
-        <footer>{renameState === 'unverified' ? <><button className="button" type="button" onClick={closeRename}>{t('common.close')}</button><button className="button primary" type="button" onClick={() => { closeRename(); void refreshInventory() }}>{t('repo.trackedRefresh')}</button></> : <><button className="button" type="button" onClick={closeRename} disabled={renameState === 'confirming'}>{t('common.cancel')}</button>{renameState === 'ready' ? <button className="button primary" type="button" onClick={() => { void confirmRename() }} disabled={renameState === 'confirming'}>{t('repo.renameConfirm')}</button> : <button className="button primary" type="submit" disabled={renameState === 'previewing' || renameState === 'confirming'}>{renameState === 'previewing' ? t('repo.renamePreparing') : t('repo.renamePrepare')}</button>}</>}</footer>
+        <footer>{renameState === 'unverified' ? <><button className="button" type="button" onClick={closeRename}>{t('common.close')}</button><button className="button primary" type="button" onClick={() => { closeRename(); void refreshInventory() }}>{t('repo.trackedRefresh')}</button></> : <><button className="button" type="button" onClick={closeRename} disabled={renameState === 'confirming'}>{t('common.cancel')}</button>{renameState === 'confirming' ? <button className="button primary" type="button" disabled>{t('repo.renameConfirming')}</button> : renameState === 'ready' ? <button className="button primary" type="button" onClick={() => { void confirmRename() }}>{t('repo.renameConfirm')}</button> : <button className="button primary" type="submit" disabled={renameState === 'previewing'}>{renameState === 'previewing' ? t('repo.renamePreparing') : t('repo.renamePrepare')}</button>}</>}</footer>
       </form>
     </section></div>}
   </section>

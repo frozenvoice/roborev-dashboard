@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -32,7 +31,7 @@ type renameHTTPService struct {
 	preflightCLIs      []string
 	preflightDaemons   []string
 	renameCalls        int
-	renameResult       proc.Result
+	renameResult       reporename.ExecutionResult
 	renameResultSet    bool
 	renameErr          error
 	renameBlock        <-chan struct{}
@@ -107,7 +106,7 @@ func (s *renameHTTPService) RepositoryRenamePreflight(_ context.Context, request
 	return reporename.Preflight{Command: reporename.Command{Executable: "roborev", Args: []string{"repo", "rename", request.Path, request.NewName}}, Binding: binding, CLIVersion: cli, DaemonVersion: daemon}, nil
 }
 
-func (s *renameHTTPService) RepositoryRename(_ context.Context, request reporename.Request, _ reporename.Preflight) (proc.Result, error) {
+func (s *renameHTTPService) RepositoryRename(_ context.Context, request reporename.Request, _ reporename.Preflight) (reporename.ExecutionResult, error) {
 	if s.renameStarted != nil {
 		select {
 		case s.renameStarted <- struct{}{}:
@@ -122,8 +121,8 @@ func (s *renameHTTPService) RepositoryRename(_ context.Context, request reporena
 	s.lastRenameRequest = request
 	result, err := s.renameResult, s.renameErr
 	s.mu.Unlock()
-	if !s.renameResultSet && result == (proc.Result{}) && err == nil {
-		result.Started = true
+	if !s.renameResultSet && result == (reporename.ExecutionResult{}) && err == nil {
+		result = reporename.ExecutionResult{Started: true, Verified: true}
 	}
 	return result, err
 }
@@ -182,6 +181,65 @@ func TestRepositoryRenameConfirmVerifiesFreshInventory(t *testing.T) {
 	response := renamePost(t, server, "/api/repository-renames", map[string]string{"token": value.Token})
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"renamed"`) || service.renameCalls != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, service.renameCalls, response.Body.String())
+	}
+	if service.installationCalls != 1 || service.preflights != 1 || service.inventoryCallCount != 1 {
+		t.Fatalf("confirm duplicated handler work: installation=%d preflight=%d inventory=%d", service.installationCalls, service.preflights, service.inventoryCallCount)
+	}
+}
+
+func TestRepositoryRenameConfirmErrorTaxonomyAndSingleServiceCall(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		result     reporename.ExecutionResult
+		wantStatus int
+	}{
+		{name: "binding changed", err: roborev.ErrBindingChanged, wantStatus: http.StatusConflict},
+		{name: "stale target", err: roborev.ErrRepositoryRenameStale, wantStatus: http.StatusConflict},
+		{name: "ambiguous target", err: roborev.ErrRepositoryRenameAmbiguous, wantStatus: http.StatusConflict},
+		{name: "unsupported", err: roborev.ErrUnsupportedRepositoryRename, wantStatus: http.StatusServiceUnavailable},
+		{name: "offline", err: roborev.ErrRepositoryRenameOffline, wantStatus: http.StatusServiceUnavailable},
+		{name: "unhealthy", err: roborev.ErrRepositoryRenameUnhealthy, wantStatus: http.StatusServiceUnavailable},
+		{name: "deadline", err: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout},
+		{name: "unknown", err: errors.New("pre-process failure"), wantStatus: http.StatusBadGateway},
+		{name: "started false nil", result: reporename.ExecutionResult{}, wantStatus: http.StatusBadGateway},
+	}
+	base := repoinventory.Inventory{Repositories: []repoinventory.Repository{{Name: "old", RootPath: `E:\tracked repo`}}}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &renameHTTPService{fakeService: &fakeService{}, renameResult: test.result, renameResultSet: true, renameErr: test.err}
+			server := renameTestServer(t, service, base)
+			token := prepareRenameToken(t, server, `E:\tracked repo`, "new")
+			response := confirmRename(t, server, token)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if service.renameCalls != 1 || service.installationCalls != 1 || service.preflights != 1 || service.inventoryCallCount != 1 {
+				t.Fatalf("duplicate/direct work: rename=%d installation=%d preflight=%d inventory=%d", service.renameCalls, service.installationCalls, service.preflights, service.inventoryCallCount)
+			}
+		})
+	}
+}
+
+func TestRepositoryRenameConfirmUsesTypedStartedOutcome(t *testing.T) {
+	base := repoinventory.Inventory{Repositories: []repoinventory.Repository{{Name: "old", RootPath: `E:\tracked repo`}}}
+	for _, test := range []struct {
+		name       string
+		result     reporename.ExecutionResult
+		wantStatus string
+	}{
+		{name: "verified", result: reporename.ExecutionResult{Started: true, Verified: true}, wantStatus: "renamed"},
+		{name: "unverified", result: reporename.ExecutionResult{Started: true}, wantStatus: "unverified"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &renameHTTPService{fakeService: &fakeService{}, renameResult: test.result, renameResultSet: true}
+			server := renameTestServer(t, service, base)
+			token := prepareRenameToken(t, server, `E:\tracked repo`, "new")
+			response := confirmRename(t, server, token)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"`+test.wantStatus+`"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -363,11 +421,11 @@ func TestRepositoryRenameTokenExpiryReplayAndBusyPreserve(t *testing.T) {
 
 func TestRepositoryRenameStartedFalseIsDefiniteFailure(t *testing.T) {
 	before := repoinventory.Inventory{Repositories: []repoinventory.Repository{{Name: "old", RootPath: `E:\tracked repo`}}}
-	service := &renameHTTPService{fakeService: &fakeService{}, renameResult: proc.Result{Started: false}, renameResultSet: true}
+	service := &renameHTTPService{fakeService: &fakeService{}, renameResult: reporename.ExecutionResult{Started: false}, renameResultSet: true}
 	server := renameTestServer(t, service, before, before)
 	token := prepareRenameToken(t, server, `E:\tracked repo`, "new")
 	response := confirmRename(t, server, token)
-	if response.Code != http.StatusBadGateway || service.renameCalls != 1 || service.inventoryCallCount != 2 {
+	if response.Code != http.StatusBadGateway || service.renameCalls != 1 || service.inventoryCallCount != 1 {
 		t.Fatalf("status=%d rename=%d inventory=%d body=%s", response.Code, service.renameCalls, service.inventoryCallCount, response.Body.String())
 	}
 }
@@ -389,7 +447,7 @@ func TestRepositoryRenameReadbackTaxonomyAndExitError(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			service := &renameHTTPService{fakeService: &fakeService{}, renameResult: proc.Result{Started: true}, renameResultSet: true, renameErr: test.exitErr}
+			service := &renameHTTPService{fakeService: &fakeService{}, renameResult: reporename.ExecutionResult{Started: true, Verified: test.wantStatus == "renamed"}, renameResultSet: true, renameErr: test.exitErr}
 			inventories := []repoinventory.Inventory{base, base}
 			if test.readbackErr == nil {
 				inventories = append(inventories, test.readback)
@@ -432,8 +490,11 @@ func TestRepositoryRenameConfirmRejectsFreshDriftBeforeProcess(t *testing.T) {
 				test.mutate(service)
 			}
 			service.inventoryErrors = append([]error(nil), test.inventoryErrs...)
+			service.renameResult = reporename.ExecutionResult{}
+			service.renameResultSet = true
+			service.renameErr = errors.New("adapter rejected stale target")
 			response := confirmRename(t, server, token)
-			if response.Code < http.StatusBadRequest || service.renameCalls != 0 {
+			if response.Code < http.StatusBadRequest || service.renameCalls != 1 || service.inventoryCallCount != 1 {
 				t.Fatalf("status=%d rename=%d inventory=%d body=%s", response.Code, service.renameCalls, service.inventoryCallCount, response.Body.String())
 			}
 		})
@@ -444,8 +505,11 @@ func TestRepositoryRenameConfirmRejectsFreshDriftBeforeProcess(t *testing.T) {
 	token := prepareRenameToken(t, server, `E:\tracked repo`, "new")
 	service.installation = renameInstallation()
 	service.installation.DaemonHealth = roborev.DaemonHealthOffline
+	service.renameResult = reporename.ExecutionResult{}
+	service.renameResultSet = true
+	service.renameErr = roborev.ErrRepositoryRenameOffline
 	response := confirmRename(t, server, token)
-	if response.Code != http.StatusServiceUnavailable || service.renameCalls != 0 {
+	if response.Code != http.StatusServiceUnavailable || service.renameCalls != 1 {
 		t.Fatalf("health drift status=%d rename=%d body=%s", response.Code, service.renameCalls, response.Body.String())
 	}
 }

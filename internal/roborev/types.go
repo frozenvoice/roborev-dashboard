@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"github.com/froze/roborev-dashboard/internal/insights"
-	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
 	"github.com/froze/roborev-dashboard/internal/reporename"
 )
@@ -86,7 +85,7 @@ type RepositoryInventoryService interface {
 // the process boundary and must not infer success from human CLI output.
 type RepositoryRenameService interface {
 	RepositoryRenamePreflight(context.Context, reporename.Request) (reporename.Preflight, error)
-	RepositoryRename(context.Context, reporename.Request, reporename.Preflight) (proc.Result, error)
+	RepositoryRename(context.Context, reporename.Request, reporename.Preflight) (reporename.ExecutionResult, error)
 }
 
 // InsightsService is deliberately optional: the base Service interface is

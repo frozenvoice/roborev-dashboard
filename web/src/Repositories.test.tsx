@@ -240,6 +240,163 @@ describe('Repositories v2 inventory', () => {
     resolveConfirm(await response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' }))
   })
 
+  it('keeps an accepted confirm alive when inventory availability is lost and renders Renaming until it resolves', async () => {
+    let confirmSignal: AbortSignal | undefined
+    let resolveConfirm!: (value: Response) => void
+    let inventoryReads = 0
+    const confirmResponse = new Promise<Response>(resolve => { resolveConfirm = resolve })
+    const toast = vi.fn()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') {
+        inventoryReads += 1
+        return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      }
+      if (url.endsWith('/preview')) return response(renamePreview)
+      confirmSignal = init?.signal ?? undefined
+      return confirmResponse
+    }))
+    const unavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(confirmSignal).toBeDefined())
+    expect(screen.getByRole('button', { name: 'Renaming…' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Prepare rename' })).not.toBeInTheDocument()
+    view.rerender(<I18nProvider><Repositories bootstrap={unavailable} registerRepository={async () => true} busy={false} onToast={toast} /></I18nProvider>)
+    expect(confirmSignal?.aborted).toBe(false)
+    expect(screen.getByRole('button', { name: 'Renaming…' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Prepare rename' })).not.toBeInTheDocument()
+    resolveConfirm(await response({ status: 'renamed', path: 'E:\\tracked', previousName: 'tracked', name: 'Renamed 저장소' }))
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('success', 'Repository display name changed.'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(inventoryReads).toBe(1)
+    expect(screen.getByText('RoboRev inventory unavailable')).toBeInTheDocument()
+  })
+
+  it('aborts inventory on availability loss without aborting an independent preview', async () => {
+    let inventorySignal: AbortSignal | undefined
+    let previewSignal: AbortSignal | undefined
+    let resolvePreview!: (value: Response) => void
+    let inventoryReads = 0
+    const previewResponse = new Promise<Response>(resolve => { resolvePreview = resolve })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') {
+        inventoryReads += 1
+        if (inventoryReads === 1) return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+        inventorySignal = init?.signal ?? undefined
+        return new Promise<Response>(() => {})
+      }
+      previewSignal = init?.signal ?? undefined
+      return previewResponse
+    }))
+    const unavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await screen.findByText('tracked')
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(inventorySignal).toBeDefined())
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await waitFor(() => expect(previewSignal).toBeDefined())
+    view.rerender(<I18nProvider><Repositories bootstrap={unavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(inventorySignal?.aborted).toBe(true)
+    expect(previewSignal?.aborted).toBe(false)
+    resolvePreview(await response(renamePreview))
+    expect(await screen.findByRole('button', { name: 'Confirm rename' })).toBeInTheDocument()
+  })
+
+  it('keeps an unverified confirm terminal after availability loss without retrying or refreshing', async () => {
+    let confirmSignal: AbortSignal | undefined
+    let resolveConfirm!: (value: Response) => void
+    let inventoryReads = 0
+    const confirmResponse = new Promise<Response>(resolve => { resolveConfirm = resolve })
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      calls.push(url)
+      if (url === '/api/repository-inventory') {
+        inventoryReads += 1
+        return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      }
+      if (url.endsWith('/preview')) return response(renamePreview)
+      confirmSignal = init?.signal ?? undefined
+      return confirmResponse
+    }))
+    const unavailable = { ...renameBootstrap, roborev: { ...renameBootstrap.roborev, status: { running: false } } }
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(confirmSignal).toBeDefined())
+    view.rerender(<I18nProvider><Repositories bootstrap={unavailable} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    expect(confirmSignal?.aborted).toBe(false)
+    expect(screen.getByRole('button', { name: 'Renaming…' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Prepare rename' })).not.toBeInTheDocument()
+    resolveConfirm(await response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Readback unavailable')
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeInTheDocument()
+    expect(calls.filter(url => url === '/api/repository-inventory')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Renaming…' })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(inventoryReads).toBe(1)
+  })
+
+  it('releases confirm ownership after a rejected request so the rename can recover', async () => {
+    let previewCount = 0
+    let confirmCount = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      if (url.endsWith('/preview')) {
+        previewCount += 1
+        return response(renamePreview)
+      }
+      confirmCount += 1
+      return confirmCount === 1 ? Promise.reject(new Error('network failed')) : response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' })
+    }))
+    render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('network failed')
+    expect(screen.getByRole('button', { name: 'Prepare rename' })).toBeEnabled()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await waitFor(() => expect(previewCount).toBe(2))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Readback unavailable')
+    expect(confirmCount).toBe(2)
+  })
+
+  it('allows the browser confirm request to be aborted only by actual unmount', async () => {
+    let confirmSignal: AbortSignal | undefined
+    let resolveConfirm!: (value: Response) => void
+    const confirmResponse = new Promise<Response>(resolve => { resolveConfirm = resolve })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/repository-inventory') return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 1, dashboardRegistered: true }], repositoryCount: 1, totalJobCount: 1 })
+      if (url.endsWith('/preview')) return response(renamePreview)
+      confirmSignal = init?.signal ?? undefined
+      return confirmResponse
+    }))
+    const view = render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Rename' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'New display name' }), 'Renamed 저장소')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare rename' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm rename' }))
+    await waitFor(() => expect(confirmSignal).toBeDefined())
+    expect(confirmSignal?.aborted).toBe(false)
+    view.unmount()
+    expect(confirmSignal?.aborted).toBe(true)
+    resolveConfirm(await response({ status: 'unverified', path: 'E:\\tracked', message: 'Readback unavailable' }))
+  })
+
   it('shows preview failure as a definite error and never offers confirm', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {

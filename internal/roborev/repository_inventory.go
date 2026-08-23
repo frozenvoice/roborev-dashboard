@@ -79,9 +79,7 @@ func (c *Client) RepositoryInventory(ctx context.Context) (repoinventory.Invento
 		return repoinventory.Inventory{}, ErrBindingChanged
 	}
 
-	// Reuse the bounded daemon JSON transport used by the other typed
-	// adapters. It issues a GET with a nil body and receives no query string.
-	raw, err := c.getDaemonJSONBounded(ctx, "/api/repos", int64(repoinventory.MaxResponseBytes))
+	value, err := c.repositoryInventoryRead(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return repoinventory.Inventory{}, ctx.Err()
@@ -91,12 +89,28 @@ func (c *Client) RepositoryInventory(ctx context.Context) (repoinventory.Invento
 		}
 		return repoinventory.Inventory{}, err
 	}
-	value, err := repoinventory.Parse(raw)
+	if !c.generationCurrent(generation) {
+		return repoinventory.Inventory{}, ErrBindingChanged
+	}
+	return value, nil
+}
+
+// repositoryInventoryRead performs only the bounded, strict /api/repos
+// transport and decode. Callers that already own a fresh CLI/health preflight
+// use this helper to avoid repeating those probes. The raw transport error is
+// deliberately preserved so each operation can map daemon reachability to
+// its own public taxonomy.
+func (c *Client) repositoryInventoryRead(ctx context.Context) (repoinventory.Inventory, error) {
+	if c == nil || c.HTTP == nil {
+		return repoinventory.Inventory{}, errors.New("RoboRev daemon transport is unavailable")
+	}
+	raw, err := c.getDaemonJSONBounded(ctx, "/api/repos", int64(repoinventory.MaxResponseBytes))
 	if err != nil {
 		return repoinventory.Inventory{}, err
 	}
-	if !c.generationCurrent(generation) {
-		return repoinventory.Inventory{}, ErrBindingChanged
+	value, err := repoinventory.Parse(raw)
+	if err != nil {
+		return repoinventory.Inventory{}, err
 	}
 	return value, nil
 }

@@ -28,13 +28,11 @@ type repositoryRenameConfirmBody struct {
 }
 
 type repositoryRenamePreviewRecord struct {
-	Path          string
-	CurrentName   string
-	NewName       string
-	BinaryBinding string
-	CLIVersion    string
-	DaemonVersion string
-	ExpiresAt     time.Time
+	Path        string
+	CurrentName string
+	NewName     string
+	Preflight   reporename.Preflight
+	ExpiresAt   time.Time
 }
 
 type repositoryRenamePreviewStore struct {
@@ -155,7 +153,7 @@ func (s *Server) repositoryRenamePreview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	expires := time.Now().Add(repositoryRenamePreviewTTL)
-	record := repositoryRenamePreviewRecord{Path: target.RootPath, CurrentName: target.Name, NewName: newName, BinaryBinding: preflight.Binding, CLIVersion: preflight.CLIVersion, DaemonVersion: preflight.DaemonVersion, ExpiresAt: expires}
+	record := repositoryRenamePreviewRecord{Path: target.RootPath, CurrentName: target.Name, NewName: newName, Preflight: preflight, ExpiresAt: expires}
 	token, err := s.renamePreviews.put(record)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "prepare repository rename", "rename")
@@ -190,47 +188,20 @@ func (s *Server) repositoryRenameConfirm(w http.ResponseWriter, r *http.Request)
 	defer s.renamePreviews.release(record.Path)
 	ctx, cancel := mutationContext()
 	defer cancel()
-	service, ok := s.repositoryRenameService(w, ctx)
+	service, ok := s.RoboRev.(roborev.RepositoryRenameService)
 	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "Repository rename is unavailable", "repository-rename")
 		return
 	}
-	inventory, inventoryErr := s.repositoryRenameInventory(ctx)
-	if inventoryErr != nil {
-		writeRepositoryInventoryError(w, inventoryErr)
-		return
-	}
-	target, ok := resolveRenameTarget(w, inventory, record.Path)
-	if !ok {
-		return
-	}
-	if target.Name != record.CurrentName {
-		writeError(w, http.StatusConflict, "repository display name changed after preview; prepare again", "stale")
-		return
-	}
-	preflight, err := service.RepositoryRenamePreflight(ctx, reporename.Request{Path: record.Path, CurrentName: record.CurrentName, NewName: record.NewName})
-	if err != nil {
-		writeRepositoryRenameError(w, err)
-		return
-	}
-	if preflight.Binding != record.BinaryBinding || preflight.CLIVersion != record.CLIVersion || preflight.DaemonVersion != record.DaemonVersion {
-		writeError(w, http.StatusConflict, "RoboRev binding changed after preview; prepare again", "stale")
-		return
-	}
-	result, runErr := service.RepositoryRename(ctx, reporename.Request{Path: record.Path, CurrentName: record.CurrentName, NewName: record.NewName}, preflight)
+	result, runErr := service.RepositoryRename(ctx, reporename.Request{Path: record.Path, CurrentName: record.CurrentName, NewName: record.NewName}, record.Preflight)
 	if !result.Started {
 		if runErr == nil {
 			runErr = errors.New("RoboRev rename process did not start")
 		}
-		writeError(w, http.StatusBadGateway, runErr.Error(), "rename")
+		writeRepositoryRenameError(w, runErr)
 		return
 	}
-	readback, readbackErr := s.repositoryRenameInventory(ctx)
-	if readbackErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "unverified", "path": record.Path, "message": "Rename outcome could not be verified. Refresh the RoboRev inventory before trying again."})
-		return
-	}
-	verified, _ := renameReadback(readback, record.Path, record.NewName)
-	if verified {
+	if result.Verified {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "renamed", "path": record.Path, "previousName": record.CurrentName, "name": record.NewName})
 		return
 	}
@@ -291,21 +262,6 @@ func resolveRenameTarget(w http.ResponseWriter, inventory repoinventory.Inventor
 		}
 	}
 	return target, true
-}
-
-func renameReadback(inventory repoinventory.Inventory, path, name string) (bool, bool) {
-	found := 0
-	matching := 0
-	for _, row := range inventory.Repositories {
-		if row.RootPath != path {
-			continue
-		}
-		found++
-		if row.Name == name {
-			matching++
-		}
-	}
-	return found == 1 && matching == 1, found != 0
 }
 
 func writeRepositoryRenameError(w http.ResponseWriter, err error) {

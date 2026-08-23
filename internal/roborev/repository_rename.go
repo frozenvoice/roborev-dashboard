@@ -76,41 +76,66 @@ func (c *Client) RepositoryRenamePreflight(ctx context.Context, request reporena
 	return reporename.Preflight{Command: command, Binding: fmt.Sprintf("%d:%s", generation, binary), CLIVersion: cliVersion, DaemonVersion: health.Version}, nil
 }
 
-func (c *Client) RepositoryRename(ctx context.Context, request reporename.Request, expected reporename.Preflight) (proc.Result, error) {
+func (c *Client) RepositoryRename(ctx context.Context, request reporename.Request, expected reporename.Preflight) (reporename.ExecutionResult, error) {
+	if c == nil || c.Runner == nil {
+		return reporename.ExecutionResult{}, ErrUnsupportedRepositoryRename
+	}
+	request, err := reporename.ValidateRequest(request)
+	if err != nil {
+		return reporename.ExecutionResult{}, err
+	}
 	fresh, err := c.RepositoryRenamePreflight(ctx, request)
 	if err != nil {
-		return proc.Result{}, err
+		return reporename.ExecutionResult{}, err
 	}
-	if fresh.Binding != expected.Binding || fresh.CLIVersion != expected.CLIVersion || fresh.DaemonVersion != expected.DaemonVersion || fresh.Command.Executable != expected.Command.Executable || !sameArgs(fresh.Command.Args, expected.Command.Args) || fresh.Command.Dir != expected.Command.Dir {
-		return proc.Result{}, ErrBindingChanged
+	if !sameRenamePreflight(fresh, expected) {
+		return reporename.ExecutionResult{}, ErrBindingChanged
 	}
 	// Re-read the daemon inventory after the last version/health/binding probe
 	// and immediately before process acceptance. This closes the Dashboard-side
 	// window in which RoboRev's path-first/name-fallback resolver could otherwise
 	// interpret a stale path as a display name.
-	inventory, err := c.RepositoryInventory(ctx)
+	inventory, err := c.repositoryInventoryRead(ctx)
 	if err != nil {
-		return proc.Result{}, err
+		if ctx.Err() != nil {
+			return reporename.ExecutionResult{}, ctx.Err()
+		}
+		if isUnreachableHealthError(err) {
+			return reporename.ExecutionResult{}, fmt.Errorf("%w: %v", ErrRepositoryRenameOffline, err)
+		}
+		return reporename.ExecutionResult{}, err
 	}
 	if err := validateRenameInventory(inventory, request); err != nil {
-		return proc.Result{}, err
+		return reporename.ExecutionResult{}, err
 	}
 	// RepositoryInventory has its own generation guard, but a rebind may land
 	// between the final preflight and that inventory call's snapshot. Compare
 	// the opaque binding once more at the actual process boundary.
 	if c.BindingIdentity() != fresh.Binding {
-		return proc.Result{}, ErrBindingChanged
+		return reporename.ExecutionResult{}, ErrBindingChanged
 	}
 	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: fresh.Command.Executable, Args: append([]string(nil), fresh.Command.Args...), Dir: fresh.Command.Dir, Timeout: repositoryRenameTimeout, OutputLimit: repositoryRenameOutputLimit})
 	if !result.Started {
 		if runErr != nil {
-			return result, runErr
+			return reporename.ExecutionResult{}, runErr
 		}
-		return result, errors.New("RoboRev rename process did not start")
+		return reporename.ExecutionResult{}, errors.New("RoboRev rename process did not start")
 	}
-	// Started means the external mutation may have happened. Return the result
-	// even on an exit error so the HTTP layer can perform authoritative readback.
-	return result, nil
+	// Started means the external mutation may have happened. Always perform
+	// exactly one bounded authoritative readback. Any readback failure is an
+	// ambiguity, not a definite process failure, and is intentionally swallowed
+	// into Verified=false. Exit status is likewise non-authoritative.
+	readback, readbackErr := c.repositoryInventoryRead(ctx)
+	if readbackErr != nil {
+		return reporename.ExecutionResult{Started: true}, nil
+	}
+	// A rebind after process launch makes the readback ambiguous even when the
+	// rows happen to contain the requested name: the response may belong to a
+	// different RoboRev executable/daemon binding.
+	if c.BindingIdentity() != fresh.Binding {
+		return reporename.ExecutionResult{Started: true}, nil
+	}
+	return reporename.ExecutionResult{Started: true, Verified: validateRenameReadback(readback, request.Path, request.NewName)}, nil
 }
 
 var _ RepositoryRenameService = (*Client)(nil)
@@ -136,4 +161,29 @@ func validateRenameInventory(inventory repoinventory.Inventory, request reporena
 		}
 	}
 	return nil
+}
+
+func sameRenamePreflight(left, right reporename.Preflight) bool {
+	return left.Binding == right.Binding &&
+		left.CLIVersion == right.CLIVersion &&
+		left.DaemonVersion == right.DaemonVersion &&
+		left.Command.Executable == right.Command.Executable &&
+		sameArgs(left.Command.Args, right.Command.Args) &&
+		left.Command.Dir == right.Command.Dir
+}
+
+func validateRenameReadback(inventory repoinventory.Inventory, path, newName string) bool {
+	found := 0
+	for _, row := range inventory.Repositories {
+		if row.RootPath == path {
+			found++
+			if row.Name != newName {
+				return false
+			}
+		}
+		if row.RootPath != path && row.Name == path {
+			return false
+		}
+	}
+	return found == 1
 }

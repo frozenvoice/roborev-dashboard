@@ -38,6 +38,15 @@ type Preflight struct {
 	DaemonVersion string
 }
 
+// ExecutionResult describes the only process outcome facts that the rename
+// adapter exposes to its caller. Started is false when the process could not
+// be launched; once a process has started, Verified is authoritative only
+// when the subsequent inventory readback observed the requested name.
+type ExecutionResult struct {
+	Started  bool
+	Verified bool
+}
+
 func NormalizeName(value string) (string, error) {
 	if !utf8.ValidString(value) {
 		return "", fmt.Errorf("%w: name must be valid UTF-8", ErrInvalidName)
