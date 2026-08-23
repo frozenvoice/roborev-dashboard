@@ -235,14 +235,23 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
     setResultError('')
     const load = async () => {
       try {
-        const completed = normalizeGuidelineInsightsResult(await request<unknown>(`/api/insights/${jobId}/result?repositoryIdentity=${encodeURIComponent(identity)}`, { signal: controller.signal }))
+        let payload: unknown
+        try {
+          payload = await request<unknown>(`/api/insights/${jobId}/result?repositoryIdentity=${encodeURIComponent(identity)}`, { signal: controller.signal })
+        } catch (caught) {
+          if (!current()) return
+          setResultError(caught instanceof APIError ? caught.message : t('stats.guidelineResultFailed'))
+          return
+        }
         if (!current()) return
-        if (!completed || completed.jobId !== jobId) throw new Error(t('stats.insightsMalformed'))
+        const completed = normalizeGuidelineInsightsResult(payload)
+        if (!completed || completed.jobId !== jobId) {
+          setResult(null)
+          setResultError(t('stats.insightsMalformed'))
+          return
+        }
         setResult(completed)
         setResultError('')
-      } catch (caught) {
-        if (!current()) return
-        setResultError(caught instanceof APIError ? caught.message : (caught as Error).message === t('stats.insightsMalformed') ? t('stats.insightsMalformed') : t('stats.guidelineResultFailed'))
       } finally {
         if (current()) setResultLoading(false)
       }

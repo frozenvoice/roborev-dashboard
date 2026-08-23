@@ -124,7 +124,7 @@ func TestManagerRejectsCurrentBranchDriftBeforeLaunch(t *testing.T) {
 
 func TestManagerRejectsDetachedCurrentPreviewBeforePreflight(t *testing.T) {
 	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
-	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached"}})
+	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached", Detached: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,8 @@ func TestManagerRejectsDetachedCurrentStartBeforeLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry.repo.Branch = "DETACHED"
+	registry.repo.Branch = "detached"
+	registry.repo.Detached = true
 	if _, err := manager.Start(context.Background(), preview.Token); err == nil {
 		t.Fatal("detached current start was accepted")
 	}
@@ -168,7 +169,7 @@ func TestManagerRejectsDetachedCurrentStartBeforeLaunch(t *testing.T) {
 
 func TestManagerAllowsAllBranchesWhenDetachedWithoutBranch(t *testing.T) {
 	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
-	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached"}})
+	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached", Detached: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +203,68 @@ func TestManagerAllowsAllBranchesWhenDetachedWithoutBranch(t *testing.T) {
 				t.Errorf("request[%d] command unexpectedly contains --branch: %#v", i, adapter.commands[i].Args)
 			}
 		}
+	}
+}
+
+func TestManagerAllowsLiteralDetachedBranchForCurrentScope(t *testing.T) {
+	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
+	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := manager.Preview(context.Background(), PreviewRequest{RepositoryIdentity: "repo-a", Window: Window30d, BranchScope: BranchCurrent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Branch != "detached" {
+		t.Fatalf("preview branch=%q, want literal detached", preview.Branch)
+	}
+	branchArg := false
+	for i := 0; i+1 < len(preview.Argv); i++ {
+		if preview.Argv[i] == "--branch" && preview.Argv[i+1] == "detached" {
+			branchArg = true
+			break
+		}
+	}
+	if !branchArg {
+		t.Fatalf("preview argv=%#v, want --branch detached", preview.Argv)
+	}
+	result, err := manager.Start(context.Background(), preview.Token)
+	if err != nil || result.Status != "queued" || result.JobID != 42 {
+		t.Fatalf("start=%#v err=%v", result, err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.launches != 1 {
+		t.Fatalf("launches=%d, want 1", adapter.launches)
+	}
+	for i, request := range adapter.requests {
+		if request.Branch != "detached" {
+			t.Errorf("request[%d] branch=%q, want detached", i, request.Branch)
+		}
+	}
+}
+
+func TestManagerRejectsMainToLiteralDetachedBranchAsDrift(t *testing.T) {
+	registry := &changingRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "main"}}
+	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
+	manager, err := NewManager(adapter, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := manager.Preview(context.Background(), PreviewRequest{RepositoryIdentity: "repo-a", Window: Window30d, BranchScope: BranchCurrent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.repo.Branch = "detached"
+	registry.repo.Detached = false
+	if _, err := manager.Start(context.Background(), preview.Token); err == nil {
+		t.Fatal("literal detached branch drift was accepted")
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.launches != 0 {
+		t.Fatalf("launches=%d, want 0", adapter.launches)
 	}
 }
 

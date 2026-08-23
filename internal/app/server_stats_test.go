@@ -200,6 +200,26 @@ func TestStatsCurrentBranchFreshInspectionAndDetachedRejection(t *testing.T) {
 	if detachedResponse.Code != http.StatusConflict || service.costCalls != 0 {
 		t.Fatalf("detached status=%d costCalls=%d", detachedResponse.Code, service.costCalls)
 	}
+
+	// A literal branch named "detached" is still an attached current branch
+	// and must be passed to RoboRev as the authoritative branch scope.
+	literal := &literalDetachedStatsInspector{}
+	literalServer, literalIdentity := setupStatsServer(t, service, literal)
+	service.costCalls = 0
+	literalResponse := httptest.NewRecorder()
+	literalServer.Handler().ServeHTTP(literalResponse, nativeStatsRequest("/api/stats/cost?repositoryIdentity="+statsIdentityQuery(literalIdentity)+"&branchScope=current"))
+	if literalResponse.Code != http.StatusOK || service.costCalls != 1 || service.lastBranch != "detached" {
+		t.Fatalf("literal detached status=%d costCalls=%d branch=%q body=%s", literalResponse.Code, service.costCalls, service.lastBranch, literalResponse.Body.String())
+	}
+
+	// Detached checkouts remain valid for all-branches scope, which has no
+	// branch argument to pass through.
+	service.summaryCalls = 0
+	allResponse := httptest.NewRecorder()
+	detachedServer.Handler().ServeHTTP(allResponse, nativeStatsRequest("/api/stats/summary?repositoryIdentity="+statsIdentityQuery(detachedIdentity)+"&window=7d&branchScope=all"))
+	if allResponse.Code != http.StatusOK || service.summaryCalls != 1 || service.lastBranch != "" {
+		t.Fatalf("all detached status=%d summaryCalls=%d branch=%q body=%s", allResponse.Code, service.summaryCalls, service.lastBranch, allResponse.Body.String())
+	}
 }
 
 func TestStatsRejectsInspectionRootMismatchBeforeServiceForAllAndCurrent(t *testing.T) {
@@ -225,7 +245,13 @@ func TestStatsRejectsInspectionRootMismatchBeforeServiceForAllAndCurrent(t *test
 type detachedStatsInspector struct{}
 
 func (detachedStatsInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
-	return gitx.Repository{Path: path, Branch: "detached", Head: "abc"}, nil
+	return gitx.Repository{Path: path, Branch: "detached", Detached: true, Head: "abc"}, nil
+}
+
+type literalDetachedStatsInspector struct{}
+
+func (literalDetachedStatsInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	return gitx.Repository{Path: path, Branch: "detached", Detached: false, Head: "abc"}, nil
 }
 
 func TestStatsAuthAndQueryRejectBeforeSideEffects(t *testing.T) {

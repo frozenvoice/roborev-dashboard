@@ -242,6 +242,48 @@ describe('GuidelineInsights', () => {
     expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
   })
 
+  it('reports malformed result data without comparing localized strings', async () => {
+    let resultCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) {
+        resultCalls++
+        return response({ jobId: 43, status: 'done', markdown: '# Wrong job' })
+      }
+      return response({ jobId: 42, status: 'done' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The Dashboard could not validate the Insights response.')
+    expect(screen.queryByText('Wrong job')).not.toBeInTheDocument()
+    expect(resultCalls).toBe(1)
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
+  })
+
+  it.each([
+    ['a network exception', () => Promise.reject(new TypeError('network unavailable')), 'The Insights result could not be loaded. Try again when the daemon is available.'],
+    ['an APIError response', () => response({ error: 'result endpoint rejected' }, 503), 'result endpoint rejected'],
+  ] as const)('distinguishes %s from malformed result data', async (_label, resultResponse, expectedError) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) return resultResponse()
+      return response({ jobId: 42, status: 'done' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(expectedError)
+    expect(screen.queryByText('The Dashboard could not validate the Insights response.')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
+  })
+
   it('shows a validation error and clears stale state for a malformed status', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)

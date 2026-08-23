@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -22,6 +23,33 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	return proc.Result{Stdout: r.stdout}, r.err
+}
+
+type inspectRunner struct {
+	commands []proc.Command
+	root     string
+	branch   string
+}
+
+func (r *inspectRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.commands = append(r.commands, command)
+	args := command.Args
+	if len(args) >= 2 && args[len(args)-2] == "rev-parse" && args[len(args)-1] == "--show-toplevel" {
+		return proc.Result{Stdout: r.root}, nil
+	}
+	if len(args) >= 2 && args[len(args)-2] == "rev-parse" && args[len(args)-1] == "HEAD" {
+		return proc.Result{Stdout: "abcdef0123456789"}, nil
+	}
+	if len(args) >= 2 && args[len(args)-2] == "branch" && args[len(args)-1] == "--show-current" {
+		return proc.Result{Stdout: r.branch}, nil
+	}
+	if len(args) >= 3 && args[len(args)-3] == "log" && args[len(args)-2] == "-1" {
+		return proc.Result{Stdout: "subject"}, nil
+	}
+	if len(args) >= 3 && args[len(args)-3] == "status" && args[len(args)-2] == "--porcelain=v1" {
+		return proc.Result{}, nil
+	}
+	return proc.Result{}, errors.New("unexpected Git command")
 }
 
 func TestIsLinkedWorktreeUsesTypedMetadataCommandAndPreservesPath(t *testing.T) {
@@ -196,5 +224,44 @@ func TestCanonicalRootCaseSemanticsFollowPlatform(t *testing.T) {
 		}
 	} else if err == nil {
 		t.Fatal("case-sensitive platform accepted differently-cased canonical root")
+	}
+}
+
+func TestInspectDistinguishesActualDetachedFromLiteralDetachedBranch(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name         string
+		branchOutput string
+		wantBranch   string
+		wantDetached bool
+	}{
+		{name: "actual detached", branchOutput: "", wantBranch: "detached", wantDetached: true},
+		{name: "literal detached branch", branchOutput: "detached", wantBranch: "detached"},
+		{name: "main", branchOutput: "main", wantBranch: "main"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &inspectRunner{root: root, branch: test.branchOutput}
+			repo, err := New(runner).Inspect(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repo.Branch != test.wantBranch || repo.Detached != test.wantDetached {
+				t.Fatalf("branch=%q detached=%v, want branch=%q detached=%v", repo.Branch, repo.Detached, test.wantBranch, test.wantDetached)
+			}
+			encoded, err := json.Marshal(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := fields["detached"]; ok {
+				t.Fatalf("browser repository JSON leaked detached safety field: %s", encoded)
+			}
+			if len(runner.commands) != 5 {
+				t.Fatalf("commands=%d, want 5", len(runner.commands))
+			}
+		})
 	}
 }

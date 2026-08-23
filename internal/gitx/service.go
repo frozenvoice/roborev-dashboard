@@ -14,9 +14,14 @@ import (
 )
 
 type Repository struct {
-	Name          string `json:"name"`
-	Path          string `json:"path"`
-	Branch        string `json:"branch"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	// Detached distinguishes an actual detached HEAD from a checked-out
+	// branch whose literal name is "detached". It is intentionally omitted
+	// from the browser contract; callers that need this safety distinction
+	// consume the typed repository value server-side.
+	Detached      bool   `json:"-"`
 	Head          string `json:"head"`
 	HeadShort     string `json:"headShort"`
 	CommitSubject string `json:"commitSubject"`
@@ -155,7 +160,8 @@ func (s *Service) Inspect(ctx context.Context, path string) (Repository, error) 
 		return Repository{}, fmt.Errorf("resolve HEAD: %w", err)
 	}
 	branch, _ := s.command(ctx, root, "branch", "--show-current")
-	if branch == "" {
+	detached := strings.TrimSpace(branch) == ""
+	if detached {
 		branch = "detached"
 	}
 	subject, _ := s.command(ctx, root, "log", "-1", "--pretty=%s")
@@ -169,5 +175,5 @@ func (s *Service) Inspect(ctx context.Context, path string) (Repository, error) 
 	}
 	configInfo, configErr := os.Stat(filepath.Join(root, ".roborev.toml"))
 	hasConfig := configErr == nil && !configInfo.IsDir()
-	return Repository{Name: filepath.Base(root), Path: root, Branch: branch, Head: head, HeadShort: short, CommitSubject: subject, Dirty: status != "", HasConfig: hasConfig}, nil
+	return Repository{Name: filepath.Base(root), Path: root, Branch: branch, Detached: detached, Head: head, HeadShort: short, CommitSubject: subject, Dirty: status != "", HasConfig: hasConfig}, nil
 }

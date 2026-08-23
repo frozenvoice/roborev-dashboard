@@ -136,7 +136,7 @@ func (s *Server) statsRepositoryScope(w http.ResponseWriter, ctx context.Context
 	}
 	if branchScope == statsScopeCurrent {
 		branch := strings.TrimSpace(repo.Branch)
-		if branch == "" || strings.EqualFold(branch, "detached") || strings.EqualFold(branch, "head") {
+		if repo.Detached || branch == "" || strings.EqualFold(branch, "head") {
 			writeError(w, http.StatusConflict, "current branch is unavailable", "branch")
 			return gitx.Repository{}, "", false
 		}
