@@ -1,6 +1,6 @@
 import { Clipboard, Play, Sparkles, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { request, normalizeGuidelineInsightsLaunch, normalizeGuidelineInsightsPreview, normalizeGuidelineInsightsResult, normalizeGuidelineInsightsStatus, type GuidelineInsightsLaunch, type GuidelineInsightsPreview, type GuidelineInsightsResult, type GuidelineInsightsStatus, type InsightsBranchScope, type InsightsWindow } from './api'
+import { APIError, request, normalizeGuidelineInsightsLaunch, normalizeGuidelineInsightsPreview, normalizeGuidelineInsightsResult, normalizeGuidelineInsightsStatus, type GuidelineInsightsLaunch, type GuidelineInsightsPreview, type GuidelineInsightsResult, type GuidelineInsightsStatus, type InsightsBranchScope, type InsightsWindow } from './api'
 import { useI18n } from './i18n'
 import { Markdown } from './Markdown'
 
@@ -25,18 +25,49 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
   const [launch, setLaunch] = useState<GuidelineInsightsLaunch | null>(null)
   const [status, setStatus] = useState<GuidelineInsightsStatus | null>(null)
   const [result, setResult] = useState<GuidelineInsightsResult | null>(null)
+  const [resultLoading, setResultLoading] = useState(false)
+  const [resultError, setResultError] = useState('')
+  const [resultReload, setResultReload] = useState(0)
   const [copyState, setCopyState] = useState(false)
-  const generation = useRef(0)
-  const abortRef = useRef<AbortController | null>(null)
+  const interactionGeneration = useRef(0)
+  const interactionAbort = useRef<AbortController | null>(null)
+  const pollGeneration = useRef(0)
+  const pollAbort = useRef<AbortController | null>(null)
+  const resultGeneration = useRef(0)
+  const resultAbort = useRef<AbortController | null>(null)
+  const scopeGeneration = useRef(0)
   const currentIdentity = useRef(selectedRepositoryIdentity)
+  const currentRepoSwitching = useRef(repoSwitching)
   currentIdentity.current = selectedRepositoryIdentity
+  // Keep the scope guard synchronous with render. The authoritative
+  // repo-switch effect aborts work after commit, but a late promise can settle
+  // between render and that effect; predicates must reject it immediately.
+  currentRepoSwitching.current = repoSwitching
   const enabled = capabilities.guidelineInsights === true && daemonRunning && Boolean(selectedRepositoryIdentity) && !repoSwitching
   const activeRun = status?.status === 'queued' || status?.status === 'running' || (launch?.status === 'queued' && status === null)
 
-  useEffect(() => {
-    const epoch = ++generation.current
-    abortRef.current?.abort()
-    abortRef.current = null
+  const invalidateInteraction = () => {
+    interactionGeneration.current++
+    interactionAbort.current?.abort()
+    interactionAbort.current = null
+  }
+  const invalidatePoll = () => {
+    pollGeneration.current++
+    pollAbort.current?.abort()
+    pollAbort.current = null
+  }
+  const invalidateResult = () => {
+    resultGeneration.current++
+    resultAbort.current?.abort()
+    resultAbort.current = null
+  }
+  const invalidateAll = () => {
+    scopeGeneration.current++
+    invalidateInteraction()
+    invalidatePoll()
+    invalidateResult()
+  }
+  const clearLocalState = () => {
     setPreview(null)
     setModalOpen(false)
     setPreparing(false)
@@ -45,78 +76,100 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
     setLaunch(null)
     setStatus(null)
     setResult(null)
-    return () => { if (generation.current === epoch) abortRef.current?.abort() }
+    setResultLoading(false)
+    setResultError('')
+    setResultReload(0)
+  }
+
+  useEffect(() => {
+    invalidateAll()
+    clearLocalState()
   }, [selectedRepositoryIdentity])
 
   useEffect(() => {
     if (!repoSwitching) return
-    // A switch is a launch/status ownership boundary even when the selected
-    // identity has not changed yet. Abort in-flight work and invalidate late
-    // responses, but retain a queued launch so polling can restart once the
-    // same identity is stable again.
-    generation.current++
-    abortRef.current?.abort()
-    abortRef.current = null
-    setPreview(null)
-    setModalOpen(false)
-    setPreparing(false)
-    setConfirming(false)
-    setError('')
+    // A switch is an authoritative scope boundary. All local Insights state
+    // belongs to the old repository until a new Prepare explicitly starts it.
+    invalidateAll()
+    clearLocalState()
   }, [repoSwitching])
+
+  useEffect(() => () => {
+    invalidateAll()
+  }, [])
 
   const prepare = async () => {
     if (suspended || !enabled || preparing) return
-    const epoch = generation.current
+    invalidatePoll()
+    invalidateResult()
+    const epoch = ++interactionGeneration.current
+    interactionAbort.current?.abort()
     const controller = new AbortController()
-    abortRef.current?.abort()
-    abortRef.current = controller
+    interactionAbort.current = controller
+    const scopeEpoch = scopeGeneration.current
+    const identity = selectedRepositoryIdentity
     setPreparing(true)
     setError('')
     setLaunch(null)
     setStatus(null)
     setResult(null)
+    setResultLoading(false)
+    setResultError('')
+    setResultReload(0)
     try {
       const value = normalizeGuidelineInsightsPreview(await request<unknown>('/api/insights/preview', { method: 'POST', signal: controller.signal, body: JSON.stringify({ repositoryIdentity: selectedRepositoryIdentity, window: windowValue, branchScope }) }))
-      if (controller.signal.aborted || epoch !== generation.current || currentIdentity.current !== selectedRepositoryIdentity) return
+      if (controller.signal.aborted || epoch !== interactionGeneration.current || scopeEpoch !== scopeGeneration.current || currentIdentity.current !== identity || currentRepoSwitching.current) return
       if (!value || value.repositoryIdentity !== selectedRepositoryIdentity || value.window !== windowValue || value.branchScope !== branchScope) throw new Error(t('stats.insightsMalformed'))
       setPreview(value)
       setModalOpen(true)
     } catch (caught) {
-      if (!controller.signal.aborted && epoch === generation.current && currentIdentity.current === selectedRepositoryIdentity) {
+      if (!controller.signal.aborted && epoch === interactionGeneration.current && scopeEpoch === scopeGeneration.current && currentIdentity.current === identity && !currentRepoSwitching.current) {
         setError((caught as Error).message)
       }
     } finally {
-      if (epoch === generation.current) setPreparing(false)
+      if (epoch === interactionGeneration.current && scopeEpoch === scopeGeneration.current && !currentRepoSwitching.current) setPreparing(false)
     }
   }
 
   const run = async () => {
     if (suspended || !preview || confirming) return
-    const epoch = generation.current
+    invalidatePoll()
+    invalidateResult()
+    const epoch = ++interactionGeneration.current
+    interactionAbort.current?.abort()
     const controller = new AbortController()
-    abortRef.current?.abort()
-    abortRef.current = controller
+    interactionAbort.current = controller
+    const scopeEpoch = scopeGeneration.current
+    const identity = selectedRepositoryIdentity
+    const prepared = preview
     setConfirming(true)
     setError('')
     try {
-      const value = normalizeGuidelineInsightsLaunch(await request<unknown>('/api/insights', { method: 'POST', signal: controller.signal, body: JSON.stringify({ token: preview.token }) }))
-      if (controller.signal.aborted || epoch !== generation.current || currentIdentity.current !== selectedRepositoryIdentity) return
+      const value = normalizeGuidelineInsightsLaunch(await request<unknown>('/api/insights', { method: 'POST', signal: controller.signal, body: JSON.stringify({ token: prepared.token }) }))
+      if (controller.signal.aborted || epoch !== interactionGeneration.current || scopeEpoch !== scopeGeneration.current || currentIdentity.current !== identity || currentRepoSwitching.current) return
       if (!value) throw new Error(t('stats.insightsMalformed'))
       setLaunch(value)
       setModalOpen(false)
       setPreview(null)
       if (value.status === 'queued' && value.jobId) setStatus({ jobId: value.jobId, status: 'queued' })
     } catch (caught) {
-      if (!controller.signal.aborted && epoch === generation.current && currentIdentity.current === selectedRepositoryIdentity) {
-        setLaunch({ status: 'unverified', message: t('stats.guidelineAmbiguous') })
+      if (!controller.signal.aborted && epoch === interactionGeneration.current && scopeEpoch === scopeGeneration.current && currentIdentity.current === identity && !currentRepoSwitching.current) {
         setStatus(null)
         setResult(null)
+        setResultLoading(false)
+        setResultError('')
         setModalOpen(false)
         setPreview(null)
-        setError('')
+        if (caught instanceof APIError) {
+          setLaunch(null)
+          setError(caught.message)
+        } else {
+          setLaunch({ status: 'unverified', message: t('stats.guidelineAmbiguous') })
+          setError('')
+        }
       }
     } finally {
-      if (epoch === generation.current) setConfirming(false)
+      if (epoch === interactionGeneration.current && scopeEpoch === scopeGeneration.current && !currentRepoSwitching.current) setConfirming(false)
     }
   }
 
@@ -124,14 +177,16 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
     if (repoSwitching) return
     const jobId = launch?.status === 'queued' ? launch.jobId : undefined
     if (!jobId || !selectedRepositoryIdentity) return
-    const epoch = generation.current
+    const epoch = ++pollGeneration.current
+    pollAbort.current?.abort()
     const controller = new AbortController()
-    abortRef.current?.abort()
-    abortRef.current = controller
+    pollAbort.current = controller
+    const scopeEpoch = scopeGeneration.current
+    const identity = selectedRepositoryIdentity
     let timer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
     let lastStatus: GuidelineInsightsStatus['status'] = 'queued'
-    const current = () => !stopped && !controller.signal.aborted && epoch === generation.current && currentIdentity.current === selectedRepositoryIdentity
+    const current = () => !stopped && !controller.signal.aborted && epoch === pollGeneration.current && scopeEpoch === scopeGeneration.current && currentIdentity.current === identity && !currentRepoSwitching.current
     const schedule = () => {
       if (current() && (lastStatus === 'queued' || lastStatus === 'running')) timer = setTimeout(poll, 2000)
     }
@@ -141,25 +196,12 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
         if (!current()) return
         if (!next || next.jobId !== jobId) {
           setStatus(null)
-          setResult(null)
           setError(t('stats.insightsMalformed'))
           return
         }
         lastStatus = next.status
         setStatus(next)
         setError('')
-        if (next.status === 'done') {
-          const completed = normalizeGuidelineInsightsResult(await request<unknown>(`/api/insights/${jobId}/result?repositoryIdentity=${encodeURIComponent(selectedRepositoryIdentity)}`, { signal: controller.signal }))
-          if (!current()) return
-          if (!completed || completed.jobId !== jobId) {
-            setResult(null)
-            setError(t('stats.insightsMalformed'))
-            return
-          }
-          setResult(completed)
-          setError('')
-          return
-        }
         schedule()
       } catch (caught) {
         if (current() && (lastStatus === 'queued' || lastStatus === 'running')) {
@@ -169,8 +211,50 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
       }
     }
     void poll()
-    return () => { stopped = true; controller.abort(); if (timer) clearTimeout(timer); generation.current++ }
+    return () => {
+      stopped = true
+      controller.abort()
+      if (timer) clearTimeout(timer)
+      if (pollGeneration.current === epoch) pollGeneration.current++
+      if (pollAbort.current === controller) pollAbort.current = null
+    }
   }, [launch?.jobId, launch?.status, selectedRepositoryIdentity, repoSwitching])
+
+  useEffect(() => {
+    if (repoSwitching || status?.status !== 'done' || !selectedRepositoryIdentity) return
+    const jobId = status.jobId
+    const epoch = ++resultGeneration.current
+    resultAbort.current?.abort()
+    const controller = new AbortController()
+    resultAbort.current = controller
+    const scopeEpoch = scopeGeneration.current
+    const identity = selectedRepositoryIdentity
+    let stopped = false
+    const current = () => !stopped && !controller.signal.aborted && epoch === resultGeneration.current && scopeEpoch === scopeGeneration.current && currentIdentity.current === identity && !currentRepoSwitching.current
+    setResultLoading(true)
+    setResultError('')
+    const load = async () => {
+      try {
+        const completed = normalizeGuidelineInsightsResult(await request<unknown>(`/api/insights/${jobId}/result?repositoryIdentity=${encodeURIComponent(identity)}`, { signal: controller.signal }))
+        if (!current()) return
+        if (!completed || completed.jobId !== jobId) throw new Error(t('stats.insightsMalformed'))
+        setResult(completed)
+        setResultError('')
+      } catch (caught) {
+        if (!current()) return
+        setResultError(caught instanceof APIError ? caught.message : (caught as Error).message === t('stats.insightsMalformed') ? t('stats.insightsMalformed') : t('stats.guidelineResultFailed'))
+      } finally {
+        if (current()) setResultLoading(false)
+      }
+    }
+    void load()
+    return () => {
+      stopped = true
+      controller.abort()
+      if (resultGeneration.current === epoch) resultGeneration.current++
+      if (resultAbort.current === controller) resultAbort.current = null
+    }
+  }, [status?.jobId, status?.status, selectedRepositoryIdentity, repoSwitching, resultReload])
 
   const copy = async () => {
     if (!result) return
@@ -192,6 +276,8 @@ export function GuidelineInsights({ selectedRepositoryIdentity, repositoryName, 
     {launch?.status === 'skipped' && <p className="stats-empty">{t('stats.guidelineSkipped')}</p>}
     {launch?.status === 'unverified' && <p className="stats-warning">{t('stats.guidelineUnverified')}</p>}
     {status && (status.status === 'queued' || status.status === 'running') && <p className="stats-muted">{t('stats.guidelineJobRunning', { id: status.jobId, status: stateLabel })}</p>}
+    {resultLoading && <p className="stats-muted">{t('common.loading')}</p>}
+    {resultError && <div><p role="alert" className="stats-error">{resultError}</p><button className="button" disabled={resultLoading} onClick={() => setResultReload(value => value + 1)}>{t('stats.guidelineRetryResult')}</button></div>}
     {result && <div className="guideline-result"><div className="text-toolbar"><button className="button ghost compact" onClick={() => void copy()}><Clipboard size={14} />{copyState ? t('common.copied') : t('common.copy')}</button></div><Markdown>{result.markdown}</Markdown></div>}
     {error && <p role="alert" className="stats-error">{error}</p>}
     <button className="button primary" disabled={suspended || !enabled || preparing || activeRun || Boolean(preview)} onClick={() => void prepare()}><Play size={15} />{preparing ? t('common.loading') : t('stats.guidelinePrepare')}</button>

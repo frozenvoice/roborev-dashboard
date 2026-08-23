@@ -107,6 +107,34 @@ describe('GuidelineInsights', () => {
     expect(screen.getByRole('button', { name: 'Prepare Insights' })).toBeEnabled()
   })
 
+  it.each(['expired', 'branch drift', 'daemon rejected'] as const)('treats a definite %s API rejection as an error instead of unverified', async reason => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input) === '/api/insights/preview'
+      ? response(preview)
+      : response({ error: reason }, reason === 'daemon rejected' ? 503 : 409))
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(reason)
+    expect(screen.queryByText('Launch outcome could not be verified. A RoboRev Insights job may already have been queued. Do not retry automatically; prepare a new run if needed.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare Insights' })).toBeEnabled()
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
+  })
+
+  it.each([
+    ['authoritative 202 unverified', response({ status: 'unverified', message: 'server could not confirm' }, 202)],
+    ['malformed successful response', response({}, 202)],
+  ] as const)('keeps %s as an unverified launch outcome', async (_label, launchResponse) => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => String(input) === '/api/insights/preview' ? response(preview) : launchResponse)
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByText('Launch outcome could not be verified. A RoboRev Insights job may already have been queued. Do not retry automatically; prepare a new run if needed.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare Insights' })).toBeEnabled()
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
+  })
+
   it('tracks a valid receipt through running to done and renders bounded Markdown', async () => {
     let statusCalls = 0
     const realSetTimeout = globalThis.setTimeout
@@ -132,6 +160,27 @@ describe('GuidelineInsights', () => {
     expect(screen.getByText('Current Insights job: #42. The daemon continues independently of this page.')).toBeInTheDocument()
   })
 
+  it('loads a terminal result separately and allows a fresh Prepare without hanging', async () => {
+    let resultCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) { resultCalls++; return response({ jobId: 42, status: 'done', markdown: '# Ready' }) }
+      return response({ jobId: 42, status: 'done' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByText('Ready')).toBeInTheDocument()
+    expect(resultCalls).toBe(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
+  })
+
   it.each(['failed', 'canceled'] as const)('treats %s as terminal and stops polling', async terminal => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -149,6 +198,48 @@ describe('GuidelineInsights', () => {
     const statusCount = calls.filter(path => path.includes('/api/insights/42?')).length
     await new Promise(resolve => setTimeout(resolve, 30))
     expect(calls.filter(path => path.includes('/api/insights/42?')).length).toBe(statusCount)
+  })
+
+  it.each(['failed', 'canceled'] as const)('allows a fresh Prepare after a %s terminal state', async terminal => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      return response({ jobId: 42, status: terminal })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    await screen.findByText(terminal === 'canceled' ? 'Canceled' : 'Failed')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights/preview')).toHaveLength(2)
+  })
+
+  it('retains Done after a result GET failure and retries the same result without another enqueue', async () => {
+    let resultCalls = 0
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) {
+        resultCalls++
+        return resultCalls === 1 ? response({ error: 'result temporarily unavailable' }, 503) : response({ jobId: 42, status: 'done', markdown: '# Recovered' })
+      }
+      return response({ jobId: 42, status: 'done' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('result temporarily unavailable')
+    expect(screen.getByText('Done')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry result' }))
+    expect(await screen.findByText('Recovered')).toBeInTheDocument()
+    expect(resultCalls).toBe(2)
+    expect(fetchMock.mock.calls.filter(call => String(call[0]) === '/api/insights')).toHaveLength(1)
   })
 
   it('shows a validation error and clears stale state for a malformed status', async () => {
@@ -217,5 +308,41 @@ describe('GuidelineInsights', () => {
     rerender(<I18nProvider><GuidelineInsights selectedRepositoryIdentity="repo-b" capabilities={{ guidelineInsights: true }} daemonRunning /></I18nProvider>)
     resolveStatus?.(new Response(JSON.stringify({ jobId: 42, status: 'done' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await waitFor(() => expect(screen.queryByText('stale')).not.toBeInTheDocument())
+  })
+
+  it('discards a late result response after a repository switch starts', async () => {
+    let resolveResult: ((value: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) return new Promise<Response>(resolve => { resolveResult = resolve })
+      return response({ jobId: 42, status: 'done' })
+    }))
+    const { rerender } = renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    await waitFor(() => expect(resolveResult).toBeDefined())
+    rerender(<I18nProvider><GuidelineInsights selectedRepositoryIdentity="repo-b" capabilities={{ guidelineInsights: true }} daemonRunning /></I18nProvider>)
+    resolveResult?.(new Response(JSON.stringify({ jobId: 42, status: 'done', markdown: '# stale result' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.queryByText('stale result')).not.toBeInTheDocument())
+  })
+
+  it('discards a pending result synchronously when repoSwitching starts for the same identity', async () => {
+    let resolveResult: ((value: Response) => void) | undefined
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/insights/preview') return response(preview)
+      if (path === '/api/insights') return response({ status: 'queued', jobId: 42, agent: 'codex', since: '2026-08-23T12:00:00Z' }, 202)
+      if (path.includes('/result')) return new Promise<Response>(resolve => { resolveResult = resolve })
+      return response({ jobId: 42, status: 'done' })
+    }))
+    const { rerender } = renderCard()
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare Insights' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Run Insights' }))
+    await waitFor(() => expect(resolveResult).toBeDefined())
+    rerender(<I18nProvider><GuidelineInsights selectedRepositoryIdentity={identity} capabilities={{ guidelineInsights: true }} daemonRunning repoSwitching /></I18nProvider>)
+    resolveResult?.(new Response(JSON.stringify({ jobId: 42, status: 'done', markdown: '# stale same-scope result' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    await waitFor(() => expect(screen.queryByText('stale same-scope result')).not.toBeInTheDocument())
   })
 })

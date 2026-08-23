@@ -106,10 +106,11 @@ func (m *Manager) Preview(ctx context.Context, request PreviewRequest) (Preview,
 	}
 	launchRequest := Request{RepoPath: repo.Path, Window: request.Window, BranchScope: request.BranchScope}
 	if request.BranchScope == BranchCurrent {
-		if strings.TrimSpace(repo.Branch) == "" || strings.EqualFold(strings.TrimSpace(repo.Branch), "HEAD") {
+		branch, ok := usableCurrentBranch(repo.Branch)
+		if !ok {
 			return Preview{}, errors.New("current branch is unavailable")
 		}
-		launchRequest.Branch = repo.Branch
+		launchRequest.Branch = branch
 	}
 	preflight, err := m.adapter.InsightsPreflight(ctx, launchRequest)
 	if err != nil {
@@ -188,8 +189,11 @@ func (m *Manager) Start(ctx context.Context, token string) (StartResponse, error
 		}
 		return StartResponse{}, err
 	}
-	if state.request.BranchScope == BranchCurrent && repo.Branch != state.request.Branch {
-		return StartResponse{}, errors.New("current branch changed; prepare a new Insights preview")
+	if state.request.BranchScope == BranchCurrent {
+		branch, ok := usableCurrentBranch(repo.Branch)
+		if !ok || branch != state.request.Branch {
+			return StartResponse{}, errors.New("current branch changed; prepare a new Insights preview")
+		}
 	}
 	// Rebuild from fresh authoritative state before adapter preflight. The
 	// browser never supplies a branch name or executable.
@@ -248,4 +252,12 @@ func randomToken() (string, error) {
 
 func sameRepositoryPath(left, right string) bool {
 	return gitx.SameRepositoryPath(left, right)
+}
+
+func usableCurrentBranch(value string) (string, bool) {
+	branch := strings.TrimSpace(value)
+	if branch == "" || strings.EqualFold(branch, "HEAD") || strings.EqualFold(branch, "detached") {
+		return "", false
+	}
+	return branch, true
 }

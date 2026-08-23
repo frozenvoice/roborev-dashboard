@@ -110,6 +110,8 @@ export const en = {
   'stats.guidelineJobRunning': 'Insights job #{id} is {status}.',
   'stats.guidelineReceipt': 'Current Insights job: #{id}. The daemon continues independently of this page.',
   'stats.insightsMalformed': 'The Dashboard could not validate the Insights response.',
+  'stats.guidelineResultFailed': 'The Insights result could not be loaded. Try again when the daemon is available.',
+  'stats.guidelineRetryResult': 'Retry result',
   'stats.insightsCopyFailed': 'Clipboard access was unavailable.',
   'stats.loading': 'Loading…',
   'stats.unavailable': 'Stats unavailable',
@@ -794,6 +796,8 @@ ko['stats.guidelineUnverified'] = '실행 결과를 확인하지 못했습니다
 ko['stats.guidelineJobRunning'] = 'Insights 작업 #{id}이(가) {status} 상태입니다.'
 ko['stats.guidelineReceipt'] = '현재 Insights 작업: #{id}. daemon은 이 페이지와 독립적으로 계속 실행됩니다.'
 ko['stats.insightsMalformed'] = 'Dashboard가 Insights 응답을 검증하지 못했습니다.'
+ko['stats.guidelineResultFailed'] = 'Insights 결과를 불러오지 못했습니다. daemon을 확인한 뒤 다시 시도하세요.'
+ko['stats.guidelineRetryResult'] = '결과 다시 시도'
 ko['stats.insightsCopyFailed'] = '클립보드에 접근할 수 없습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }

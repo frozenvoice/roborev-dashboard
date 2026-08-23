@@ -20,11 +20,13 @@ type workflowAdapter struct {
 	mu         sync.Mutex
 	preflights int
 	launches   int
+	requests   []Request
+	commands   []Command
 	result     LaunchResult
 	binding    string
 }
 
-func (a *workflowAdapter) InsightsPreflight(context.Context, Request) (Preflight, error) {
+func (a *workflowAdapter) InsightsPreflight(_ context.Context, request Request) (Preflight, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.preflights++
@@ -32,7 +34,13 @@ func (a *workflowAdapter) InsightsPreflight(context.Context, Request) (Preflight
 	if binding == "" {
 		binding = "1:roborev"
 	}
-	return Preflight{Command: Command{Executable: "roborev", Args: []string{"insights"}, Dir: `E:\repo`}, Binding: binding, CLIVersion: "v0.64.0", DaemonVersion: "v0.64.0"}, nil
+	a.requests = append(a.requests, request)
+	command, err := BuildCommand("roborev", request)
+	if err != nil {
+		return Preflight{}, err
+	}
+	a.commands = append(a.commands, command)
+	return Preflight{Command: command, Binding: binding, CLIVersion: "v0.64.0", DaemonVersion: "v0.64.0"}, nil
 }
 func (a *workflowAdapter) Insights(context.Context, Request, Preflight) (LaunchResult, error) {
 	a.mu.Lock()
@@ -111,6 +119,89 @@ func TestManagerRejectsCurrentBranchDriftBeforeLaunch(t *testing.T) {
 	defer adapter.mu.Unlock()
 	if adapter.launches != 0 {
 		t.Fatal("branch drift launched Insights")
+	}
+}
+
+func TestManagerRejectsDetachedCurrentPreviewBeforePreflight(t *testing.T) {
+	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
+	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Preview(context.Background(), PreviewRequest{RepositoryIdentity: "repo-a", Window: Window30d, BranchScope: BranchCurrent}); err == nil {
+		t.Fatal("detached current preview was accepted")
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.preflights != 0 {
+		t.Fatalf("preflights=%d, want 0", adapter.preflights)
+	}
+	if adapter.launches != 0 {
+		t.Fatalf("launches=%d, want 0", adapter.launches)
+	}
+}
+
+func TestManagerRejectsDetachedCurrentStartBeforeLaunch(t *testing.T) {
+	registry := &changingRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "main"}}
+	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
+	manager, err := NewManager(adapter, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := manager.Preview(context.Background(), PreviewRequest{RepositoryIdentity: "repo-a", Window: Window30d, BranchScope: BranchCurrent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.repo.Branch = "DETACHED"
+	if _, err := manager.Start(context.Background(), preview.Token); err == nil {
+		t.Fatal("detached current start was accepted")
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.preflights != 1 {
+		t.Fatalf("preflights=%d, want preview-only count 1", adapter.preflights)
+	}
+	if adapter.launches != 0 {
+		t.Fatalf("launches=%d, want 0", adapter.launches)
+	}
+}
+
+func TestManagerAllowsAllBranchesWhenDetachedWithoutBranch(t *testing.T) {
+	adapter := &workflowAdapter{result: LaunchResult{Receipt: &Receipt{JobID: 42}}}
+	manager, err := NewManager(adapter, workflowRegistry{repo: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "detached"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := manager.Preview(context.Background(), PreviewRequest{RepositoryIdentity: "repo-a", Window: Window30d, BranchScope: BranchAll})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Branch != "" {
+		t.Fatalf("preview branch=%q, want empty", preview.Branch)
+	}
+	if _, err := manager.Start(context.Background(), preview.Token); err != nil {
+		t.Fatal(err)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.preflights != 2 {
+		t.Fatalf("preflights=%d, want preview and start count 2", adapter.preflights)
+	}
+	if adapter.launches != 1 {
+		t.Fatalf("launches=%d, want 1", adapter.launches)
+	}
+	if len(adapter.requests) != 2 {
+		t.Fatalf("requests=%d, want preview and start preflight", len(adapter.requests))
+	}
+	for i, request := range adapter.requests {
+		if request.Branch != "" {
+			t.Errorf("request[%d] branch=%q, want empty", i, request.Branch)
+		}
+		for _, arg := range adapter.commands[i].Args {
+			if arg == "--branch" {
+				t.Errorf("request[%d] command unexpectedly contains --branch: %#v", i, adapter.commands[i].Args)
+			}
+		}
 	}
 }
 
