@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -100,6 +101,7 @@ type Client struct {
 	versionRefreshMu  sync.Mutex
 	versionErr        error
 	versionErrAt      time.Time
+	lazyWitnessCursor atomic.Uint64
 }
 
 type clientBinding struct {

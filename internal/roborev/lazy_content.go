@@ -531,46 +531,70 @@ func lazyOwnerQuery(id int64, repo string) string {
 	return "/api/jobs?" + query.Encode()
 }
 
-func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, id int64, registeredPaths []string) error {
+func lazyWitnessOrder(count int, ticket uint64, preferred int) []int {
+	if count == 0 {
+		return nil
+	}
+	start := int(ticket % uint64(count))
+	order := make([]int, 0, count)
+	if preferred >= 0 && preferred < count {
+		order = append(order, preferred)
+	}
+	for offset := 0; offset < count; offset++ {
+		index := (start + offset) % count
+		if index == preferred {
+			continue
+		}
+		order = append(order, index)
+	}
+	return order
+}
+
+// authorizeLazyContent returns the actual frozen registered-path index whose
+// fresh witness matched. ticket is supplied by the operation and is consumed
+// exactly once by AuthorizedPrompt/AuthorizedLog; final proof passes the
+// matched index as preferred without advancing the client cursor.
+func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, id int64, registeredPaths []string, ticket uint64, preferred int) (int, error) {
 	if len(registeredPaths) == 0 {
 		// Without at least one registered witness, querying the target first
 		// would disclose whether an arbitrary job ID exists to an unauthorized
 		// caller.  Fail closed before any owner lookup.
-		return ErrLazyContentForbidden
+		return -1, ErrLazyContentForbidden
 	}
 	for _, path := range registeredPaths {
 		if strings.TrimSpace(path) == "" {
-			return fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
+			return -1, fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
 		}
 	}
 	target, err := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(id, ""), id)
 	if err != nil {
-		return err
+		return -1, err
 	}
 	if target.status == http.StatusNotFound || (target.status == http.StatusOK && !target.found) {
-		return ErrLazyContentNotFound
+		return -1, ErrLazyContentNotFound
 	}
 	if target.status != http.StatusOK {
-		return lazyStatusError(target.status)
+		return -1, lazyStatusError(target.status)
 	}
 	if !target.found || target.repoID <= 0 {
-		return fmt.Errorf("%w: target repository identity is missing", ErrLazyContentMalformed)
+		return -1, fmt.Errorf("%w: target repository identity is missing", ErrLazyContentMalformed)
 	}
 	if !c.lazyBindingCurrent(binding) {
-		return ErrBindingChanged
+		return -1, ErrBindingChanged
 	}
 	var firstWitnessErr error
-	for _, path := range registeredPaths {
+	for _, index := range lazyWitnessOrder(len(registeredPaths), ticket, preferred) {
+		path := registeredPaths[index]
 		if err := ctx.Err(); err != nil {
-			return err
+			return -1, err
 		}
 		if !c.lazyBindingCurrent(binding) {
-			return ErrBindingChanged
+			return -1, ErrBindingChanged
 		}
 		witness, witnessErr := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(0, path), 0)
 		if witnessErr != nil {
 			if errors.Is(witnessErr, context.Canceled) || errors.Is(witnessErr, context.DeadlineExceeded) || errors.Is(witnessErr, ErrBindingChanged) {
-				return witnessErr
+				return -1, witnessErr
 			}
 			if firstWitnessErr == nil {
 				firstWitnessErr = witnessErr
@@ -591,24 +615,24 @@ func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, 
 		}
 		if witness.found && witness.repoID == target.repoID {
 			if err := ctx.Err(); err != nil {
-				return err
+				return -1, err
 			}
 			if !c.lazyBindingCurrent(binding) {
-				return ErrBindingChanged
+				return -1, ErrBindingChanged
 			}
-			return nil
+			return index, nil
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return -1, err
 	}
 	if !c.lazyBindingCurrent(binding) {
-		return ErrBindingChanged
+		return -1, ErrBindingChanged
 	}
 	if firstWitnessErr != nil {
-		return firstWitnessErr
+		return -1, firstWitnessErr
 	}
-	return ErrLazyContentForbidden
+	return -1, ErrLazyContentForbidden
 }
 
 const lazyContentOperationTimeout = 15 * time.Second
@@ -623,7 +647,9 @@ func (c *Client) AuthorizedPrompt(ctx context.Context, id int64, registeredPaths
 	if err != nil {
 		return "", err
 	}
-	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+	ticket := c.lazyWitnessCursor.Add(1) - 1
+	matchedIndex, err := c.authorizeLazyContent(ctx, binding, id, registeredPaths, ticket, -1)
+	if err != nil {
 		return "", err
 	}
 	value, err := c.promptWithBinding(ctx, binding, id)
@@ -634,7 +660,7 @@ func (c *Client) AuthorizedPrompt(ctx context.Context, id int64, registeredPaths
 	// cannot make the prefix proof and content bytes one atomic transaction;
 	// this final proof prevents a stale result from reaching the browser when
 	// ownership changes during the content request.
-	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+	if _, err := c.authorizeLazyContent(ctx, binding, id, registeredPaths, ticket, matchedIndex); err != nil {
 		return "", err
 	}
 	return value, nil
@@ -743,14 +769,16 @@ func (c *Client) AuthorizedLog(ctx context.Context, id int64, registeredPaths []
 	if err != nil {
 		return "", err
 	}
-	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+	ticket := c.lazyWitnessCursor.Add(1) - 1
+	matchedIndex, err := c.authorizeLazyContent(ctx, binding, id, registeredPaths, ticket, -1)
+	if err != nil {
 		return "", err
 	}
 	value, err := c.logWithBinding(ctx, binding, id)
 	if err != nil {
 		return "", err
 	}
-	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+	if _, err := c.authorizeLazyContent(ctx, binding, id, registeredPaths, ticket, matchedIndex); err != nil {
 		return "", err
 	}
 	return value, nil

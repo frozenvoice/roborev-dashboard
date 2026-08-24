@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type lazyRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -60,7 +62,10 @@ type lazyAuthorizationFixture struct {
 	mutateAfterContent    bool
 	witnessStatuses       []int
 	witnessBodies         []string
+	witnessRepoIDs        []int64
+	witnessPaths          []string
 	witnessTransportErrs  []error
+	witnessDelays         []time.Duration
 	witnessIndex          int
 	witnessErrorBody      *trackingReadCloser
 	client                *Client
@@ -134,11 +139,30 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 		f.mu.Lock()
 		witnessIndex := f.witnessIndex
 		f.witnessIndex++
+		f.witnessPaths = append(f.witnessPaths, query.Get("repo"))
 		var witnessTransportErr error
 		if witnessIndex < len(f.witnessTransportErrs) {
 			witnessTransportErr = f.witnessTransportErrs[witnessIndex]
 		}
+		witnessDelay := time.Duration(0)
+		if witnessIndex < len(f.witnessDelays) {
+			witnessDelay = f.witnessDelays[witnessIndex]
+		}
 		f.mu.Unlock()
+		if witnessDelay > 0 {
+			timer := time.NewTimer(witnessDelay)
+			select {
+			case <-timer.C:
+			case <-request.Context().Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, request.Context().Err()
+			}
+		}
 		if witnessTransportErr != nil {
 			return nil, witnessTransportErr
 		}
@@ -146,7 +170,11 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 		if witnessIndex < len(f.witnessStatuses) && f.witnessStatuses[witnessIndex] != 0 {
 			status = f.witnessStatuses[witnessIndex]
 		}
-		body := fmt.Sprintf(`{"jobs":[%s]}`, f.reviewJobJSON(99, 7, "done", "synthesis", "synthesis", "witness prompt"))
+		repoID := int64(7)
+		if witnessIndex < len(f.witnessRepoIDs) {
+			repoID = f.witnessRepoIDs[witnessIndex]
+		}
+		body := fmt.Sprintf(`{"jobs":[%s]}`, f.reviewJobJSON(99, repoID, "done", "synthesis", "synthesis", "witness prompt"))
 		if witnessIndex < len(f.witnessBodies) {
 			body = f.witnessBodies[witnessIndex]
 		}
@@ -546,6 +574,123 @@ func TestAuthorizedLazyWitnessNotFoundRemainsNegative(t *testing.T) {
 	defer fixture.mu.Unlock()
 	if fixture.reviewCalls != 0 || fixture.logCalls != 0 {
 		t.Fatalf("content calls review=%d log=%d, want zero", fixture.reviewCalls, fixture.logCalls)
+	}
+}
+
+func TestAuthorizedLazyFinalProofPrefersMatchedTailWithoutRevisitingSlowPrefix(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{
+		witnessDelays:  []time.Duration{10 * time.Millisecond},
+		witnessRepoIDs: []int64{99, 7},
+	}
+	client := newLazyAuthorizationClient(t, fixture)
+	value, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\slow-lexical`, `E:\owner-tail`})
+	if err != nil || value != "authorized prompt" {
+		t.Fatalf("prompt=%q err=%v, want success", value, err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.witnessIndex != 3 {
+		t.Fatalf("witness calls=%d, want initial slow+owner then preferred owner final", fixture.witnessIndex)
+	}
+	want := []string{`E:\slow-lexical`, `E:\owner-tail`, `E:\owner-tail`}
+	if !reflect.DeepEqual(fixture.witnessPaths, want) {
+		t.Fatalf("witness path order=%v, want %v", fixture.witnessPaths, want)
+	}
+}
+
+func TestAuthorizedLazyRetryRotatesPastSlowFirstWitness(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{
+		witnessDelays:  []time.Duration{100 * time.Millisecond},
+		witnessRepoIDs: []int64{99, 7, 7},
+	}
+	client := newLazyAuthorizationClient(t, fixture)
+	paths := []string{`E:\slow-lexical`, `E:\owner-tail`}
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	_, err := client.AuthorizedPrompt(parent, 42, paths)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first prompt err=%v, want deadline exceeded", err)
+	}
+	fixture.mu.Lock()
+	firstContentCalls := fixture.reviewCalls + fixture.logCalls
+	fixture.mu.Unlock()
+	if firstContentCalls != 0 {
+		t.Fatalf("first request content calls=%d, want zero", firstContentCalls)
+	}
+
+	value, err := client.AuthorizedPrompt(context.Background(), 42, paths)
+	if err != nil || value != "authorized prompt" {
+		t.Fatalf("retry prompt=%q err=%v, want success", value, err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	wantOrder := []string{`E:\slow-lexical`, `E:\owner-tail`, `E:\owner-tail`}
+	if !reflect.DeepEqual(fixture.witnessPaths, wantOrder) {
+		t.Fatalf("witness path order=%v, want %v", fixture.witnessPaths, wantOrder)
+	}
+	if fixture.reviewCalls != 1 || fixture.witnessIndex != 3 {
+		t.Fatalf("content calls=%d witness calls=%d, want 1/3", fixture.reviewCalls, fixture.witnessIndex)
+	}
+}
+
+func TestAuthorizedLazyFinalPreferredMismatchFallsThroughFrozenRemainder(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{
+		witnessStatuses: []int{http.StatusOK, http.StatusNotFound, http.StatusOK},
+		witnessRepoIDs:  []int64{7, 7, 7},
+	}
+	client := newLazyAuthorizationClient(t, fixture)
+	value, err := client.AuthorizedLog(context.Background(), 42, []string{`E:\owner`, `E:\remainder`})
+	if err != nil || value != "" {
+		t.Fatalf("log=%q err=%v, want empty success", value, err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	want := []string{`E:\owner`, `E:\owner`, `E:\remainder`}
+	if !reflect.DeepEqual(fixture.witnessPaths, want) {
+		t.Fatalf("witness path order=%v, want %v", fixture.witnessPaths, want)
+	}
+}
+
+func TestLazyWitnessCursorWrapAndOperationUsesOneTicket(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{}
+	client := newLazyAuthorizationClient(t, fixture)
+	client.lazyWitnessCursor.Store(^uint64(0))
+	value, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\first`, `E:\second`})
+	if err != nil || value != "authorized prompt" {
+		t.Fatalf("prompt=%q err=%v, want success", value, err)
+	}
+	if got := client.lazyWitnessCursor.Load(); got != 0 {
+		t.Fatalf("cursor=%d, want one overflow-safe ticket from max", got)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.witnessIndex != 2 || !reflect.DeepEqual(fixture.witnessPaths, []string{`E:\second`, `E:\second`}) {
+		t.Fatalf("witness calls=%d paths=%v, want one matched witness per proof at overflow ticket index", fixture.witnessIndex, fixture.witnessPaths)
+	}
+}
+
+func TestLazyWitnessCursorConcurrentOperationsAdvanceOnceEach(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{}
+	client := newLazyAuthorizationClient(t, fixture)
+	const operations = 8
+	var group sync.WaitGroup
+	errs := make(chan error, operations)
+	for index := 0; index < operations; index++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			if _, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo-a`, `E:\repo-b`, `E:\repo-c`}); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent authorization error: %v", err)
+	}
+	if got := client.lazyWitnessCursor.Load(); got != operations {
+		t.Fatalf("cursor=%d, want one ticket per operation", got)
 	}
 }
 
