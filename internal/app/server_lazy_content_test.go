@@ -6,9 +6,28 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
+
+type blockingLazyInspector struct {
+	blocked bool
+	started chan struct{}
+}
+
+func (i *blockingLazyInspector) Inspect(ctx context.Context, path string) (gitx.Repository, error) {
+	if !i.blocked {
+		return gitx.Repository{Path: path}, nil
+	}
+	select {
+	case i.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return gitx.Repository{}, ctx.Err()
+}
 
 func TestLazyContentHandlersAuthorizeAndRejectQueriesBeforeServiceRead(t *testing.T) {
 	service := &fakeService{promptValue: "exact prompt", logValue: "exact log"}
@@ -117,6 +136,68 @@ func TestLazyContentHandlersUseNarrowOwnerAndSortedRegistrySnapshot(t *testing.T
 	want := []string{`E:\repo`, `E:\repo-b`}
 	if len(service.authorizedPaths) != len(want) || service.authorizedPaths[0] != want[0] || service.authorizedPaths[1] != want[1] {
 		t.Fatalf("authorized paths=%v, want sorted snapshot %v", service.authorizedPaths, want)
+	}
+}
+
+func TestLazyContentHandlersNeverPassDriftedRegistryRoot(t *testing.T) {
+	inspector := mappingInspector{repositories: map[string]gitx.Repository{}}
+	registry := NewRegistry(inspector, "")
+	for _, path := range []string{`E:\repo`, `E:\stale-repo`} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspector.repositories[`E:\stale-repo`] = gitx.Repository{Path: `E:\replacement-repo`}
+	service := &fakeService{}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42/prompt", nil)
+	request.Header.Set("Origin", "http://"+request.Host)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(service.authorizedPaths) != 1 || service.authorizedPaths[0] != `E:\repo` {
+		t.Fatalf("authorized paths=%v, want only fresh canonical root", service.authorizedPaths)
+	}
+}
+
+func TestLazyContentHandlersDeadlineCoversFreshInspectionBeforeService(t *testing.T) {
+	for _, path := range []string{"/api/reviews/42/prompt", "/api/reviews/42/log"} {
+		t.Run(path, func(t *testing.T) {
+			inspector := &blockingLazyInspector{started: make(chan struct{}, 1)}
+			registry := NewRegistry(inspector, "")
+			if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+				t.Fatal(err)
+			}
+			inspector.blocked = true
+			service := &fakeService{}
+			server, err := NewServer(service, registry, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestContext, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+			defer cancel()
+			request := httptest.NewRequest(http.MethodGet, path, nil).WithContext(requestContext)
+			request.Header.Set("Origin", "http://"+request.Host)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, request)
+			select {
+			case <-inspector.started:
+			default:
+				t.Fatal("fresh registry inspection did not run")
+			}
+			if recorder.Code != http.StatusGatewayTimeout {
+				t.Fatalf("status=%d body=%s, want gateway timeout", recorder.Code, recorder.Body.String())
+			}
+			if service.authorizedPromptCalls != 0 || service.authorizedLogCalls != 0 || service.promptCalls != 0 || service.logCalls != 0 {
+				t.Fatalf("service calls authorized prompt/log=%d/%d content=%d/%d, want zero", service.authorizedPromptCalls, service.authorizedLogCalls, service.promptCalls, service.logCalls)
+			}
+		})
 	}
 }
 

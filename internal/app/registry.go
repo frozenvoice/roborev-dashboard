@@ -168,6 +168,32 @@ func (r *Registry) RegisteredPaths() []string {
 	return paths
 }
 
+// FreshRegisteredPaths returns a sorted, independent snapshot of roots that
+// are still registered and whose canonical Git root has not drifted.  The
+// registry map is snapshotted before any inspection so registration changes
+// during the probes cannot add ownership witnesses to this operation.
+func (r *Registry) FreshRegisteredPaths(ctx context.Context) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.RLock()
+	snapshot := make([]string, 0, len(r.paths))
+	for _, path := range r.paths {
+		snapshot = append(snapshot, path)
+	}
+	r.mu.RUnlock()
+
+	paths := make([]string, 0, len(snapshot))
+	for _, path := range snapshot {
+		repo, err := r.inspectExpected(ctx, path)
+		if err == nil {
+			paths = append(paths, repo.Path)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 func (r *Registry) Resolve(path string) (string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

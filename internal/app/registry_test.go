@@ -17,9 +17,13 @@ import (
 
 type mappingInspector struct {
 	repositories map[string]gitx.Repository
+	errors       map[string]error
 }
 
 func (m mappingInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	if err, ok := m.errors[path]; ok {
+		return gitx.Repository{}, err
+	}
 	if repo, ok := m.repositories[path]; ok {
 		return repo, nil
 	}
@@ -180,6 +184,42 @@ func TestRegistryRegisteredPathsReturnsSortedSnapshot(t *testing.T) {
 	got[0] = `E:\mutated`
 	if registry.RegisteredPaths()[0] != want[0] {
 		t.Fatal("registered path snapshot aliases registry state")
+	}
+}
+
+func TestRegistryFreshRegisteredPathsOmitsDriftedRoots(t *testing.T) {
+	inspector := mappingInspector{repositories: map[string]gitx.Repository{}, errors: map[string]error{}}
+	registry := NewRegistry(inspector, "")
+	for _, path := range []string{"valid-root", "stale-root", "deleted-root"} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspector.repositories["stale-root"] = gitx.Repository{Path: "replacement-root"}
+	inspector.errors["deleted-root"] = os.ErrNotExist
+
+	got := registry.FreshRegisteredPaths(context.Background())
+	if !reflect.DeepEqual(got, []string{"valid-root"}) {
+		t.Fatalf("fresh paths=%v, want only valid root", got)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsIsSortedAndImmutable(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	for _, path := range []string{`E:\z-repo`, `E:\a-repo`, `E:\m-repo`} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := registry.FreshRegisteredPaths(context.Background())
+	want := []string{`E:\a-repo`, `E:\m-repo`, `E:\z-repo`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fresh paths=%v, want %v", got, want)
+	}
+	got[0] = `E:\mutated`
+	if next := registry.FreshRegisteredPaths(context.Background()); !reflect.DeepEqual(next, want) {
+		t.Fatalf("fresh path snapshot was mutable: %v", next)
 	}
 }
 

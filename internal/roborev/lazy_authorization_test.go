@@ -57,6 +57,11 @@ type lazyAuthorizationFixture struct {
 	logBody               string
 	ownerEncoding         string
 	driftAfterWitness     bool
+	witnessStatuses       []int
+	witnessBodies         []string
+	witnessTransportErrs  []error
+	witnessIndex          int
+	witnessErrorBody      *trackingReadCloser
 	client                *Client
 }
 
@@ -118,17 +123,38 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 			f.mu.Unlock()
 			return f.response(http.StatusOK, "application/json", tracker), nil
 		}
+		f.mu.Lock()
+		witnessIndex := f.witnessIndex
+		f.witnessIndex++
+		var witnessTransportErr error
+		if witnessIndex < len(f.witnessTransportErrs) {
+			witnessTransportErr = f.witnessTransportErrs[witnessIndex]
+		}
+		f.mu.Unlock()
+		if witnessTransportErr != nil {
+			return nil, witnessTransportErr
+		}
+		status := http.StatusOK
+		if witnessIndex < len(f.witnessStatuses) && f.witnessStatuses[witnessIndex] != 0 {
+			status = f.witnessStatuses[witnessIndex]
+		}
 		body := fmt.Sprintf(`{"jobs":[%s]}`, f.reviewJobJSON(99, 7, "done", "synthesis", "synthesis", "witness prompt"))
+		if witnessIndex < len(f.witnessBodies) {
+			body = f.witnessBodies[witnessIndex]
+		}
 		tracker := &trackingReadCloser{data: []byte(body)}
 		f.mu.Lock()
 		f.witnessBody = tracker
+		if status != http.StatusOK {
+			f.witnessErrorBody = tracker
+		}
 		f.mu.Unlock()
 		if f.driftAfterWitness && f.client != nil {
 			f.client.bindingMu.Lock()
 			f.client.binding.generation++
 			f.client.bindingMu.Unlock()
 		}
-		return f.response(http.StatusOK, "application/json", tracker), nil
+		return f.response(status, "application/json", tracker), nil
 	case "/api/review":
 		f.mu.Lock()
 		f.reviewCalls++
@@ -353,6 +379,19 @@ func TestAuthorizedLazyOwnerRejectsEmptyPathsAndNonIdentityEncoding(t *testing.T
 			t.Fatalf("content calls review=%d log=%d", fixture.reviewCalls, fixture.logCalls)
 		}
 	})
+	t.Run("empty path is malformed", func(t *testing.T) {
+		fixture := &lazyAuthorizationFixture{}
+		client := newLazyAuthorizationClient(t, fixture)
+		_, err := client.AuthorizedPrompt(context.Background(), 42, []string{""})
+		if !errors.Is(err, ErrLazyContentMalformed) {
+			t.Fatalf("err=%v, want malformed", err)
+		}
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+		if fixture.reviewCalls != 0 || fixture.logCalls != 0 {
+			t.Fatalf("content calls review=%d log=%d", fixture.reviewCalls, fixture.logCalls)
+		}
+	})
 	t.Run("non identity encoding", func(t *testing.T) {
 		fixture := &lazyAuthorizationFixture{ownerEncoding: "gzip"}
 		client := newLazyAuthorizationClient(t, fixture)
@@ -382,6 +421,142 @@ func TestAuthorizedLazyNon2xxOwnerBodyIsNotRead(t *testing.T) {
 	}
 	if fixture.reviewCalls != 0 || fixture.logCalls != 0 {
 		t.Fatalf("content calls review=%d log=%d", fixture.reviewCalls, fixture.logCalls)
+	}
+}
+
+func TestAuthorizedLazyWitnessErrorsContinueToValidMatch(t *testing.T) {
+	validWitness := func(fixture *lazyAuthorizationFixture) string {
+		return fmt.Sprintf(`{"jobs":[%s]}`, fixture.reviewJobJSON(99, 7, "done", "synthesis", "synthesis", "witness prompt"))
+	}
+	for _, test := range []struct {
+		name        string
+		makeFixture func(*lazyAuthorizationFixture, string)
+	}{
+		{name: "non-2xx", makeFixture: func(f *lazyAuthorizationFixture, valid string) {
+			f.witnessStatuses = []int{http.StatusInternalServerError, http.StatusOK}
+			f.witnessBodies = []string{"SENSITIVE_WITNESS_ERROR", valid}
+		}},
+		{name: "malformed", makeFixture: func(f *lazyAuthorizationFixture, valid string) {
+			f.witnessBodies = []string{"{", valid}
+		}},
+		{name: "transport", makeFixture: func(f *lazyAuthorizationFixture, valid string) {
+			f.witnessTransportErrs = []error{errors.New("witness transport failure")}
+			f.witnessBodies = []string{"", valid}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &lazyAuthorizationFixture{}
+			test.makeFixture(fixture, validWitness(fixture))
+			client := newLazyAuthorizationClient(t, fixture)
+			value, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo`, `E:\repo-two`})
+			if err != nil || value != "authorized prompt" {
+				t.Fatalf("prompt=%q err=%v, want valid witness success", value, err)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if fixture.reviewCalls != 1 || fixture.witnessIndex != 2 {
+				t.Fatalf("review calls=%d witness calls=%d, want 1/2", fixture.reviewCalls, fixture.witnessIndex)
+			}
+			if test.name == "non-2xx" && (fixture.witnessErrorBody == nil || fixture.witnessErrorBody.read != 0) {
+				reads := -1
+				if fixture.witnessErrorBody != nil {
+					reads = fixture.witnessErrorBody.read
+				}
+				t.Fatalf("non-2xx witness body reads=%d, want 0", reads)
+			}
+		})
+	}
+}
+
+func TestAuthorizedLazyAllWitnessErrorsReturnFirstWithoutContent(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{
+		witnessStatuses: []int{http.StatusInternalServerError, http.StatusBadGateway},
+		witnessBodies:   []string{"first secret", "second secret"},
+	}
+	client := newLazyAuthorizationClient(t, fixture)
+	_, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo`, `E:\repo-two`})
+	if !errors.Is(err, ErrLazyContentMalformed) {
+		t.Fatalf("err=%v, want first witness malformed error", err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.witnessIndex != 2 || fixture.reviewCalls != 0 || fixture.logCalls != 0 {
+		t.Fatalf("witness calls=%d review=%d log=%d, want 2/0/0", fixture.witnessIndex, fixture.reviewCalls, fixture.logCalls)
+	}
+}
+
+func TestAuthorizedLazyWitnessNotFoundRemainsNegative(t *testing.T) {
+	fixture := &lazyAuthorizationFixture{
+		foreignRepoID:   99,
+		witnessStatuses: []int{http.StatusNotFound, http.StatusOK},
+		witnessBodies:   []string{"not found witness", `{"jobs":[]}`},
+	}
+	client := newLazyAuthorizationClient(t, fixture)
+	_, err := client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo`, `E:\repo-two`})
+	if !errors.Is(err, ErrLazyContentForbidden) {
+		t.Fatalf("err=%v, want forbidden for mismatch-only witnesses", err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.reviewCalls != 0 || fixture.logCalls != 0 {
+		t.Fatalf("content calls review=%d log=%d, want zero", fixture.reviewCalls, fixture.logCalls)
+	}
+}
+
+type lazyOwnerRedirectTransport struct {
+	redirectBody    *trackingReadCloser
+	destinationCall int
+}
+
+func (t *lazyOwnerRedirectTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	health := func() *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"healthy":true,"version":"v0.64.0"}`))}
+	}
+	jsonResponse := func(body string) *http.Response {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
+	}
+	switch request.URL.Path {
+	case "/api/health":
+		return health(), nil
+	case "/api/jobs":
+		if request.URL.Query().Get("id") != "" {
+			return jsonResponse(`{"jobs":[{"id":42,"repo_id":7,"prompt":"SENSITIVE_TARGET_PROMPT"}]}`), nil
+		}
+		t.redirectBody = &trackingReadCloser{data: []byte("SENSITIVE_REDIRECT_BODY")}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "Location": []string{"http://127.0.0.1:7373/destination"}},
+			Body:       t.redirectBody,
+		}, nil
+	case "/destination":
+		t.destinationCall++
+		return jsonResponse(`{"jobs":[{"id":99,"repo_id":7}]}`), nil
+	default:
+		return &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader("not found"))}, nil
+	}
+}
+
+func TestLazyOwnerRedirectDoesNotFollowOrReadBody(t *testing.T) {
+	transport := &lazyOwnerRedirectTransport{}
+	runner := &lazyContentRunner{}
+	client, err := NewClient("roborev", runner, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP = &http.Client{Transport: transport}
+	_, err = client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo`})
+	if !errors.Is(err, ErrLazyContentMalformed) {
+		t.Fatalf("err=%v, want malformed redirect status", err)
+	}
+	if transport.destinationCall != 0 {
+		t.Fatalf("redirect destination calls=%d, want 0", transport.destinationCall)
+	}
+	if transport.redirectBody == nil || transport.redirectBody.read != 0 {
+		reads := -1
+		if transport.redirectBody != nil {
+			reads = transport.redirectBody.read
+		}
+		t.Fatalf("redirect body reads=%d, want 0", reads)
 	}
 }
 

@@ -708,6 +708,9 @@ func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
 	}
 	writeRawJSON(w, http.StatusOK, raw)
 }
+
+const lazyContentRequestTimeout = 15 * time.Second
+
 func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeStrictBrowserRead(w, r) {
 		return
@@ -716,12 +719,19 @@ func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), lazyContentRequestTimeout)
+	defer cancel()
 	lazy, ok := s.RoboRev.(roborev.LazyContentAuthorizationService)
 	if !ok {
 		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "prompt")
 		return
 	}
-	value, err := lazy.AuthorizedPrompt(r.Context(), id, s.Registry.RegisteredPaths())
+	paths := s.Registry.FreshRegisteredPaths(ctx)
+	if err := ctx.Err(); err != nil {
+		writeLazyContentError(w, err, "prompt")
+		return
+	}
+	value, err := lazy.AuthorizedPrompt(ctx, id, paths)
 	if err != nil {
 		writeLazyContentError(w, err, "prompt")
 		return
@@ -736,12 +746,19 @@ func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), lazyContentRequestTimeout)
+	defer cancel()
 	lazy, ok := s.RoboRev.(roborev.LazyContentAuthorizationService)
 	if !ok {
 		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "log")
 		return
 	}
-	value, err := lazy.AuthorizedLog(r.Context(), id, s.Registry.RegisteredPaths())
+	paths := s.Registry.FreshRegisteredPaths(ctx)
+	if err := ctx.Err(); err != nil {
+		writeLazyContentError(w, err, "log")
+		return
+	}
+	value, err := lazy.AuthorizedLog(ctx, id, paths)
 	if err != nil {
 		writeLazyContentError(w, err, "log")
 		return

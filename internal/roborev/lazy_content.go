@@ -283,12 +283,20 @@ func (c *Client) lazyOwnerGET(ctx context.Context, binding lazyBinding, path str
 	if client == nil {
 		client = http.DefaultClient
 	}
+	// Owner responses must not follow redirects: besides changing the daemon
+	// binding, net/http may consume the redirect response body while preparing
+	// the next request. Keep this override local to the shallow client copy so
+	// normal content requests retain their configured policy.
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+path, nil)
 	if err != nil {
 		return lazyOwnerHTTPResponse{}, fmt.Errorf("%w: request could not be built", ErrLazyContentMalformed)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := client.Do(req)
+	resp, err := clientCopy.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return lazyOwnerHTTPResponse{}, ctxErr
@@ -538,29 +546,57 @@ func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, 
 	if !c.lazyBindingCurrent(binding) {
 		return ErrBindingChanged
 	}
+	var firstWitnessErr error
 	for _, path := range registeredPaths {
 		if strings.TrimSpace(path) == "" {
 			return fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !c.lazyBindingCurrent(binding) {
+			return ErrBindingChanged
+		}
 		witness, witnessErr := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(0, path), 0)
 		if witnessErr != nil {
-			return witnessErr
+			if errors.Is(witnessErr, context.Canceled) || errors.Is(witnessErr, context.DeadlineExceeded) || errors.Is(witnessErr, ErrBindingChanged) {
+				return witnessErr
+			}
+			if firstWitnessErr == nil {
+				firstWitnessErr = witnessErr
+			}
+			continue
 		}
+		// A repository-specific witness returning 404 is a valid negative:
+		// that daemon query simply has no row for this registered path.  It must
+		// not turn a mismatch-only authorization result into NotFound.
 		if witness.status == http.StatusNotFound {
 			continue
 		}
 		if witness.status != http.StatusOK {
-			return lazyStatusError(witness.status)
+			if firstWitnessErr == nil {
+				firstWitnessErr = lazyStatusError(witness.status)
+			}
+			continue
 		}
 		if witness.found && witness.repoID == target.repoID {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if !c.lazyBindingCurrent(binding) {
 				return ErrBindingChanged
 			}
 			return nil
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !c.lazyBindingCurrent(binding) {
 		return ErrBindingChanged
+	}
+	if firstWitnessErr != nil {
+		return firstWitnessErr
 	}
 	return ErrLazyContentForbidden
 }
