@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -56,6 +57,100 @@ func newLazyContentClient(t *testing.T, handler http.Handler) (*Client, *lazyCon
 func writeLazyHealth(w http.ResponseWriter, version string, healthy bool) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = fmt.Fprintf(w, `{"healthy":%t,"version":%q}`, healthy, version)
+}
+
+type lazyContentRedirectTransport struct {
+	redirectPath     string
+	redirectBody     *trackingReadCloser
+	destinationCalls int
+}
+
+func (t *lazyContentRedirectTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	jsonResponse := func(body string) *http.Response {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+	}
+	if request.URL.Path == t.redirectPath {
+		t.redirectBody = &trackingReadCloser{data: []byte("SENSITIVE_REDIRECT_BODY")}
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+				"Location":     []string{"http://127.0.0.1:7373/redirect-destination"},
+			},
+			Body: t.redirectBody,
+		}, nil
+	}
+	if request.URL.Path == "/redirect-destination" {
+		t.destinationCalls++
+		return jsonResponse(`{"job_id":42,"prompt":"redirected"}`), nil
+	}
+	if request.URL.Path == "/api/health" {
+		return jsonResponse(`{"healthy":true,"version":"v0.64.0"}`), nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader("not found")),
+	}, nil
+}
+
+func newLazyRedirectClient(t *testing.T, redirectPath string) (*Client, *lazyContentRedirectTransport) {
+	t.Helper()
+	runner := &lazyContentRunner{}
+	client, err := NewClient("roborev", runner, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &lazyContentRedirectTransport{redirectPath: redirectPath}
+	client.HTTP = &http.Client{Transport: transport}
+	return client, transport
+}
+
+func TestLazyAndHealthReadsRejectRedirectsWithoutFollowingOrReadingBody(t *testing.T) {
+	t.Run("health", func(t *testing.T) {
+		client, transport := newLazyRedirectClient(t, "/api/health")
+		_, err := client.healthStatus(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "returned 302") {
+			t.Fatalf("health error=%v, want status 302 error", err)
+		}
+		if transport.destinationCalls != 0 {
+			t.Fatalf("health redirect destination calls=%d, want 0", transport.destinationCalls)
+		}
+		if transport.redirectBody == nil || transport.redirectBody.read != 0 {
+			t.Fatalf("health redirect body reads=%d, want 0", redirectBodyReads(transport.redirectBody))
+		}
+	})
+	for _, path := range []string{"/api/review", "/api/job/log"} {
+		t.Run(path, func(t *testing.T) {
+			client, transport := newLazyRedirectClient(t, path)
+			var err error
+			if path == "/api/review" {
+				_, err = client.Prompt(context.Background(), 42)
+			} else {
+				_, err = client.Log(context.Background(), 42)
+			}
+			if !errors.Is(err, ErrLazyContentMalformed) {
+				t.Fatalf("error=%v, want malformed redirect response", err)
+			}
+			if transport.destinationCalls != 0 {
+				t.Fatalf("%s redirect destination calls=%d, want 0", path, transport.destinationCalls)
+			}
+			if transport.redirectBody == nil || transport.redirectBody.read != 0 {
+				t.Fatalf("%s redirect body reads=%d, want 0", path, redirectBodyReads(transport.redirectBody))
+			}
+		})
+	}
+}
+
+func redirectBodyReads(body *trackingReadCloser) int {
+	if body == nil {
+		return -1
+	}
+	return body.read
 }
 
 func TestLazyPromptAndLogUseDaemonWithoutCLIOutputCommands(t *testing.T) {

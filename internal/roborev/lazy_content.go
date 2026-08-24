@@ -99,14 +99,26 @@ type lazyHTTPResponse struct {
 	body    []byte
 }
 
+// noRedirectHTTPClient keeps the configured transport, timeout, and other
+// client settings while making a request boundary return redirect responses
+// directly.  Lazy reads must not follow a Location to another origin/path or
+// let net/http consume the redirect body while preparing a second request.
+func noRedirectHTTPClient(configured *http.Client) *http.Client {
+	if configured == nil {
+		configured = http.DefaultClient
+	}
+	client := *configured
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
 func (c *Client) lazyGET(ctx context.Context, binding lazyBinding, path string) (lazyHTTPResponse, error) {
 	if !c.lazyBindingCurrent(binding) {
 		return lazyHTTPResponse{}, ErrBindingChanged
 	}
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := noRedirectHTTPClient(c.HTTP)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+path, nil)
 	if err != nil {
 		return lazyHTTPResponse{}, fmt.Errorf("%w: request could not be built", ErrLazyContentMalformed)
@@ -279,24 +291,13 @@ func (c *Client) lazyOwnerGET(ctx context.Context, binding lazyBinding, path str
 	if !c.lazyBindingCurrent(binding) {
 		return lazyOwnerHTTPResponse{}, ErrBindingChanged
 	}
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	// Owner responses must not follow redirects: besides changing the daemon
-	// binding, net/http may consume the redirect response body while preparing
-	// the next request. Keep this override local to the shallow client copy so
-	// normal content requests retain their configured policy.
-	clientCopy := *client
-	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
+	client := noRedirectHTTPClient(c.HTTP)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+path, nil)
 	if err != nil {
 		return lazyOwnerHTTPResponse{}, fmt.Errorf("%w: request could not be built", ErrLazyContentMalformed)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := clientCopy.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return lazyOwnerHTTPResponse{}, ctxErr

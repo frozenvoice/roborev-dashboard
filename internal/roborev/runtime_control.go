@@ -164,24 +164,21 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 		return daemonHealthResponse{}, err
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	client := c.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := noRedirectHTTPClient(c.HTTP)
 	resp, err := client.Do(req)
 	if err != nil {
 		return daemonHealthResponse{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return daemonHealthResponse{}, fmt.Errorf("RoboRev daemon health returned %d", resp.StatusCode)
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, runtimeControlResponseLimit+1))
 	if err != nil {
 		return daemonHealthResponse{}, err
 	}
 	if int64(len(data)) > runtimeControlResponseLimit {
 		return daemonHealthResponse{}, errors.New("RoboRev health response exceeded bounded output")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return daemonHealthResponse{}, fmt.Errorf("RoboRev daemon health returned %d", resp.StatusCode)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
