@@ -129,9 +129,9 @@ func TestLazyAndHealthReadsRejectRedirectsWithoutFollowingOrReadingBody(t *testi
 			client, transport := newLazyRedirectClient(t, path)
 			var err error
 			if path == "/api/review" {
-				_, err = client.Prompt(context.Background(), 42)
+				_, err = client.promptUnowned(context.Background(), 42)
 			} else {
-				_, err = client.Log(context.Background(), 42)
+				_, err = client.logUnowned(context.Background(), 42)
 			}
 			if !errors.Is(err, ErrLazyContentMalformed) {
 				t.Fatalf("error=%v, want malformed redirect response", err)
@@ -204,11 +204,11 @@ func TestLazyPromptAndLogUseDaemonWithoutCLIOutputCommands(t *testing.T) {
 	}))
 	defer closeServer()
 
-	prompt, err := client.Prompt(context.Background(), 42)
+	prompt, err := client.promptUnowned(context.Background(), 42)
 	if err != nil || prompt != "hello" {
 		t.Fatalf("prompt = %q, err = %v", prompt, err)
 	}
-	log, err := client.Log(context.Background(), 42)
+	log, err := client.logUnowned(context.Background(), 42)
 	if err != nil || log != "한글\nline\n" {
 		t.Fatalf("log = %q, err = %v", log, err)
 	}
@@ -256,7 +256,7 @@ func TestLazyPromptFallbackIsStrict(t *testing.T) {
 				}
 			}))
 			defer closeServer()
-			got, err := client.Prompt(context.Background(), 42)
+			got, err := client.promptUnowned(context.Background(), 42)
 			if test.wantNotFound {
 				if !errors.Is(err, ErrLazyContentNotFound) {
 					t.Fatalf("err = %v, want not found", err)
@@ -325,7 +325,7 @@ func TestLazyLogValidatesBoundHeadersAndUTF8(t *testing.T) {
 				_, _ = w.Write([]byte(test.content))
 			}))
 			defer closeServer()
-			got, err := client.Log(context.Background(), 42)
+			got, err := client.logUnowned(context.Background(), 42)
 			if test.wantError != nil {
 				if !errors.Is(err, test.wantError) {
 					t.Fatalf("err = %v, want %v", err, test.wantError)
@@ -367,7 +367,7 @@ func TestLazyPromptRejectsInvalidUTF8InCompletedAndFallbackJSON(t *testing.T) {
 				_, _ = w.Write(body)
 			}))
 			defer closeServer()
-			got, err := client.Prompt(context.Background(), 42)
+			got, err := client.promptUnowned(context.Background(), 42)
 			if got != "" || !errors.Is(err, ErrLazyContentMalformed) {
 				t.Fatalf("prompt=%q err=%v, want malformed UTF-8 with no content", got, err)
 			}
@@ -397,7 +397,7 @@ func TestLazyContentBoundIsExactAndRejectsLimitPlusOne(t *testing.T) {
 				_, _ = w.Write([]byte(body))
 			}))
 			defer closeServer()
-			got, err := client.Log(context.Background(), 42)
+			got, err := client.logUnowned(context.Background(), 42)
 			if test.wantError != nil {
 				if !errors.Is(err, test.wantError) {
 					t.Fatalf("err = %v, want %v", err, test.wantError)
@@ -442,7 +442,7 @@ func TestLazyPromptCompletedResponseValidationAndNoPartialSuccess(t *testing.T) 
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer closeServer()
-			got, err := client.Prompt(context.Background(), 42)
+			got, err := client.promptUnowned(context.Background(), 42)
 			if test.wantError != nil {
 				if !errors.Is(err, test.wantError) || got != "" {
 					t.Fatalf("prompt=%q err=%v, want empty + %v", got, err, test.wantError)
@@ -478,7 +478,7 @@ func TestLazyPreflightRejectsUnsupportedOrMismatchedDaemonBeforeContent(t *testi
 			}))
 			defer closeServer()
 			runner.version = test.runnerVersion
-			_, err := client.Prompt(context.Background(), 42)
+			_, err := client.promptUnowned(context.Background(), 42)
 			if !errors.Is(err, test.wantError) || contentCalls != 0 {
 				t.Fatalf("err=%v contentCalls=%d, want %v and zero", err, contentCalls, test.wantError)
 			}
@@ -490,7 +490,7 @@ func TestLazyPreflightClassifiesOfflineBeforeContent(t *testing.T) {
 	client, _, closeServer := newLazyContentClient(t, http.NotFoundHandler())
 	defer closeServer()
 	client.HTTP = &http.Client{Transport: lazyOfflineTransport{}}
-	if _, err := client.Prompt(context.Background(), 42); !errors.Is(err, ErrLazyContentOffline) {
+	if _, err := client.promptUnowned(context.Background(), 42); !errors.Is(err, ErrLazyContentOffline) {
 		t.Fatalf("err = %v, want offline", err)
 	}
 }
@@ -525,9 +525,9 @@ func TestLazyContentBindingDriftRejectsStalePromptAndLog(t *testing.T) {
 			defer closeServer()
 			var err error
 			if path == "/api/review" {
-				_, err = client.Prompt(context.Background(), 42)
+				_, err = client.promptUnowned(context.Background(), 42)
 			} else {
-				_, err = client.Log(context.Background(), 42)
+				_, err = client.logUnowned(context.Background(), 42)
 			}
 			if !errors.Is(err, ErrBindingChanged) {
 				t.Fatalf("err=%v, want binding changed", err)
@@ -557,7 +557,7 @@ func TestLazyLogStatusAndNotFoundContracts(t *testing.T) {
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer closeServer()
-			_, err := client.Log(context.Background(), 42)
+			_, err := client.logUnowned(context.Background(), 42)
 			if !errors.Is(err, test.wantError) || strings.Contains(err.Error(), "secret upstream") {
 				t.Fatalf("err=%v, want %v without upstream body", err, test.wantError)
 			}

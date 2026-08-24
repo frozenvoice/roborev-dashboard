@@ -35,8 +35,6 @@ type Service interface {
 	TerminalJobMetadata(context.Context, int64) (JobMetadata, error)
 	Show(context.Context, int64) (json.RawMessage, error)
 	PanelMembers(context.Context, string) (json.RawMessage, error)
-	Prompt(context.Context, int64) (string, error)
-	Log(context.Context, int64) (string, error)
 	Review(context.Context, ReviewRequest) (json.RawMessage, error)
 	ReviewPanel(context.Context, ReviewRequest) (PanelEnqueueResponse, error)
 	Fix(context.Context, FixRequest) error

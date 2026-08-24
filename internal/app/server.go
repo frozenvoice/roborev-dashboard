@@ -726,13 +726,20 @@ func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "prompt")
 		return
 	}
-	paths := s.Registry.FreshRegisteredPaths(ctx)
+	paths, incomplete, err := s.Registry.FreshRegisteredPathsWithStatus(ctx)
+	if err != nil {
+		writeLazyContentError(w, err, "prompt")
+		return
+	}
 	if err := ctx.Err(); err != nil {
 		writeLazyContentError(w, err, "prompt")
 		return
 	}
 	value, err := lazy.AuthorizedPrompt(ctx, id, paths)
 	if err != nil {
+		if incomplete && errors.Is(err, roborev.ErrLazyContentForbidden) {
+			err = roborev.ErrLazyContentWitnessUnavailable
+		}
 		writeLazyContentError(w, err, "prompt")
 		return
 	}
@@ -753,13 +760,20 @@ func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "log")
 		return
 	}
-	paths := s.Registry.FreshRegisteredPaths(ctx)
+	paths, incomplete, err := s.Registry.FreshRegisteredPathsWithStatus(ctx)
+	if err != nil {
+		writeLazyContentError(w, err, "log")
+		return
+	}
 	if err := ctx.Err(); err != nil {
 		writeLazyContentError(w, err, "log")
 		return
 	}
 	value, err := lazy.AuthorizedLog(ctx, id, paths)
 	if err != nil {
+		if incomplete && errors.Is(err, roborev.ErrLazyContentForbidden) {
+			err = roborev.ErrLazyContentWitnessUnavailable
+		}
 		writeLazyContentError(w, err, "log")
 		return
 	}
@@ -773,7 +787,7 @@ func writeLazyContentError(w http.ResponseWriter, err error, phase string) {
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
 		message = "lazy content request timed out"
-	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrUnsupportedJobMetadata):
+	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrLazyContentWitnessUnavailable), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrUnsupportedJobMetadata):
 		status = http.StatusServiceUnavailable
 		message = "lazy content is temporarily unavailable"
 	case errors.Is(err, roborev.ErrLazyContentNotFound), errors.Is(err, roborev.ErrJobMetadataNotFound):

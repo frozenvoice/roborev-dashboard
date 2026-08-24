@@ -201,6 +201,62 @@ func TestLazyContentHandlersDeadlineCoversFreshInspectionBeforeService(t *testin
 	}
 }
 
+func TestLazyContentHandlersAllowCompleteWitnessWithIncompleteRegistryProbe(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "prompt", path: "/api/reviews/42/prompt"},
+		{name: "log", path: "/api/reviews/42/log"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inspector := mappingInspector{repositories: map[string]gitx.Repository{}, errors: map[string]error{}}
+			registry := NewRegistry(inspector, "")
+			for _, path := range []string{`E:\repo`, `E:\slow`} {
+				if _, err := registry.Add(context.Background(), path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inspector.errors[`E:\slow`] = context.DeadlineExceeded
+			service := &fakeService{}
+			server, err := NewServer(service, registry, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodGet, test.path, nil)
+			request.Header.Set("Origin", "http://"+request.Host)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s, want successful complete witness", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestLazyContentHandlersMapIncompleteNoMatchToUnavailable(t *testing.T) {
+	inspector := mappingInspector{repositories: map[string]gitx.Repository{}, errors: map[string]error{}}
+	registry := NewRegistry(inspector, "")
+	for _, path := range []string{`E:\registered`, `E:\slow`} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspector.errors[`E:\slow`] = context.DeadlineExceeded
+	service := &fakeService{repoPath: `E:\foreign`}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42/prompt", nil)
+	request.Header.Set("Origin", "http://"+request.Host)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want unavailable witness result", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestLazyContentHandlersRequireNarrowAuthorizationService(t *testing.T) {
 	base := &fakeService{}
 	service := struct{ roborev.Service }{Service: base}

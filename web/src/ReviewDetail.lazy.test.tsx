@@ -18,6 +18,18 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function pendingUntilAborted(signal: AbortSignal | undefined): Promise<Response> {
+  return new Promise((_, reject) => {
+    if (!signal) {
+      reject(new Error('lazy request did not receive an AbortSignal'))
+      return
+    }
+    const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'))
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+  })
+}
+
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('ReviewDetail lazy Prompt/Log ownership', () => {
@@ -108,6 +120,67 @@ describe('ReviewDetail lazy Prompt/Log ownership', () => {
     unmountedLog.resolve(new Response(JSON.stringify({ text: 'late unmounted log' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(screen.queryByText('late unmounted log')).not.toBeInTheDocument()
+  })
+
+  it('passes lazy signals and aborts them on job switch, capability disable, and unmount', async () => {
+    const promptSignals: AbortSignal[] = []
+    const firstJob = { ...job, id: 42 }
+    const secondJob = { ...job, id: 99 }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/reviews/42/prompt' || path === '/api/reviews/99/prompt') {
+        if (!init?.signal) throw new Error('lazy prompt signal missing')
+        promptSignals.push(init.signal)
+        return pendingUntilAborted(init.signal)
+      }
+      return response({ ...job })
+    }))
+    const { rerender, unmount } = render(<I18nProvider><ReviewDetail {...props} job={firstJob} jobs={[firstJob]} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Prompt' }))
+    await waitFor(() => expect(promptSignals).toHaveLength(1))
+
+    rerender(<I18nProvider><ReviewDetail {...props} job={secondJob} jobs={[secondJob]} /></I18nProvider>)
+    await waitFor(() => expect(promptSignals[0].aborted).toBe(true))
+    await userEvent.click(await screen.findByRole('button', { name: 'Prompt' }))
+    await waitFor(() => expect(promptSignals).toHaveLength(2))
+
+    rerender(<I18nProvider><ReviewDetail {...props} job={secondJob} jobs={[secondJob]} canLoadPrompt={false} /></I18nProvider>)
+    await waitFor(() => expect(promptSignals[1].aborted).toBe(true))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    rerender(<I18nProvider><ReviewDetail {...props} job={secondJob} jobs={[secondJob]} canLoadPrompt /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Prompt' }))
+    await waitFor(() => expect(promptSignals).toHaveLength(3))
+    unmount()
+    expect(promptSignals[2].aborted).toBe(true)
+  })
+
+  it('aborts an in-flight log before terminal refresh and ignores AbortError', async () => {
+    const running = { ...job, status: 'running' }
+    const terminal = { ...job, status: 'done', output: 'terminal review' }
+    const logSignals: AbortSignal[] = []
+    let logCalls = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/reviews/42/log') {
+        if (!init?.signal) throw new Error('lazy log signal missing')
+        logSignals.push(init.signal)
+        logCalls++
+        if (logCalls === 1) return pendingUntilAborted(init.signal)
+        return response({ text: 'terminal log' })
+      }
+      if (path === '/api/reviews/42') return response(terminal)
+      return response({ ...running })
+    }))
+    const { rerender } = render(<I18nProvider><ReviewDetail {...props} job={running} jobs={[running]} /></I18nProvider>)
+    await userEvent.click(await screen.findByRole('button', { name: 'Log' }))
+    await waitFor(() => expect(logSignals).toHaveLength(1))
+
+    rerender(<I18nProvider><ReviewDetail {...props} job={terminal} jobs={[terminal]} /></I18nProvider>)
+    await waitFor(() => expect(logSignals).toHaveLength(2))
+    expect(logSignals[0].aborted).toBe(true)
+    expect(await screen.findByText('terminal log')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('keeps empty Prompt/Log successful states and copies the exact log text', async () => {

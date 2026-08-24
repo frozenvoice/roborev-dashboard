@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -153,11 +154,23 @@ func (r *Registry) Contains(path string) bool {
 	return ok
 }
 
-// FreshRegisteredPaths returns a sorted, independent snapshot of roots that
-// are still registered and whose canonical Git root has not drifted.  The
-// registry map is snapshotted before any inspection so registration changes
-// during the probes cannot add ownership witnesses to this operation.
-func (r *Registry) FreshRegisteredPaths(ctx context.Context) []string {
+const (
+	freshRegisteredRootTimeout  = 3 * time.Second
+	freshRegisteredPhaseTimeout = 6 * time.Second
+	freshRegisteredWorkers      = 2
+)
+
+// FreshRegisteredPathsWithStatus returns completed canonical roots, whether
+// one or more probes timed out, and any parent-context error. Membership is
+// frozen before probing; only fresh inspections can contribute paths.
+func (r *Registry) FreshRegisteredPathsWithStatus(ctx context.Context) ([]string, bool, error) {
+	return r.freshRegisteredPaths(ctx, freshRegisteredRootTimeout, freshRegisteredPhaseTimeout)
+}
+
+// freshRegisteredPaths is parameterized for deterministic short-timeout
+// tests. Production callers use the 3-second per-root and 6-second phase
+// ceilings above.
+func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseTimeout time.Duration) ([]string, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -168,15 +181,82 @@ func (r *Registry) FreshRegisteredPaths(ctx context.Context) []string {
 	}
 	r.mu.RUnlock()
 
-	paths := make([]string, 0, len(snapshot))
+	sort.Strings(snapshot)
+	if len(snapshot) == 0 {
+		return []string{}, false, nil
+	}
+	phaseCtx, cancel := context.WithTimeout(ctx, phaseTimeout)
+	defer cancel()
+	type probeResult struct {
+		path       string
+		valid      bool
+		incomplete bool
+	}
+	jobs := make(chan string, len(snapshot))
+	results := make(chan probeResult, len(snapshot))
 	for _, path := range snapshot {
-		repo, err := r.inspectExpected(ctx, path)
-		if err == nil {
-			paths = append(paths, repo.Path)
+		jobs <- path
+	}
+	close(jobs)
+	workers := freshRegisteredWorkers
+	if len(snapshot) < workers {
+		workers = len(snapshot)
+	}
+	var wg sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-phaseCtx.Done():
+					return
+				case path, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if phaseCtx.Err() != nil {
+						return
+					}
+					rootCtx, rootCancel := context.WithTimeout(phaseCtx, rootTimeout)
+					repo, inspectErr := r.inspectExpected(rootCtx, path)
+					rootTimedOut := errors.Is(rootCtx.Err(), context.DeadlineExceeded) || errors.Is(inspectErr, context.DeadlineExceeded)
+					rootCancel()
+					if rootTimedOut {
+						results <- probeResult{path: path, incomplete: true}
+						continue
+					}
+					if inspectErr == nil {
+						results <- probeResult{path: repo.Path, valid: true}
+						continue
+					}
+					results <- probeResult{}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	paths := make([]string, 0, len(snapshot))
+	incomplete := false
+	processed := 0
+	for result := range results {
+		processed++
+		if result.valid {
+			paths = append(paths, result.path)
+		}
+		if result.incomplete {
+			incomplete = true
 		}
 	}
+	if errors.Is(phaseCtx.Err(), context.DeadlineExceeded) && processed < len(snapshot) {
+		incomplete = true
+	}
 	sort.Strings(paths)
-	return paths
+	return paths, incomplete, nil
 }
 
 func (r *Registry) Resolve(path string) (string, error) {

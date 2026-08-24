@@ -57,6 +57,7 @@ type lazyAuthorizationFixture struct {
 	logBody               string
 	ownerEncoding         string
 	driftAfterWitness     bool
+	mutateAfterContent    bool
 	witnessStatuses       []int
 	witnessBodies         []string
 	witnessTransportErrs  []error
@@ -104,7 +105,14 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 			if f.fallback && call > 1 {
 				status := f.targetStatusName()
 				prompt := fmt.Sprintf("authorized %s prompt", status)
-				body := fmt.Sprintf(`{"jobs":[%s]}`, f.reviewJobJSON(42, 7, status, "review", "", prompt))
+				if f.mutateAfterContent {
+					f.foreignRepoID = 99
+				}
+				repoID := int64(7)
+				if f.foreignRepoID != 0 {
+					repoID = f.foreignRepoID
+				}
+				body := fmt.Sprintf(`{"jobs":[%s]}`, f.reviewJobJSON(42, repoID, status, "review", "", prompt))
 				return f.response(http.StatusOK, "application/json", io.NopCloser(strings.NewReader(body))), nil
 			}
 			repoID := int64(7)
@@ -165,6 +173,9 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 			f.mu.Unlock()
 			return f.response(http.StatusNotFound, "application/json", io.NopCloser(strings.NewReader("foreign review body"))), nil
 		}
+		if f.mutateAfterContent {
+			f.foreignRepoID = 99
+		}
 		return f.response(http.StatusOK, "application/json", io.NopCloser(strings.NewReader(`{"job_id":42,"prompt":"authorized prompt"}`))), nil
 	case "/api/job/log":
 		f.mu.Lock()
@@ -174,6 +185,9 @@ func (f *lazyAuthorizationFixture) RoundTrip(request *http.Request) (*http.Respo
 		status := f.logStatus
 		if status == "" {
 			status = "running"
+		}
+		if f.mutateAfterContent {
+			f.foreignRepoID = 99
 		}
 		headers := http.Header{"Content-Type": []string{"application/x-ndjson"}, "X-Job-Status": []string{status}, "X-Log-Offset": []string{fmt.Sprint(len(body))}}
 		return &http.Response{StatusCode: http.StatusOK, Header: headers, Body: io.NopCloser(strings.NewReader(body))}, nil
@@ -218,7 +232,7 @@ func TestAuthorizedCompletedPromptStopsAtRepoPrefixBeforeStoredPrompt(t *testing
 	}
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	if fixture.targetCalls != 1 || fixture.fallbackCalls != 0 || fixture.reviewCalls != 1 || fixture.reviewNotFoundCalls != 0 || fixture.logCalls != 0 || fixture.targetBody == nil || fixture.witnessBody == nil {
+	if fixture.targetCalls != 2 || fixture.fallbackCalls != 1 || fixture.reviewCalls != 1 || fixture.reviewNotFoundCalls != 0 || fixture.logCalls != 0 || fixture.targetBody == nil || fixture.witnessBody == nil {
 		t.Fatalf("calls target=%d fallback=%d review=%d review404=%d log=%d bodies=%v/%v", fixture.targetCalls, fixture.fallbackCalls, fixture.reviewCalls, fixture.reviewNotFoundCalls, fixture.logCalls, fixture.targetBody != nil, fixture.witnessBody != nil)
 	}
 	for _, encoding := range fixture.acceptEncoding {
@@ -317,8 +331,8 @@ func TestAuthorizedLazyQueuedAndRunningPromptUseOneContentFallback(t *testing.T)
 			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
-			if fixture.reviewCalls != 1 || fixture.reviewNotFoundCalls != 1 || fixture.targetCalls != 2 || fixture.fallbackCalls != 1 {
-				t.Fatalf("review calls=%d review404=%d jobs calls=%d fallback=%d, want 1/1/2/1", fixture.reviewCalls, fixture.reviewNotFoundCalls, fixture.targetCalls, fixture.fallbackCalls)
+			if fixture.reviewCalls != 1 || fixture.reviewNotFoundCalls != 1 || fixture.targetCalls != 3 || fixture.fallbackCalls != 2 {
+				t.Fatalf("review calls=%d review404=%d jobs calls=%d fallback=%d, want 1/1/3/2", fixture.reviewCalls, fixture.reviewNotFoundCalls, fixture.targetCalls, fixture.fallbackCalls)
 			}
 		})
 	}
@@ -360,6 +374,38 @@ func TestAuthorizedLazyBindingDriftAfterWitnessPreventsContent(t *testing.T) {
 			defer fixture.mu.Unlock()
 			if fixture.reviewCalls != 0 || fixture.logCalls != 0 {
 				t.Fatalf("content calls review=%d log=%d", fixture.reviewCalls, fixture.logCalls)
+			}
+		})
+	}
+}
+
+func TestAuthorizedLazyFinalOwnershipProofRejectsMutationAfterContent(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		status   string
+		log      bool
+		fallback bool
+	}{
+		{name: "completed prompt", status: "done"},
+		{name: "queued fallback prompt", status: "queued", fallback: true},
+		{name: "raw log", status: "running", log: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &lazyAuthorizationFixture{targetStatusNameValue: test.status, fallback: test.fallback, mutateAfterContent: true, logStatus: test.status}
+			client := newLazyAuthorizationClient(t, fixture)
+			var err error
+			if test.log {
+				_, err = client.AuthorizedLog(context.Background(), 42, []string{`E:\repo`})
+			} else {
+				_, err = client.AuthorizedPrompt(context.Background(), 42, []string{`E:\repo`})
+			}
+			if !errors.Is(err, ErrLazyContentForbidden) {
+				t.Fatalf("err=%v, want final ownership rejection", err)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if fixture.reviewCalls == 0 && fixture.logCalls == 0 {
+				t.Fatal("content was not fetched before final ownership proof")
 			}
 		})
 	}
@@ -454,8 +500,8 @@ func TestAuthorizedLazyWitnessErrorsContinueToValidMatch(t *testing.T) {
 			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
-			if fixture.reviewCalls != 1 || fixture.witnessIndex != 2 {
-				t.Fatalf("review calls=%d witness calls=%d, want 1/2", fixture.reviewCalls, fixture.witnessIndex)
+			if fixture.reviewCalls != 1 || fixture.witnessIndex != 3 {
+				t.Fatalf("review calls=%d witness calls=%d, want 1/3", fixture.reviewCalls, fixture.witnessIndex)
 			}
 			if test.name == "non-2xx" && (fixture.witnessErrorBody == nil || fixture.witnessErrorBody.read != 0) {
 				reads := -1
@@ -589,7 +635,7 @@ func TestAuthorizedLazyJobTypesUseFullRowsAndSynthesisWitnessForMembers(t *testi
 			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
-			if fixture.targetCalls != 1 || fixture.fallbackCalls != 0 || fixture.reviewCalls != 1 || fixture.targetBody == nil || fixture.witnessBody == nil {
+			if fixture.targetCalls != 2 || fixture.fallbackCalls != 1 || fixture.reviewCalls != 1 || fixture.targetBody == nil || fixture.witnessBody == nil {
 				t.Fatalf("job type=%s calls target=%d fallback=%d witness=%v review=%d", test.jobType, fixture.targetCalls, fixture.fallbackCalls, fixture.witnessBody != nil, fixture.reviewCalls)
 			}
 			if test.name == "panel member" && (!strings.Contains(string(fixture.targetBody.data), `"job_type":"review"`) || !strings.Contains(string(fixture.targetBody.data), `"panel_role":"member"`) || !strings.Contains(string(fixture.witnessBody.data), `"job_type":"synthesis"`) || !strings.Contains(string(fixture.witnessBody.data), `"panel_role":"synthesis"`)) {

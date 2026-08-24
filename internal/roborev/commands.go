@@ -51,20 +51,6 @@ func ShowArgs(id int64) ([]string, error) {
 	return []string{"show", "--job", strconv.FormatInt(id, 10), "--json"}, nil
 }
 
-func PromptArgs(id int64) ([]string, error) {
-	if err := validateJobID(id); err != nil {
-		return nil, err
-	}
-	return []string{"show", "--job", strconv.FormatInt(id, 10), "--prompt"}, nil
-}
-
-func LogArgs(id int64) ([]string, error) {
-	if err := validateJobID(id); err != nil {
-		return nil, err
-	}
-	return []string{"log", "--raw", strconv.FormatInt(id, 10)}, nil
-}
-
 func CommentArgs(id int64, comment string) ([]string, error) {
 	if err := validateJobID(id); err != nil {
 		return nil, err

@@ -31,12 +31,13 @@ const lazyContentLimit int64 = 8 << 20
 const lazyOwnerPrefixLimit = 128
 
 var (
-	ErrLazyContentUnsupported = errors.New("RoboRev lazy content contract is unsupported")
-	ErrLazyContentOffline     = errors.New("RoboRev daemon is offline for lazy content")
-	ErrLazyContentNotFound    = errors.New("RoboRev lazy content was not found")
-	ErrLazyContentForbidden   = errors.New("RoboRev lazy content job belongs to a different repository")
-	ErrLazyContentMalformed   = errors.New("RoboRev lazy content response is malformed")
-	ErrLazyContentOversized   = errors.New("RoboRev lazy content response is oversized")
+	ErrLazyContentUnsupported        = errors.New("RoboRev lazy content contract is unsupported")
+	ErrLazyContentOffline            = errors.New("RoboRev daemon is offline for lazy content")
+	ErrLazyContentNotFound           = errors.New("RoboRev lazy content was not found")
+	ErrLazyContentForbidden          = errors.New("RoboRev lazy content job belongs to a different repository")
+	ErrLazyContentWitnessUnavailable = errors.New("RoboRev lazy content ownership witnesses are incomplete")
+	ErrLazyContentMalformed          = errors.New("RoboRev lazy content response is malformed")
+	ErrLazyContentOversized          = errors.New("RoboRev lazy content response is oversized")
 )
 
 type lazyBinding struct {
@@ -625,7 +626,18 @@ func (c *Client) AuthorizedPrompt(ctx context.Context, id int64, registeredPaths
 	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
 		return "", err
 	}
-	return c.promptWithBinding(ctx, binding, id)
+	value, err := c.promptWithBinding(ctx, binding, id)
+	if err != nil {
+		return "", err
+	}
+	// Re-run the frozen ownership proof after content retrieval.  The daemon
+	// cannot make the prefix proof and content bytes one atomic transaction;
+	// this final proof prevents a stale result from reaching the browser when
+	// ownership changes during the content request.
+	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func (c *Client) promptWithBinding(ctx context.Context, binding lazyBinding, id int64) (string, error) {
@@ -672,7 +684,7 @@ func (c *Client) promptWithBinding(ctx context.Context, binding lazyBinding, id 
 	return value, nil
 }
 
-func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {
+func (c *Client) promptUnowned(ctx context.Context, id int64) (string, error) {
 	if err := validateJobID(id); err != nil {
 		return "", err
 	}
@@ -710,7 +722,7 @@ func lazyStatusError(status int) error {
 	return fmt.Errorf("%w: daemon returned unexpected status", ErrLazyContentMalformed)
 }
 
-func (c *Client) Log(ctx context.Context, id int64) (string, error) {
+func (c *Client) logUnowned(ctx context.Context, id int64) (string, error) {
 	if err := validateJobID(id); err != nil {
 		return "", err
 	}
@@ -734,7 +746,14 @@ func (c *Client) AuthorizedLog(ctx context.Context, id int64, registeredPaths []
 	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
 		return "", err
 	}
-	return c.logWithBinding(ctx, binding, id)
+	value, err := c.logWithBinding(ctx, binding, id)
+	if err != nil {
+		return "", err
+	}
+	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func (c *Client) logWithBinding(ctx context.Context, binding lazyBinding, id int64) (string, error) {

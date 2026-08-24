@@ -148,7 +148,7 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	if len(panelRun.Jobs) != 2 || synthesisCount != 1 || bytes.Contains(members, []byte(`"prompt"`)) || bytes.Contains(members, []byte(`"diff_content"`)) {
 		t.Fatalf("RoboRev v0.64 panel_run must contain members plus exactly one synthesis without heavy fields: %s", members)
 	}
-	prompt, err := client.Prompt(ctx, 42)
+	prompt, err := client.promptUnowned(ctx, 42)
 	if err != nil || prompt == "" {
 		t.Fatalf("prompt failed: %v", err)
 	}

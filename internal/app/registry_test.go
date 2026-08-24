@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,38 @@ import (
 type mappingInspector struct {
 	repositories map[string]gitx.Repository
 	errors       map[string]error
+}
+
+type slowRegistryInspector struct {
+	delays  map[string]time.Duration
+	active  atomic.Int32
+	maximum atomic.Int32
+	started chan string
+}
+
+func (s *slowRegistryInspector) Inspect(ctx context.Context, path string) (gitx.Repository, error) {
+	active := s.active.Add(1)
+	defer s.active.Add(-1)
+	for {
+		maximum := s.maximum.Load()
+		if active <= maximum || s.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	if s.started != nil {
+		select {
+		case s.started <- path:
+		default:
+		}
+	}
+	timer := time.NewTimer(s.delays[path])
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return gitx.Repository{Path: path}, nil
+	case <-ctx.Done():
+		return gitx.Repository{}, ctx.Err()
+	}
 }
 
 func (m mappingInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
@@ -180,7 +213,10 @@ func TestRegistryFreshRegisteredPathsOmitsDriftedRoots(t *testing.T) {
 	inspector.repositories["stale-root"] = gitx.Repository{Path: "replacement-root"}
 	inspector.errors["deleted-root"] = os.ErrNotExist
 
-	got := registry.FreshRegisteredPaths(context.Background())
+	got, incomplete, err := registry.FreshRegisteredPathsWithStatus(context.Background())
+	if err != nil || incomplete {
+		t.Fatalf("fresh inspection incomplete=%v err=%v", incomplete, err)
+	}
 	if !reflect.DeepEqual(got, []string{"valid-root"}) {
 		t.Fatalf("fresh paths=%v, want only valid root", got)
 	}
@@ -194,14 +230,88 @@ func TestRegistryFreshRegisteredPathsIsSortedAndImmutable(t *testing.T) {
 		}
 	}
 
-	got := registry.FreshRegisteredPaths(context.Background())
+	got, incomplete, err := registry.FreshRegisteredPathsWithStatus(context.Background())
+	if err != nil || incomplete {
+		t.Fatalf("fresh inspection incomplete=%v err=%v", incomplete, err)
+	}
 	want := []string{`E:\a-repo`, `E:\m-repo`, `E:\z-repo`}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fresh paths=%v, want %v", got, want)
 	}
 	got[0] = `E:\mutated`
-	if next := registry.FreshRegisteredPaths(context.Background()); !reflect.DeepEqual(next, want) {
+	if next, nextIncomplete, nextErr := registry.FreshRegisteredPathsWithStatus(context.Background()); nextErr != nil || nextIncomplete || !reflect.DeepEqual(next, want) {
 		t.Fatalf("fresh path snapshot was mutable: %v", next)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsBoundsWorkersAndSortsResults(t *testing.T) {
+	inspector := &slowRegistryInspector{delays: map[string]time.Duration{
+		`E:\z-repo`: 5 * time.Millisecond,
+		`E:\a-repo`: 2 * time.Millisecond,
+		`E:\m-repo`: 4 * time.Millisecond,
+		`E:\b-repo`: 1 * time.Millisecond,
+	}, started: make(chan string, 16)}
+	registry := NewRegistry(inspector, "")
+	for path := range inspector.delays {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, incomplete, err := registry.freshRegisteredPaths(context.Background(), 100*time.Millisecond, 250*time.Millisecond)
+	if err != nil || incomplete {
+		t.Fatalf("paths=%v incomplete=%v err=%v", got, incomplete, err)
+	}
+	want := []string{`E:\a-repo`, `E:\b-repo`, `E:\m-repo`, `E:\z-repo`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("paths=%v, want %v", got, want)
+	}
+	if maximum := inspector.maximum.Load(); maximum > freshRegisteredWorkers {
+		t.Fatalf("maximum concurrent inspections=%d, want <=%d", maximum, freshRegisteredWorkers)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsTimeoutOmitsOnlySlowRoot(t *testing.T) {
+	inspector := &slowRegistryInspector{delays: map[string]time.Duration{
+		"slow": 30 * time.Millisecond,
+		"fast": 0,
+	}}
+	registry := NewRegistry(inspector, "")
+	for path := range inspector.delays {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, incomplete, err := registry.freshRegisteredPaths(context.Background(), 5*time.Millisecond, 100*time.Millisecond)
+	if err != nil || !incomplete || !reflect.DeepEqual(got, []string{"fast"}) {
+		t.Fatalf("paths=%v incomplete=%v err=%v, want fast/incomplete", got, incomplete, err)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsParentCancellationJoinsWorkers(t *testing.T) {
+	inspector := &slowRegistryInspector{delays: map[string]time.Duration{"blocked": time.Second}, started: make(chan string, 1)}
+	registry := NewRegistry(inspector, "")
+	if _, err := registry.Add(context.Background(), "blocked"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := registry.freshRegisteredPaths(ctx, time.Second, time.Second)
+		done <- err
+	}()
+	select {
+	case <-inspector.started:
+	case <-time.After(time.Second):
+		t.Fatal("inspection did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh inspection did not join canceled worker")
 	}
 }
 

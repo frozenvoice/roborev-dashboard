@@ -17,6 +17,11 @@ type Tab = 'review' | 'members' | 'log' | 'prompt' | 'comments' | 'metadata'
 type AgentsLoadOutcome = 'applied' | 'superseded-applied' | 'superseded' | 'rejected' | 'failed'
 type AppliedAgentsRequest = { generation: number; identity: string; repositoryEpoch: number }
 type MemberLoadState = 'not-requested' | 'pending' | 'success-empty' | 'loaded' | 'error'
+type LazyContentTab = 'prompt' | 'log'
+
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
+}
 
 const navigation = [
   ['Overview', LayoutDashboard], ['Reviews', ListChecks], ['Fix & Refine', ShieldCheck],
@@ -163,6 +168,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const detailGeneration = useRef(0)
   const detailPollGeneration = useRef(0)
   const lazyGeneration = useRef<Record<string, number>>({})
+  const lazyAbort = useRef<Record<LazyContentTab, AbortController | null>>({ prompt: null, log: null })
   const memberDetailGeneration = useRef(0)
   const memberPollGeneration = useRef(0)
   const selectedMemberIdRef = useRef<number | null>(null)
@@ -177,6 +183,18 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   const terminalMemberCount = members.filter(member => !isRunning(member)).length
   const memberProgress = members.length ? Math.round((terminalMemberCount / members.length) * 100) : 0
   const setSelectedMember = (value: number | null) => { selectedMemberIdRef.current = value; setSelectedMemberId(value) }
+  const cancelLazy = useCallback((kind: LazyContentTab) => {
+    lazyGeneration.current[kind] = (lazyGeneration.current[kind] ?? 0) + 1
+    lazyAbort.current[kind]?.abort()
+    lazyAbort.current[kind] = null
+  }, [])
+  const beginLazy = useCallback((kind: LazyContentTab) => {
+    cancelLazy(kind)
+    const controller = new AbortController()
+    const generation = lazyGeneration.current[kind] ?? 0
+    lazyAbort.current[kind] = controller
+    return { controller, generation }
+  }, [cancelLazy])
   const memberQuery = `parentJobId=${encodeURIComponent(String(id))}&repositoryIdentity=${encodeURIComponent(repoIdentity)}`
   const memberListURL = job.panel_run_uuid ? `/api/panels/${encodeURIComponent(job.panel_run_uuid)}/members?${memberQuery}` : ''
   const memberDetailURL = (memberId: number) => job.panel_run_uuid ? `/api/panels/${encodeURIComponent(job.panel_run_uuid)}/members/${encodeURIComponent(String(memberId))}?${memberQuery}` : ''
@@ -204,15 +222,27 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
   useEffect(() => {
     const generation = ++detailGeneration.current
     detailPollGeneration.current++
-    lazyGeneration.current = { prompt: (lazyGeneration.current.prompt ?? 0) + 1, log: (lazyGeneration.current.log ?? 0) + 1 }
+    cancelLazy('prompt')
+    cancelLazy('log')
     memberDetailGeneration.current++
     memberRepositoryIdentity.current = repoIdentity
     memberSnapshot.current = new Map()
     selectedMemberIdRef.current = null
     setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setLazyLoading({}); setMemberJobs([]); setMemberLoadState('not-requested'); setMemberError(''); setSelectedMemberId(null); setMemberDetail(null); setMemberDetailError(''); setMemberDetailLoading(false); setMemberLoading(false); setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review'); setDetailLoading(true)
     request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setDetailLoading(false) })
-    return () => { detailGeneration.current++; detailPollGeneration.current++; lazyGeneration.current.prompt++; lazyGeneration.current.log++ }
-  }, [id])
+    return () => { detailGeneration.current++; detailPollGeneration.current++; cancelLazy('prompt'); cancelLazy('log') }
+  }, [cancelLazy, id, repoIdentity])
+  useEffect(() => () => { cancelLazy('prompt'); cancelLazy('log') }, [cancelLazy])
+  useEffect(() => {
+    if (!canLoadPrompt) {
+      cancelLazy('prompt')
+      setLazyLoaded(old => old.prompt ? { ...old, prompt: false } : old)
+    }
+    if (!canLoadLog) {
+      cancelLazy('log')
+      setLazyLoaded(old => old.log ? { ...old, log: false } : old)
+    }
+  }, [canLoadLog, canLoadPrompt, cancelLazy])
   useEffect(() => {
     const scope = `${repoIdentity}\u0000${id}\u0000${job.panel_run_uuid || ''}`
     if (memberScopeRef.current === scope) return
@@ -261,22 +291,21 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       if (detailRequest === detailGeneration.current) setDetailLoading(false)
     })
     if (lazyLoaded.log && canLoadLog) {
-      const logRequest = (lazyGeneration.current.log ?? 0) + 1
-      lazyGeneration.current.log = logRequest
+      const { controller, generation: logRequest } = beginLazy('log')
       setLazyLoading(old => ({ ...old, log: true }))
       setLazyError(old => ({ ...old, log: '' }))
-      request<{ text: string }>(`/api/reviews/${id}/log`).then(value => { if (logRequest === lazyGeneration.current.log) { setLazy(old => ({ ...old, log: value.text })); setLazyError(old => ({ ...old, log: '' })) } }).catch(error => { if (logRequest === lazyGeneration.current.log) setLazyError(old => ({ ...old, log: (error as Error).message })) }).finally(() => { if (logRequest === lazyGeneration.current.log) setLazyLoading(old => ({ ...old, log: false })) })
+      request<{ text: string }>(`/api/reviews/${id}/log`, { signal: controller.signal }).then(value => { if (logRequest === lazyGeneration.current.log) { setLazy(old => ({ ...old, log: value.text })); setLazyError(old => ({ ...old, log: '' })) } }).catch(error => { if (!controller.signal.aborted && !isAbortError(error) && logRequest === lazyGeneration.current.log) setLazyError(old => ({ ...old, log: (error as Error).message })) }).finally(() => { if (lazyAbort.current.log === controller) lazyAbort.current.log = null; if (logRequest === lazyGeneration.current.log) setLazyLoading(old => ({ ...old, log: false })) })
     }
-  }, [canLoadLog, id, job.status, lazyLoaded.log])
+  }, [beginLazy, canLoadLog, id, job.status, lazyLoaded.log])
   useEffect(() => {
     if (!['prompt', 'log'].includes(tab) || (tab === 'prompt' && !canLoadPrompt) || (tab === 'log' && !canLoadLog) || lazyLoaded[tab]) return
-    const generation = (lazyGeneration.current[tab] ?? 0) + 1
-    lazyGeneration.current[tab] = generation
+    const kind = tab as LazyContentTab
+    const { controller, generation } = beginLazy(kind)
     setLazyLoaded(old => ({ ...old, [tab]: true }))
     setLazyError(old => ({ ...old, [tab]: '' }))
     setLazyLoading(old => ({ ...old, [tab]: true }))
-    request<{ text: string }>(`/api/reviews/${id}/${tab}`).then(value => { if (generation === lazyGeneration.current[tab]) setLazy(old => ({ ...old, [tab]: value.text })) }).catch(error => { if (generation === lazyGeneration.current[tab]) setLazyError(old => ({ ...old, [tab]: (error as Error).message })) }).finally(() => { if (generation === lazyGeneration.current[tab]) setLazyLoading(old => ({ ...old, [tab]: false })) })
-  }, [canLoadLog, canLoadPrompt, id, lazyLoaded, tab])
+    request<{ text: string }>(`/api/reviews/${id}/${tab}`, { signal: controller.signal }).then(value => { if (generation === lazyGeneration.current[kind]) setLazy(old => ({ ...old, [tab]: value.text })) }).catch(error => { if (!controller.signal.aborted && !isAbortError(error) && generation === lazyGeneration.current[kind]) setLazyError(old => ({ ...old, [tab]: (error as Error).message })) }).finally(() => { if (lazyAbort.current[kind] === controller) lazyAbort.current[kind] = null; if (generation === lazyGeneration.current[kind]) setLazyLoading(old => ({ ...old, [tab]: false })) })
+  }, [beginLazy, canLoadLog, canLoadPrompt, id, lazyLoaded, tab])
   useEffect(() => {
     if ((tab === 'prompt' && !canLoadPrompt) || (tab === 'log' && !canLoadLog)) setTab('review')
   }, [canLoadLog, canLoadPrompt, tab])
