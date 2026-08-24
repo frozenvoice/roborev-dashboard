@@ -254,7 +254,13 @@ Preview는 process 없이 fresh version/health/inventory, source stale/unregiste
 
 Adapter는 fresh preflight를 다시 수행한 뒤 exact `repo merge --yes <source-exact-path> <target-exact-path>`를 empty CWD의 shell-free typed process로 한 번 실행한다. Confirm budget은 version 1회, health 1회, bounded inventory/active-job evidence와 target validation, process 1회, post-readback 1회이며 handler가 이를 중복하지 않는다. Process가 시작되지 않으면 definite typed failure다. 시작된 뒤에는 exit code/stdout을 신뢰하지 않고 readback으로만 판단한다. 최소 verified condition은 source row absent, target row unique, target name/path 보존, target `jobCount >= S + T`다. `>=`는 Dashboard 밖에서 target에 새 job이 생길 수 있기 때문이다. Readback이 부족하거나 source가 남거나 target이 missing/duplicate/renamed거나 count가 부족하면 `unverified`로 보고하며 자동 retry/rollback하지 않는다. Success는 source RoboRev tracking entry 삭제와 consolidated metadata를 확인하지만 Registry, selected repository, registration/switch state, filesystem 또는 Git은 변경하지 않는다.
 
-`repositoryMerge`는 exact supported v0.64.0에서만 true인 additive capability와 optional `RepositoryMergeService`로 노출한다. Capability truth table은 existing runtime model을 따른다: no install은 `runtime-unavailable`; unsupported version의 inventory/rename/move/merge capability가 false인 fixture는 `unsupported`; exact v0.64 offline은 `runtime-unavailable`; exact v0.64 online은 `available`; installed daemon-looking mixed fixture는 `unsupported` 우선이다. Delete UI/API는 이 checkpoint에서 추가하지 않으며 별도 future surface로 남긴다.
+`repositoryMerge`는 exact supported v0.64.0에서만 true인 additive capability와 optional `RepositoryMergeService`로 노출한다. Capability truth table은 existing runtime model을 따른다: no install은 `runtime-unavailable`; unsupported version의 inventory/rename/move/merge capability가 false인 fixture는 `unsupported`; exact v0.64 offline은 `runtime-unavailable`; exact v0.64 online은 `available`; installed daemon-looking mixed fixture는 `unsupported` 우선이다.
+
+### Repository deletion blocked
+
+Repositories v3D Safe Delete는 exact RoboRev v0.64.0에서 **BLOCKED**다. Non-cascade `DeleteRepo`는 transaction 안에서 `review_jobs` count만 재검사하므로 `jobCount == 0`이 commit 또는 legacy commit response 부재를 증명하지 않는다. v0.64.0은 job 없이 commit과 legacy response가 존재하는 상태를 허용하며, `commits.repo_id` foreign key에는 delete cascade가 없다. 따라서 connection-local SQLite foreign-key enforcement가 꺼져 있으면 repository row 삭제가 commit/response orphan을 만들 수 있고, 켜져 있으면 delete 자체가 foreign-key violation으로 실패할 수 있다. 어느 결과도 Dashboard가 보장해야 하는 tracking-only cleanup 계약이 아니다.
+
+`repo delete --cascade`는 responses, reviews, `review_jobs`, commits와 repository row까지 삭제할 수 있으므로 Dashboard에서 영구적으로 노출하지 않는다. 더 안전한 upstream contract 또는 machine-readable mutation API가 제공되기 전까지 repository delete capability, UI, Preview/Confirm API와 typed delete process를 추가하지 않는다. Exact v0.64.0에서 Rename, Move와 Merge는 지원 완료지만 Delete는 planned가 아닌 unsupported/blocked 상태다.
 
 ## 확장 원칙
 
