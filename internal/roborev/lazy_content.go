@@ -531,6 +531,17 @@ func lazyOwnerQuery(id int64, repo string) string {
 }
 
 func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, id int64, registeredPaths []string) error {
+	if len(registeredPaths) == 0 {
+		// Without at least one registered witness, querying the target first
+		// would disclose whether an arbitrary job ID exists to an unauthorized
+		// caller.  Fail closed before any owner lookup.
+		return ErrLazyContentForbidden
+	}
+	for _, path := range registeredPaths {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
+		}
+	}
 	target, err := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(id, ""), id)
 	if err != nil {
 		return err
@@ -549,9 +560,6 @@ func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, 
 	}
 	var firstWitnessErr error
 	for _, path := range registeredPaths {
-		if strings.TrimSpace(path) == "" {
-			return fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
-		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

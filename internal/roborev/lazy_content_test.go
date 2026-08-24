@@ -153,6 +153,32 @@ func redirectBodyReads(body *trackingReadCloser) int {
 	return body.read
 }
 
+func TestAuthorizedLazyEmptyRegisteredPathsFailBeforeTargetLookup(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		paths []string
+		want  error
+	}{
+		{name: "nil", paths: nil, want: ErrLazyContentForbidden},
+		{name: "empty slice", paths: []string{}, want: ErrLazyContentForbidden},
+		{name: "empty path", paths: []string{""}, want: ErrLazyContentMalformed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &lazyAuthorizationFixture{}
+			client := newLazyAuthorizationClient(t, fixture)
+			_, err := client.AuthorizedPrompt(context.Background(), 42, test.paths)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v, want %v", err, test.want)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if fixture.targetCalls != 0 || fixture.reviewCalls != 0 || fixture.logCalls != 0 {
+				t.Fatalf("upstream calls target=%d review=%d log=%d, want zero", fixture.targetCalls, fixture.reviewCalls, fixture.logCalls)
+			}
+		})
+	}
+}
+
 func TestLazyPromptAndLogUseDaemonWithoutCLIOutputCommands(t *testing.T) {
 	client, runner, closeServer := newLazyContentClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
