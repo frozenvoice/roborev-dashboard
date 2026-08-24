@@ -201,6 +201,49 @@ func TestLazyContentHandlersDeadlineCoversFreshInspectionBeforeService(t *testin
 	}
 }
 
+func TestLazyContentHandlersParentCancellationWithNonCooperativeProbeSkipsService(t *testing.T) {
+	for _, path := range []string{"/api/reviews/42/prompt", "/api/reviews/42/log"} {
+		t.Run(path, func(t *testing.T) {
+			inspector := &blockingRegistryInspector{started: make(chan string, 2), release: make(chan struct{})}
+			t.Cleanup(inspector.Release)
+			registry := NewRegistry(inspector, "")
+			registry.paths[registryKey("blocked")] = "blocked"
+			service := &fakeService{}
+			server, err := NewServer(service, registry, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestContext, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			request := httptest.NewRequest(http.MethodGet, path, nil).WithContext(requestContext)
+			request.Header.Set("Origin", "http://"+request.Host)
+			recorder := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				server.Handler().ServeHTTP(recorder, request)
+				close(done)
+			}()
+			select {
+			case <-inspector.started:
+			case <-time.After(time.Second):
+				t.Fatal("non-cooperative probe did not start")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("handler did not return after parent cancellation")
+			}
+			if recorder.Code != http.StatusGatewayTimeout {
+				t.Fatalf("status=%d body=%s, want gateway timeout", recorder.Code, recorder.Body.String())
+			}
+			if service.authorizedPromptCalls != 0 || service.authorizedLogCalls != 0 || service.promptCalls != 0 || service.logCalls != 0 {
+				t.Fatalf("service calls prompt=%d log=%d authorizedPrompt=%d authorizedLog=%d, want zero", service.promptCalls, service.logCalls, service.authorizedPromptCalls, service.authorizedLogCalls)
+			}
+		})
+	}
+}
+
 func TestLazyContentHandlersAllowCompleteWitnessWithIncompleteRegistryProbe(t *testing.T) {
 	for _, test := range []struct {
 		name string

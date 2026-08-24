@@ -165,6 +165,7 @@ func (s *Server) Handler() http.Handler {
 // process-scoped managers are handled by Shutdown.
 func (s *Server) BeginShutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	s.Registry.BeginShutdown()
 	if s.Events != nil {
 		if err := s.Events.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -178,6 +179,7 @@ func (s *Server) BeginShutdown(ctx context.Context) error {
 // processes to finish.
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	s.Registry.BeginShutdown()
 	if s.Events != nil {
 		if err := s.Events.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -202,6 +204,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		if err := s.Setup.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
 		}
+	}
+	// Registry admission is closed and cooperative probes were canceled above;
+	// wait for detached probes last so a non-cooperative inspector cannot
+	// consume the cleanup budget of process-scoped managers.
+	if err := s.Registry.Shutdown(ctx); err != nil {
+		shutdownErrors = append(shutdownErrors, err)
 	}
 	return errors.Join(shutdownErrors...)
 }
@@ -784,7 +792,7 @@ func writeLazyContentError(w http.ResponseWriter, err error, phase string) {
 	status := http.StatusBadGateway
 	message := "lazy content request failed"
 	switch {
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		status = http.StatusGatewayTimeout
 		message = "lazy content request timed out"
 	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrLazyContentWitnessUnavailable), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrUnsupportedJobMetadata):

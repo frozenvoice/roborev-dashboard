@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -43,6 +44,19 @@ type Registry struct {
 	panelSelections map[string]string
 	configFile      string
 	inspector       RepositoryInspector
+
+	// probeMu protects the Registry-owned admission gate and lifecycle. A
+	// probe slot is held until inspectExpected returns; request cancellation
+	// cannot release it early because a non-cooperative inspector may still be
+	// executing in its detached goroutine.
+	probeMu      sync.Mutex
+	probeSlots   chan struct{}
+	probeIdle    chan struct{}
+	probeCancels map[uint64]context.CancelFunc
+	probeActive  int
+	probeNextID  uint64
+	probeClosing bool
+	probeCursor  atomic.Uint64
 }
 
 func registryKey(path string) string {
@@ -50,7 +64,59 @@ func registryKey(path string) string {
 }
 
 func NewRegistry(inspector RepositoryInspector, configFile string) *Registry {
-	return &Registry{paths: make(map[string]string), panelSelections: make(map[string]string), inspector: inspector, configFile: configFile}
+	registry := &Registry{paths: make(map[string]string), panelSelections: make(map[string]string), inspector: inspector, configFile: configFile}
+	registry.initProbeStateLocked()
+	return registry
+}
+
+func (r *Registry) initProbeStateLocked() {
+	if r.probeSlots == nil {
+		r.probeSlots = make(chan struct{}, freshRegisteredWorkers)
+	}
+	if r.probeIdle == nil {
+		r.probeIdle = make(chan struct{})
+		close(r.probeIdle)
+	}
+	if r.probeCancels == nil {
+		r.probeCancels = make(map[uint64]context.CancelFunc)
+	}
+}
+
+// BeginShutdown closes new fresh-inspection admission and cancels all
+// cooperative probes. Non-cooperative inspectors continue to hold their
+// Registry-owned slots until they return.
+func (r *Registry) BeginShutdown() {
+	r.probeMu.Lock()
+	defer r.probeMu.Unlock()
+	r.initProbeStateLocked()
+	if r.probeClosing {
+		return
+	}
+	r.probeClosing = true
+	for _, cancel := range r.probeCancels {
+		cancel()
+	}
+}
+
+// Shutdown waits for all admitted probes without starting a waiter
+// goroutine. A non-cooperative inspector can therefore make this return the
+// caller's context error while the Registry still enforces its hard maximum
+// of two active probe goroutines.
+func (r *Registry) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.BeginShutdown()
+	r.probeMu.Lock()
+	r.initProbeStateLocked()
+	idle := r.probeIdle
+	r.probeMu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *Registry) Load(ctx context.Context) {
@@ -160,6 +226,12 @@ const (
 	freshRegisteredWorkers      = 2
 )
 
+type freshProbeResult struct {
+	path       string
+	valid      bool
+	incomplete bool
+}
+
 // FreshRegisteredPathsWithStatus returns completed canonical roots, whether
 // one or more probes timed out, and any parent-context error. Membership is
 // frozen before probing; only fresh inspections can contribute paths.
@@ -187,63 +259,13 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 	}
 	phaseCtx, cancel := context.WithTimeout(ctx, phaseTimeout)
 	defer cancel()
-	type probeResult struct {
-		path       string
-		valid      bool
-		incomplete bool
-	}
-	jobs := make(chan string, len(snapshot))
-	results := make(chan probeResult, len(snapshot))
-	for _, path := range snapshot {
-		jobs <- path
-	}
-	close(jobs)
-	workers := freshRegisteredWorkers
-	if len(snapshot) < workers {
-		workers = len(snapshot)
-	}
-	var wg sync.WaitGroup
-	for index := 0; index < workers; index++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-phaseCtx.Done():
-					return
-				case path, ok := <-jobs:
-					if !ok {
-						return
-					}
-					if phaseCtx.Err() != nil {
-						return
-					}
-					rootCtx, rootCancel := context.WithTimeout(phaseCtx, rootTimeout)
-					repo, inspectErr := r.inspectExpected(rootCtx, path)
-					rootTimedOut := errors.Is(rootCtx.Err(), context.DeadlineExceeded) || errors.Is(inspectErr, context.DeadlineExceeded)
-					rootCancel()
-					if rootTimedOut {
-						results <- probeResult{path: path, incomplete: true}
-						continue
-					}
-					if inspectErr == nil {
-						results <- probeResult{path: repo.Path, valid: true}
-						continue
-					}
-					results <- probeResult{}
-				}
-			}
-		}()
-	}
-	wg.Wait()
-	close(results)
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	paths := make([]string, 0, len(snapshot))
-	incomplete := false
+	results := make(chan freshProbeResult, len(snapshot))
+	start := r.probeCursor.Add(1) - 1
+	accepted := 0
 	processed := 0
-	for result := range results {
+	incomplete := false
+	paths := make([]string, 0, len(snapshot))
+	consume := func(result freshProbeResult) {
 		processed++
 		if result.valid {
 			paths = append(paths, result.path)
@@ -252,11 +274,139 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 			incomplete = true
 		}
 	}
-	if errors.Is(phaseCtx.Err(), context.DeadlineExceeded) && processed < len(snapshot) {
+	for offset := uint64(0); offset < uint64(len(snapshot)); {
+		if phaseCtx.Err() != nil {
+			incomplete = true
+			break
+		}
+		index := (start%uint64(len(snapshot)) + offset) % uint64(len(snapshot))
+		if r.startFreshProbe(phaseCtx, snapshot[index], rootTimeout, results) {
+			accepted++
+			offset++
+			continue
+		}
+		// A concurrent caller may own every slot. If this request still has
+		// admitted probes, consume one result before retrying admission; do
+		// not create a goroutine while the gate is full. With no in-flight
+		// probe of our own, returning incomplete is immediate by contract.
+		if processed == accepted {
+			incomplete = true
+			break
+		}
+		select {
+		case result := <-results:
+			consume(result)
+		case <-phaseCtx.Done():
+			incomplete = true
+			goto done
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+
+	// Drain admitted probes while the caller's phase remains alive. There is
+	// deliberately no WaitGroup: a non-cooperative inspector may outlive the
+	// request, but its result delivery is bounded and non-blocking.
+	for processed < accepted {
+		select {
+		case result := <-results:
+			consume(result)
+		case <-phaseCtx.Done():
+			incomplete = true
+			goto done
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+done:
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	if phaseCtx.Err() != nil && processed < accepted {
 		incomplete = true
 	}
 	sort.Strings(paths)
 	return paths, incomplete, nil
+}
+
+func (r *Registry) startFreshProbe(parent context.Context, path string, rootTimeout time.Duration, results chan<- freshProbeResult) bool {
+	if parent.Err() != nil {
+		return false
+	}
+	rootCtx, rootCancel := context.WithTimeout(parent, rootTimeout)
+	r.probeMu.Lock()
+	r.initProbeStateLocked()
+	if r.probeClosing || parent.Err() != nil {
+		r.probeMu.Unlock()
+		rootCancel()
+		return false
+	}
+	select {
+	case r.probeSlots <- struct{}{}:
+	default:
+		r.probeMu.Unlock()
+		rootCancel()
+		return false
+	}
+	id := r.probeNextID
+	for {
+		if _, exists := r.probeCancels[id]; !exists {
+			break
+		}
+		id++
+	}
+	r.probeNextID = id + 1
+	r.probeCancels[id] = rootCancel
+	if r.probeActive == 0 {
+		r.probeIdle = make(chan struct{})
+	}
+	r.probeActive++
+	r.probeMu.Unlock()
+	go func() {
+		repo, inspectErr := r.inspectExpected(rootCtx, path)
+		result := freshProbeResult{}
+		if rootCtx.Err() != nil {
+			result.incomplete = true
+		} else if inspectErr == nil {
+			result.path = repo.Path
+			result.valid = true
+		} else if rootCtx.Err() != nil || errors.Is(inspectErr, context.Canceled) || errors.Is(inspectErr, context.DeadlineExceeded) {
+			result.incomplete = true
+		}
+		// Release is linearized before delivery so a caller that receives this
+		// result can immediately admit the next frozen root without observing
+		// a transiently full gate.
+		r.finishFreshProbe(id)
+		select {
+		case results <- result:
+		default:
+		}
+	}()
+	return true
+}
+
+func (r *Registry) finishFreshProbe(id uint64) {
+	r.probeMu.Lock()
+	cancel, ok := r.probeCancels[id]
+	if !ok {
+		r.probeMu.Unlock()
+		panic("fresh probe released more than once")
+	}
+	delete(r.probeCancels, id)
+	cancel()
+	<-r.probeSlots
+	if r.probeActive <= 0 {
+		r.probeMu.Unlock()
+		panic("fresh probe active count underflow")
+	}
+	r.probeActive--
+	if r.probeActive == 0 {
+		close(r.probeIdle)
+	}
+	r.probeMu.Unlock()
 }
 
 func (r *Registry) Resolve(path string) (string, error) {

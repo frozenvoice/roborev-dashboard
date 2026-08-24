@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,6 +27,64 @@ type slowRegistryInspector struct {
 	active  atomic.Int32
 	maximum atomic.Int32
 	started chan string
+}
+
+type blockingRegistryInspector struct {
+	active      atomic.Int32
+	maximum     atomic.Int32
+	calls       atomic.Int32
+	started     chan string
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+type delayedRegistryInspector struct {
+	delay time.Duration
+	mu    sync.Mutex
+	calls map[string]int
+}
+
+type deadlineSuccessInspector struct{}
+
+func (deadlineSuccessInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	time.Sleep(5 * time.Millisecond)
+	return gitx.Repository{Path: path}, nil
+}
+
+func (s *delayedRegistryInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	time.Sleep(s.delay) // Deliberately ignores context to make admission deterministic.
+	s.mu.Lock()
+	s.calls[path]++
+	s.mu.Unlock()
+	return gitx.Repository{Path: path}, nil
+}
+
+func (s *delayedRegistryInspector) Calls(path string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls[path]
+}
+
+func (s *blockingRegistryInspector) Release() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func (s *blockingRegistryInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	s.calls.Add(1)
+	active := s.active.Add(1)
+	defer s.active.Add(-1)
+	for {
+		maximum := s.maximum.Load()
+		if active <= maximum || s.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	select {
+	case s.started <- path:
+	default:
+	}
+	<-s.release // Deliberately ignores context to model a blocked OS probe.
+	return gitx.Repository{Path: path}, nil
 }
 
 func (s *slowRegistryInspector) Inspect(ctx context.Context, path string) (gitx.Repository, error) {
@@ -270,6 +329,32 @@ func TestRegistryFreshRegisteredPathsBoundsWorkersAndSortsResults(t *testing.T) 
 	}
 }
 
+func TestRegistryFreshRegisteredPathsCursorWrapKeepsEveryRoot(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	for _, path := range []string{"root-a", "root-b", "root-c"} {
+		registry.paths[registryKey(path)] = path
+	}
+	registry.probeCursor.Store(^uint64(0) - 1)
+
+	paths, incomplete, err := registry.freshRegisteredPaths(context.Background(), 20*time.Millisecond, 100*time.Millisecond)
+	if err != nil || incomplete {
+		t.Fatalf("paths=%v incomplete=%v err=%v", paths, incomplete, err)
+	}
+	want := []string{"root-a", "root-b", "root-c"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths=%v, want %v", paths, want)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsDeadlineWinsOverLateSuccessfulInspect(t *testing.T) {
+	registry := NewRegistry(deadlineSuccessInspector{}, "")
+	registry.paths[registryKey("late")] = "late"
+	paths, incomplete, err := registry.freshRegisteredPaths(context.Background(), time.Millisecond, 50*time.Millisecond)
+	if err != nil || !incomplete || len(paths) != 0 {
+		t.Fatalf("paths=%v incomplete=%v err=%v, want incomplete without late success", paths, incomplete, err)
+	}
+}
+
 func TestRegistryFreshRegisteredPathsTimeoutOmitsOnlySlowRoot(t *testing.T) {
 	inspector := &slowRegistryInspector{delays: map[string]time.Duration{
 		"slow": 30 * time.Millisecond,
@@ -312,6 +397,175 @@ func TestRegistryFreshRegisteredPathsParentCancellationJoinsWorkers(t *testing.T
 		}
 	case <-time.After(time.Second):
 		t.Fatal("fresh inspection did not join canceled worker")
+	}
+}
+
+func TestRegistryFreshRegisteredPathsNonCooperativeProbeReturnsBoundedIncomplete(t *testing.T) {
+	inspector := &blockingRegistryInspector{started: make(chan string, 2), release: make(chan struct{})}
+	t.Cleanup(inspector.Release)
+	registry := NewRegistry(inspector, "")
+	registry.paths[registryKey("blocked")] = "blocked"
+
+	done := make(chan struct {
+		paths      []string
+		incomplete bool
+		err        error
+	}, 1)
+	started := time.Now()
+	go func() {
+		paths, incomplete, err := registry.freshRegisteredPaths(context.Background(), time.Millisecond, 20*time.Millisecond)
+		done <- struct {
+			paths      []string
+			incomplete bool
+			err        error
+		}{paths, incomplete, err}
+	}()
+	select {
+	case <-inspector.started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking inspection did not start")
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || !result.incomplete || len(result.paths) != 0 {
+			t.Fatalf("paths=%v incomplete=%v err=%v", result.paths, result.incomplete, result.err)
+		}
+		if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+			t.Fatalf("phase did not return boundedly: %v", elapsed)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("non-cooperative probe blocked the caller past phase timeout")
+	}
+	inspector.Release()
+	deadline := time.After(time.Second)
+	for inspector.active.Load() != 0 {
+		select {
+		case <-deadline:
+			t.Fatal("probe did not release after cleanup")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	paths, incomplete, err := registry.freshRegisteredPaths(context.Background(), 20*time.Millisecond, 100*time.Millisecond)
+	if err != nil || incomplete || !reflect.DeepEqual(paths, []string{"blocked"}) {
+		t.Fatalf("recovered paths=%v incomplete=%v err=%v, want complete blocked root", paths, incomplete, err)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsNonCooperativeParentCancellationReturnsBounded(t *testing.T) {
+	inspector := &blockingRegistryInspector{started: make(chan string, 2), release: make(chan struct{})}
+	t.Cleanup(inspector.Release)
+	registry := NewRegistry(inspector, "")
+	registry.paths[registryKey("blocked")] = "blocked"
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := registry.freshRegisteredPaths(ctx, time.Second, time.Second)
+		done <- err
+	}()
+	select {
+	case <-inspector.started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking inspection did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context canceled", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("parent cancellation did not return boundedly")
+	}
+}
+
+func TestRegistryFreshRegisteredPathsRotatingAdmissionEventuallyCoversRoots(t *testing.T) {
+	inspector := &delayedRegistryInspector{delay: 5 * time.Millisecond, calls: make(map[string]int)}
+	registry := NewRegistry(inspector, "")
+	roots := []string{"root-a", "root-b", "root-c", "root-d", "root-e", "root-f", "root-g", "root-h"}
+	for _, path := range roots {
+		registry.paths[registryKey(path)] = path
+	}
+	waitIdle := func() {
+		deadline := time.Now().Add(time.Second)
+		for {
+			registry.probeMu.Lock()
+			active := registry.probeActive
+			registry.probeMu.Unlock()
+			if active == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("delayed probes did not release")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	first, incomplete, err := registry.freshRegisteredPaths(context.Background(), 50*time.Millisecond, time.Millisecond)
+	if err != nil || !incomplete || len(first) != 0 || inspector.Calls("root-h") != 0 {
+		t.Fatalf("first paths=%v incomplete=%v err=%v calls(final)=%d", first, incomplete, err, inspector.Calls("root-h"))
+	}
+	waitIdle()
+	for retry := 0; retry < 6; retry++ {
+		_, incomplete, err = registry.freshRegisteredPaths(context.Background(), 50*time.Millisecond, time.Millisecond)
+		if err != nil || !incomplete {
+			t.Fatalf("retry %d incomplete=%v err=%v, want phase-limited incomplete", retry, incomplete, err)
+		}
+		waitIdle()
+	}
+	for _, path := range roots {
+		if inspector.Calls(path) == 0 {
+			t.Fatalf("rotating admission never probed %s", path)
+		}
+	}
+	paths, incomplete, err := registry.freshRegisteredPaths(context.Background(), 50*time.Millisecond, 100*time.Millisecond)
+	if err != nil || incomplete || !reflect.DeepEqual(paths, roots) {
+		t.Fatalf("final paths=%v incomplete=%v err=%v, want all roots", paths, incomplete, err)
+	}
+}
+
+func TestRegistryFreshRegisteredPathsGlobalProbeSlotsAndShutdown(t *testing.T) {
+	inspector := &blockingRegistryInspector{started: make(chan string, 8), release: make(chan struct{})}
+	t.Cleanup(inspector.Release)
+	registry := NewRegistry(inspector, "")
+	for _, path := range []string{"a", "b", "c", "d"} {
+		registry.paths[registryKey(path)] = path
+	}
+
+	const requests = 20
+	results := make(chan struct{}, requests)
+	for i := 0; i < requests; i++ {
+		go func() {
+			_, _, _ = registry.freshRegisteredPaths(context.Background(), time.Millisecond, 15*time.Millisecond)
+			results <- struct{}{}
+		}()
+	}
+	for i := 0; i < requests; i++ {
+		select {
+		case <-results:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent fresh request did not return")
+		}
+	}
+	if maximum := inspector.maximum.Load(); maximum > freshRegisteredWorkers {
+		t.Fatalf("global maximum concurrent probes=%d, want <=%d", maximum, freshRegisteredWorkers)
+	}
+	if calls := inspector.calls.Load(); calls > freshRegisteredWorkers {
+		t.Fatalf("slot exhaustion launched %d probes, want <=%d", calls, freshRegisteredWorkers)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := registry.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error=%v", err)
+	}
+	inspector.Release()
+	for inspector.active.Load() != 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if _, incomplete, err := registry.freshRegisteredPaths(context.Background(), 10*time.Millisecond, 20*time.Millisecond); err != nil || !incomplete {
+		t.Fatalf("shutdown admission paths incomplete=%v err=%v, want rejected incomplete", incomplete, err)
 	}
 }
 
