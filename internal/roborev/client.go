@@ -55,6 +55,7 @@ var (
 	ErrMalformedJobOutputStatus   = errors.New("malformed RoboRev job output status response")
 	ErrUnsupportedJobMetadata     = errors.New("RoboRev job metadata contract is unsupported")
 	ErrMalformedJobMetadata       = errors.New("malformed RoboRev job metadata response")
+	ErrJobMetadataNotFound        = errors.New("RoboRev job metadata was not found")
 )
 
 func (c *Client) ReviewPanel(ctx context.Context, request ReviewRequest) (PanelEnqueueResponse, error) {
@@ -255,7 +256,7 @@ func decodeRaw(output string) (json.RawMessage, error) {
 
 func capabilities(version string) Capabilities {
 	v64 := roborevcompat.IsSupportedVersion(version)
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, RepositoryMove: v64, RepositoryMerge: v64, PromptLazyLoad: true, RawLog: true}
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, RepositoryMove: v64, RepositoryMerge: v64, PromptLazyLoad: v64, RawLog: v64}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
@@ -427,12 +428,19 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 	if err := validateJobID(id); err != nil {
 		return JobMetadata{}, err
 	}
+	_, _, generation := c.snapshot()
 	version, err := c.detectVersion(ctx)
 	if err != nil {
-		return JobMetadata{}, err
+		if ctx.Err() != nil {
+			return JobMetadata{}, ctx.Err()
+		}
+		if errors.Is(err, ErrBindingChanged) {
+			return JobMetadata{}, ErrBindingChanged
+		}
+		return JobMetadata{}, fmt.Errorf("%w: version could not be verified", ErrUnsupportedJobMetadata)
 	}
 	if !capabilities(version).JobListAPI {
-		return JobMetadata{}, fmt.Errorf("RoboRev %s does not support metadata-only job lookup", version)
+		return JobMetadata{}, fmt.Errorf("%w: %s", ErrUnsupportedJobMetadata, version)
 	}
 	query := url.Values{}
 	query.Set("id", strconv.FormatInt(id, 10))
@@ -440,16 +448,28 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 	query.Set("omit_prompt", "true")
 	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 64<<20)
 	if err != nil {
-		return JobMetadata{}, err
+		if ctx.Err() != nil {
+			return JobMetadata{}, ctx.Err()
+		}
+		if isUnreachableHealthError(err) {
+			return JobMetadata{}, fmt.Errorf("%w: metadata request failed", ErrDaemonOffline)
+		}
+		return JobMetadata{}, fmt.Errorf("%w: metadata request failed", ErrMalformedJobMetadata)
 	}
 	var response struct {
 		Jobs []JobMetadata `json:"jobs"`
 	}
 	if err := json.Unmarshal(raw, &response); err != nil {
-		return JobMetadata{}, errors.New("invalid job metadata response")
+		return JobMetadata{}, fmt.Errorf("%w: invalid JSON", ErrMalformedJobMetadata)
 	}
 	if len(response.Jobs) != 1 || response.Jobs[0].ID != id {
-		return JobMetadata{}, errors.New("job not found")
+		if len(response.Jobs) == 0 {
+			return JobMetadata{}, ErrJobMetadataNotFound
+		}
+		return JobMetadata{}, fmt.Errorf("%w: job identity mismatch", ErrMalformedJobMetadata)
+	}
+	if !c.generationCurrent(generation) {
+		return JobMetadata{}, ErrBindingChanged
 	}
 	return response.Jobs[0], nil
 }
@@ -820,30 +840,6 @@ func (c *Client) getDaemonJSONBounded(ctx context.Context, path string, limit in
 	} else {
 		return raw, nil
 	}
-}
-
-func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {
-	args, err := PromptArgs(id)
-	if err != nil {
-		return "", err
-	}
-	result, err := c.run(ctx, args, 10*time.Second, 8<<20)
-	if err != nil {
-		return "", err
-	}
-	return result.Stdout, nil
-}
-
-func (c *Client) Log(ctx context.Context, id int64) (string, error) {
-	args, err := LogArgs(id)
-	if err != nil {
-		return "", err
-	}
-	result, err := c.run(ctx, args, 15*time.Second, 8<<20)
-	if err != nil {
-		return "", err
-	}
-	return result.Stdout, nil
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, body any) (json.RawMessage, error) {

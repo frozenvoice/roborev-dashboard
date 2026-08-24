@@ -583,6 +583,34 @@ func parseID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	return id, true
 }
 
+// parseLazyContentID is deliberately stricter than the legacy review route:
+// browser lazy-content paths accept only positive ASCII decimal IDs and no
+// query parameters.  The content endpoint does not need a repository path,
+// daemon URL, or log offset from the browser.
+func parseLazyContentID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
+		return 0, false
+	}
+	value := r.PathValue("id")
+	if value == "" {
+		writeError(w, http.StatusBadRequest, "invalid job ID", "request")
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			writeError(w, http.StatusBadRequest, "invalid job ID", "request")
+			return 0, false
+		}
+	}
+	id, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid job ID", "request")
+		return 0, false
+	}
+	return id, true
+}
+
 func (s *Server) repoForRequest(w http.ResponseWriter, path string) (string, bool) {
 	repo, err := s.Registry.Resolve(path)
 	if err != nil {
@@ -681,34 +709,93 @@ func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
 	writeRawJSON(w, http.StatusOK, raw)
 }
 func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
+	id, ok := parseLazyContentID(w, r)
 	if !ok {
 		return
 	}
-	if !s.authorizeJob(w, r, id) {
+	if !s.authorizeLazyContentJob(w, r, id) {
 		return
 	}
 	value, err := s.RoboRev.Prompt(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "prompt")
+		writeLazyContentError(w, err, "prompt")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"text": value})
 }
 func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
-	id, ok := parseID(w, r)
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
+	id, ok := parseLazyContentID(w, r)
 	if !ok {
 		return
 	}
-	if !s.authorizeJob(w, r, id) {
+	if !s.authorizeLazyContentJob(w, r, id) {
 		return
 	}
 	value, err := s.RoboRev.Log(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "log")
+		writeLazyContentError(w, err, "log")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"text": value})
+}
+
+func writeLazyContentError(w http.ResponseWriter, err error, phase string) {
+	status := http.StatusBadGateway
+	message := "lazy content request failed"
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+		message = "lazy content request timed out"
+	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged):
+		status = http.StatusServiceUnavailable
+		message = "lazy content is temporarily unavailable"
+	case errors.Is(err, roborev.ErrLazyContentNotFound):
+		status = http.StatusNotFound
+		message = "lazy content was not found"
+	case errors.Is(err, roborev.ErrLazyContentMalformed), errors.Is(err, roborev.ErrLazyContentOversized):
+		status = http.StatusBadGateway
+		message = "lazy content response is invalid"
+	}
+	writeError(w, status, message, phase)
+}
+
+func (s *Server) authorizeLazyContentJob(w http.ResponseWriter, r *http.Request, id int64) bool {
+	job, err := s.RoboRev.JobMetadata(r.Context(), id)
+	if err != nil {
+		status := http.StatusBadGateway
+		message := "job metadata is unavailable"
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			status = http.StatusGatewayTimeout
+			message = "job authorization timed out"
+		case errors.Is(err, roborev.ErrUnsupportedJobMetadata), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline):
+			status = http.StatusServiceUnavailable
+			message = "job authorization is temporarily unavailable"
+		case errors.Is(err, roborev.ErrJobMetadataNotFound) || strings.EqualFold(strings.TrimSpace(err.Error()), "job not found"):
+			status = http.StatusNotFound
+			message = "job not found"
+		case errors.Is(err, roborev.ErrMalformedJobMetadata), errors.Is(err, roborev.ErrLazyContentMalformed):
+			status = http.StatusBadGateway
+			message = "job metadata response is invalid"
+		}
+		writeError(w, status, message, "job")
+		return false
+	}
+	if job.ID != id {
+		writeError(w, http.StatusBadGateway, "job metadata response is invalid", "job")
+		return false
+	}
+	if !s.Registry.Contains(job.RepoPath) {
+		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
+		return false
+	}
+	return true
 }
 
 func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {

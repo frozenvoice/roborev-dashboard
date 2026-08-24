@@ -163,7 +163,11 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 	if err != nil {
 		return daemonHealthResponse{}, err
 	}
-	resp, err := c.HTTP.Do(req)
+	client := c.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return daemonHealthResponse{}, err
 	}

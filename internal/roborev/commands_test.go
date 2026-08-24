@@ -70,6 +70,9 @@ func TestCapabilitiesGateDaemonContractsByVersion(t *testing.T) {
 	if capabilities("v0.63.9").ReviewEnqueueAPI {
 		t.Fatal("pre-v0.64 must not use the version-gated daemon enqueue API")
 	}
+	if capabilities("v0.64.0").PromptLazyLoad != true || !capabilities("v0.64.0").RawLog || capabilities("v0.63.9").PromptLazyLoad || capabilities("v0.63.9").RawLog {
+		t.Fatal("lazy prompt/log capabilities must be gated to exact v0.64.0")
+	}
 	if !capabilities("v0.64.0").FrozenRerunAPI {
 		t.Fatal("v0.64 must expose frozen-target rerun")
 	}

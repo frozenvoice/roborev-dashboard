@@ -2,7 +2,7 @@
 
 조사일: 2026-08-20. 실제 Windows RoboRev v0.64.0 command/health response와 공식 `kenn-io/roborev` v0.64.0 source 및 GitHub release metadata를 교차 확인했다. 자동 테스트는 실제 RoboRev를 호출하지 않고 deterministic fixture를 사용하며, Dashboard는 런타임에 version/capability를 다시 감지한다.
 
-상태: **B** = Checkpoint B vertical slice, **P** = planned, **N** = local UI action 부적합/문서화만.
+상태: **B** = Checkpoint B vertical slice, **P** = planned, **N** = unsupported/superseded 또는 local UI action 부적합/문서화만.
 
 | Command / API | Dashboard feature | Transport | 상태 | 자동 테스트 | Notes |
 |---|---|---|---|---|---|
@@ -14,8 +14,8 @@
 | `/api/jobs?id=...&omit_prompt=true` | job owning-repo authorization | version-gated daemon API | B | 예 | upstream v0.64 source와 query-sensitive oversized fixture로 검증 |
 | `list --json` | full CLI job payload | JSON CLI | N | 아니요 | prompt/diff를 포함하므로 polling 금지 |
 | `show --job --json` | review detail/metadata | JSON CLI | B | 예 | `job_id` identity 보존, 선택 시 lazy-load |
-| `show --job --prompt` | prompt detail | CLI text | B | 예정 | 전용 endpoint, lazy-load |
-| `log --raw` | raw log | CLI bytes | B | 예정 | bounded response, lazy-load |
+| `show --job --prompt` | prompt detail | CLI text | N | 아니요 | Dashboard는 `ensureDaemon()` lifecycle side effect 때문에 호출하지 않으며 daemon `/api/review` + strict queued/running fallback으로 superseded |
+| `log --raw` | raw log | CLI bytes | N | 아니요 | Dashboard는 daemon `/api/job/log?job_id=...&offset=0`로 superseded; child process와 partial truncation 없음 |
 | `review` + `/api/enqueue` | repository panel-aware Review HEAD | version-gated daemon API | B | 예 | current effective panel을 재검증하고 full SHA를 pin; CLI에 JSON receipt가 없어 API 사용 |
 | `POST /api/panel-refines` | backend-authoritative panel review/fix loop 시작 | Dashboard process state machine + `/api/enqueue` | B | 예 | fresh pinned HEAD, clean-tree/identity/branch 검증, repository identity lock; browser lifecycle과 독립 |
 | `GET /api/panel-refines`, `GET /api/panel-refines/{id}` | Panel Refine 상태/timeline 재접속 | Dashboard process state machine | B | 예 | serialized active-run polling; process restart resume 없음 |
@@ -130,6 +130,11 @@ Confirm uses the existing shared two-resource repository lease with a peek → r
 | Surface | Upstream v0.64 contract | Dashboard coverage | Status |
 | --- | --- | --- | --- |
 | `insights --json` | LLM-powered stored-prompt enqueue; no completion wait; configured default agent/model/reasoning; all branches use empty branch | selected registered repo only; 7d/30d/90d; all/current; backend preview + explicit confirmation; exact typed argv; strict bounded receipt/skip parser; current status/result polling; read-only Markdown | B |
+
+| `GET /api/review?job_id=...` + queued/running `GET /api/jobs?id=...&limit=1&omit_prompt=true` | lazy stored prompt detail | explicit Prompt tab; exact v0.64 daemon-only transport; bounded typed JSON, identity/status validation, strict 404 fallback, owning-repository authorization and binding/version checks | B |
+| `show --job <id> --prompt` | CLI prompt text | Dashboard intentionally does not invoke it because the command may ensure/start/restart the daemon; superseded by daemon transport | N |
+| `GET /api/job/log?job_id=...&offset=0` | raw NDJSON job log | explicit Log tab; exact v0.64 daemon bytes bounded to 8 MiB, no partial truncation, UTF-8 validation, `X-Job-Status` and `X-Log-Offset` consistency, owning-repository authorization and binding/version checks | B |
+| `log --raw <id>` | CLI raw log bytes | upstream reference only; Dashboard has no child-process lazy log transport | N |
 
 Exact argv transitions from preview (P) to backend launch (B): `insights --repo <canonical-root> --since <window> --json`, or `insights --repo <canonical-root> --branch <fresh-current-branch> --since <window> --json`. No `--wait`, `--agent`, `--model`, `--reasoning`, `--agentic`, or `--yolo` is emitted. Launch is gated by exact v0.64.0 CLI + healthy matching daemon preflight and a cryptographic three-minute single-use token bound to repository/path/scope/branch/binary/version. Post-entry errors, timeout, cancellation, truncation, malformed receipt, and binding drift are unverified because enqueue may already have happened; no automatic retry is performed.
 

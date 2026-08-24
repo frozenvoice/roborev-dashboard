@@ -63,8 +63,15 @@ type fakeService struct {
 	showRaw           json.RawMessage
 	showCalls         int
 	showErr           error
+	promptCalls       int
+	promptValue       string
+	promptErr         error
+	logCalls          int
+	logValue          string
+	logErr            error
 	panelMetadata     map[int64]roborev.JobMetadata
 	metadataID        int64
+	metadataErr       error
 	metadataCalls     int
 	panelMembersCalls int
 }
@@ -95,6 +102,9 @@ func (f *fakeService) TerminalJobMetadata(_ context.Context, id int64) (roborev.
 }
 func (f *fakeService) JobMetadata(_ context.Context, id int64) (roborev.JobMetadata, error) {
 	f.metadataCalls++
+	if f.metadataErr != nil {
+		return roborev.JobMetadata{}, f.metadataErr
+	}
 	if f.panelMetadata != nil {
 		metadata, ok := f.panelMetadata[id]
 		if !ok {
@@ -129,8 +139,26 @@ func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, er
 	}
 	return json.RawMessage(`{"jobs":[]}`), nil
 }
-func (f *fakeService) Prompt(context.Context, int64) (string, error) { return "prompt", nil }
-func (f *fakeService) Log(context.Context, int64) (string, error)    { return "log", nil }
+func (f *fakeService) Prompt(context.Context, int64) (string, error) {
+	f.promptCalls++
+	if f.promptErr != nil {
+		return "", f.promptErr
+	}
+	if f.promptValue != "" {
+		return f.promptValue, nil
+	}
+	return "prompt", nil
+}
+func (f *fakeService) Log(context.Context, int64) (string, error) {
+	f.logCalls++
+	if f.logErr != nil {
+		return "", f.logErr
+	}
+	if f.logValue != "" {
+		return f.logValue, nil
+	}
+	return "log", nil
+}
 func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
 	f.reviewCalls++
 	f.reviewRequest = request
