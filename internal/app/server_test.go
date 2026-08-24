@@ -51,29 +51,32 @@ func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Reposit
 }
 
 type fakeService struct {
-	commentErr        error
-	closeCalls        int
-	repoPath          string
-	cancelCalls       int
-	installationCalls int
-	panelRaw          json.RawMessage
-	reviewRequest     roborev.ReviewRequest
-	reviewReceipt     json.RawMessage
-	reviewCalls       int
-	showRaw           json.RawMessage
-	showCalls         int
-	showErr           error
-	promptCalls       int
-	promptValue       string
-	promptErr         error
-	logCalls          int
-	logValue          string
-	logErr            error
-	panelMetadata     map[int64]roborev.JobMetadata
-	metadataID        int64
-	metadataErr       error
-	metadataCalls     int
-	panelMembersCalls int
+	commentErr            error
+	closeCalls            int
+	repoPath              string
+	cancelCalls           int
+	installationCalls     int
+	panelRaw              json.RawMessage
+	reviewRequest         roborev.ReviewRequest
+	reviewReceipt         json.RawMessage
+	reviewCalls           int
+	showRaw               json.RawMessage
+	showCalls             int
+	showErr               error
+	promptCalls           int
+	promptValue           string
+	promptErr             error
+	logCalls              int
+	logValue              string
+	logErr                error
+	panelMetadata         map[int64]roborev.JobMetadata
+	metadataID            int64
+	metadataErr           error
+	metadataCalls         int
+	authorizedPromptCalls int
+	authorizedLogCalls    int
+	authorizedPaths       []string
+	panelMembersCalls     int
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
@@ -158,6 +161,44 @@ func (f *fakeService) Log(context.Context, int64) (string, error) {
 		return f.logValue, nil
 	}
 	return "log", nil
+}
+
+// AuthorizedPrompt/AuthorizedLog model the production narrow lazy-content
+// contract used by the handlers.  The fake deliberately keeps the ownership
+// check separate from Prompt/Log so tests can prove foreign requests never
+// reach the content counters.
+func (f *fakeService) authorizeLazy(id int64, registeredPaths []string) error {
+	metadata, err := f.JobMetadata(context.Background(), id)
+	if err != nil {
+		return err
+	}
+	if metadata.ID != id {
+		return roborev.ErrLazyContentMalformed
+	}
+	for _, path := range registeredPaths {
+		if gitx.SameRepositoryPath(metadata.RepoPath, path) {
+			return nil
+		}
+	}
+	return roborev.ErrLazyContentForbidden
+}
+
+func (f *fakeService) AuthorizedPrompt(_ context.Context, id int64, registeredPaths []string) (string, error) {
+	f.authorizedPromptCalls++
+	f.authorizedPaths = append([]string(nil), registeredPaths...)
+	if err := f.authorizeLazy(id, registeredPaths); err != nil {
+		return "", err
+	}
+	return f.Prompt(context.Background(), id)
+}
+
+func (f *fakeService) AuthorizedLog(_ context.Context, id int64, registeredPaths []string) (string, error) {
+	f.authorizedLogCalls++
+	f.authorizedPaths = append([]string(nil), registeredPaths...)
+	if err := f.authorizeLazy(id, registeredPaths); err != nil {
+		return "", err
+	}
+	return f.Log(context.Background(), id)
 }
 func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
 	f.reviewCalls++

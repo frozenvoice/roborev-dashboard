@@ -91,10 +91,55 @@ func TestLazyContentHandlersRequireStrictBrowserReadBeforeAuthorization(t *testi
 					t.Fatalf("%s status = %d, want 403: %s", path, recorder.Code, recorder.Body.String())
 				}
 			}
-			if service.metadataCalls != 0 || service.promptCalls != 0 || service.logCalls != 0 {
-				t.Fatalf("strict auth side effects metadata=%d prompt=%d log=%d", service.metadataCalls, service.promptCalls, service.logCalls)
+			if service.metadataCalls != 0 || service.authorizedPromptCalls != 0 || service.authorizedLogCalls != 0 || service.promptCalls != 0 || service.logCalls != 0 {
+				t.Fatalf("strict auth side effects metadata=%d ownerPrompt=%d ownerLog=%d prompt=%d log=%d", service.metadataCalls, service.authorizedPromptCalls, service.authorizedLogCalls, service.promptCalls, service.logCalls)
 			}
 		})
+	}
+}
+
+func TestLazyContentHandlersUseNarrowOwnerAndSortedRegistrySnapshot(t *testing.T) {
+	service := &fakeService{}
+	server := setupServer(t, service)
+	if _, err := server.Registry.Add(context.Background(), `E:\repo-b`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42/prompt", nil)
+	request.Header.Set("Origin", "http://"+request.Host)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if service.authorizedPromptCalls != 1 || service.authorizedLogCalls != 0 {
+		t.Fatalf("narrow calls prompt=%d log=%d", service.authorizedPromptCalls, service.authorizedLogCalls)
+	}
+	want := []string{`E:\repo`, `E:\repo-b`}
+	if len(service.authorizedPaths) != len(want) || service.authorizedPaths[0] != want[0] || service.authorizedPaths[1] != want[1] {
+		t.Fatalf("authorized paths=%v, want sorted snapshot %v", service.authorizedPaths, want)
+	}
+}
+
+func TestLazyContentHandlersRequireNarrowAuthorizationService(t *testing.T) {
+	base := &fakeService{}
+	service := struct{ roborev.Service }{Service: base}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/reviews/42/prompt", nil)
+	request.Header.Set("Origin", "http://"+request.Host)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want 503: %s", recorder.Code, recorder.Body.String())
+	}
+	if base.promptCalls != 0 || base.logCalls != 0 || base.metadataCalls != 0 {
+		t.Fatalf("unsafe service calls prompt=%d log=%d metadata=%d", base.promptCalls, base.logCalls, base.metadataCalls)
 	}
 }
 

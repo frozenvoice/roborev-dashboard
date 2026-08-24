@@ -716,10 +716,12 @@ func (s *Server) showPrompt(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.authorizeLazyContentJob(w, r, id) {
+	lazy, ok := s.RoboRev.(roborev.LazyContentAuthorizationService)
+	if !ok {
+		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "prompt")
 		return
 	}
-	value, err := s.RoboRev.Prompt(r.Context(), id)
+	value, err := lazy.AuthorizedPrompt(r.Context(), id, s.Registry.RegisteredPaths())
 	if err != nil {
 		writeLazyContentError(w, err, "prompt")
 		return
@@ -734,10 +736,12 @@ func (s *Server) showLog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.authorizeLazyContentJob(w, r, id) {
+	lazy, ok := s.RoboRev.(roborev.LazyContentAuthorizationService)
+	if !ok {
+		writeLazyContentError(w, roborev.ErrLazyContentUnsupported, "log")
 		return
 	}
-	value, err := s.RoboRev.Log(r.Context(), id)
+	value, err := lazy.AuthorizedLog(r.Context(), id, s.Registry.RegisteredPaths())
 	if err != nil {
 		writeLazyContentError(w, err, "log")
 		return
@@ -752,50 +756,20 @@ func writeLazyContentError(w http.ResponseWriter, err error, phase string) {
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
 		message = "lazy content request timed out"
-	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged):
+	case errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrUnsupportedJobMetadata):
 		status = http.StatusServiceUnavailable
 		message = "lazy content is temporarily unavailable"
-	case errors.Is(err, roborev.ErrLazyContentNotFound):
+	case errors.Is(err, roborev.ErrLazyContentNotFound), errors.Is(err, roborev.ErrJobMetadataNotFound):
 		status = http.StatusNotFound
 		message = "lazy content was not found"
-	case errors.Is(err, roborev.ErrLazyContentMalformed), errors.Is(err, roborev.ErrLazyContentOversized):
+	case errors.Is(err, roborev.ErrLazyContentForbidden):
+		status = http.StatusForbidden
+		message = "job belongs to an unregistered repository"
+	case errors.Is(err, roborev.ErrLazyContentMalformed), errors.Is(err, roborev.ErrLazyContentOversized), errors.Is(err, roborev.ErrMalformedJobMetadata):
 		status = http.StatusBadGateway
 		message = "lazy content response is invalid"
 	}
 	writeError(w, status, message, phase)
-}
-
-func (s *Server) authorizeLazyContentJob(w http.ResponseWriter, r *http.Request, id int64) bool {
-	job, err := s.RoboRev.JobMetadata(r.Context(), id)
-	if err != nil {
-		status := http.StatusBadGateway
-		message := "job metadata is unavailable"
-		switch {
-		case errors.Is(err, context.DeadlineExceeded):
-			status = http.StatusGatewayTimeout
-			message = "job authorization timed out"
-		case errors.Is(err, roborev.ErrUnsupportedJobMetadata), errors.Is(err, roborev.ErrDaemonOffline), errors.Is(err, roborev.ErrBindingChanged), errors.Is(err, roborev.ErrLazyContentUnsupported), errors.Is(err, roborev.ErrLazyContentOffline):
-			status = http.StatusServiceUnavailable
-			message = "job authorization is temporarily unavailable"
-		case errors.Is(err, roborev.ErrJobMetadataNotFound) || strings.EqualFold(strings.TrimSpace(err.Error()), "job not found"):
-			status = http.StatusNotFound
-			message = "job not found"
-		case errors.Is(err, roborev.ErrMalformedJobMetadata), errors.Is(err, roborev.ErrLazyContentMalformed):
-			status = http.StatusBadGateway
-			message = "job metadata response is invalid"
-		}
-		writeError(w, status, message, "job")
-		return false
-	}
-	if job.ID != id {
-		writeError(w, http.StatusBadGateway, "job metadata response is invalid", "job")
-		return false
-	}
-	if !s.Registry.Contains(job.RepoPath) {
-		writeError(w, http.StatusForbidden, "job belongs to an unregistered repository", "repository")
-		return false
-	}
-	return true
 }
 
 func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {

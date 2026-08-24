@@ -110,6 +110,17 @@ type RepositoryMergeService interface {
 	RepositoryMerge(context.Context, repomerge.Request, repomerge.Preflight) (repomerge.ExecutionResult, error)
 }
 
+// LazyContentAuthorizationService is the narrow, content-safe lazy-read
+// surface used by the HTTP handlers.  It is deliberately optional so the
+// long-lived Service interface remains source-compatible with existing
+// adapters and fakes.  Implementations must authorize the job against the
+// supplied registered repository snapshot before fetching prompt/log bytes,
+// and must keep that authorization and content read on one daemon binding.
+type LazyContentAuthorizationService interface {
+	AuthorizedPrompt(context.Context, int64, []string) (string, error)
+	AuthorizedLog(context.Context, int64, []string) (string, error)
+}
+
 // InsightsService is deliberately optional: the base Service interface is
 // shared by existing review/task consumers and must not acquire a new
 // lifecycle operation. Implementations must preflight again immediately

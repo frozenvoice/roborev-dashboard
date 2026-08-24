@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -161,6 +162,24 @@ func TestRegistryInspectAllOmitsDriftedRoots(t *testing.T) {
 	repos := registry.InspectAll(context.Background())
 	if len(repos) != 1 || repos[0].Path != "valid-root" {
 		t.Fatalf("expected only valid registered root, got %#v", repos)
+	}
+}
+
+func TestRegistryRegisteredPathsReturnsSortedSnapshot(t *testing.T) {
+	registry := NewRegistry(fakeInspector{}, "")
+	for _, path := range []string{`E:\z-repo`, `E:\a-repo`, `E:\m-repo`} {
+		if _, err := registry.Add(context.Background(), path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := registry.RegisteredPaths()
+	want := []string{`E:\a-repo`, `E:\m-repo`, `E:\z-repo`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("registered paths=%v, want %v", got, want)
+	}
+	got[0] = `E:\mutated`
+	if registry.RegisteredPaths()[0] != want[0] {
+		t.Fatal("registered path snapshot aliases registry state")
 	}
 }
 

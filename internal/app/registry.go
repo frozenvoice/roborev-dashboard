@@ -153,6 +153,21 @@ func (r *Registry) Contains(path string) bool {
 	return ok
 }
 
+// RegisteredPaths returns a sorted snapshot of the registry's canonical
+// repository roots.  Callers that cross an external authorization boundary
+// pass this immutable snapshot through the whole operation so registration
+// changes cannot alter the set of ownership witnesses mid-request.
+func (r *Registry) RegisteredPaths() []string {
+	r.mu.RLock()
+	paths := make([]string, 0, len(r.paths))
+	for _, path := range r.paths {
+		paths = append(paths, path)
+	}
+	r.mu.RUnlock()
+	sort.Strings(paths)
+	return paths
+}
+
 func (r *Registry) Resolve(path string) (string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

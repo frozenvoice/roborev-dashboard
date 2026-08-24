@@ -163,6 +163,7 @@ func (c *Client) healthStatus(ctx context.Context) (daemonHealthResponse, error)
 	if err != nil {
 		return daemonHealthResponse{}, err
 	}
+	req.Header.Set("Accept-Encoding", "identity")
 	client := c.HTTP
 	if client == nil {
 		client = http.DefaultClient

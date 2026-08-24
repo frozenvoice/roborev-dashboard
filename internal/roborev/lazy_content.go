@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
@@ -24,10 +25,16 @@ import (
 
 const lazyContentLimit int64 = 8 << 20
 
+// The v0.64 ownership proof only needs the ordered jobs/id/repo_id prefix.
+// Keep this deliberately tiny: the parser stops as soon as repo_id and its
+// delimiter have been validated, before any prompt or later job field.
+const lazyOwnerPrefixLimit = 128
+
 var (
 	ErrLazyContentUnsupported = errors.New("RoboRev lazy content contract is unsupported")
 	ErrLazyContentOffline     = errors.New("RoboRev daemon is offline for lazy content")
 	ErrLazyContentNotFound    = errors.New("RoboRev lazy content was not found")
+	ErrLazyContentForbidden   = errors.New("RoboRev lazy content job belongs to a different repository")
 	ErrLazyContentMalformed   = errors.New("RoboRev lazy content response is malformed")
 	ErrLazyContentOversized   = errors.New("RoboRev lazy content response is oversized")
 )
@@ -104,6 +111,7 @@ func (c *Client) lazyGET(ctx context.Context, binding lazyBinding, path string) 
 	if err != nil {
 		return lazyHTTPResponse{}, fmt.Errorf("%w: request could not be built", ErrLazyContentMalformed)
 	}
+	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -115,6 +123,14 @@ func (c *Client) lazyGET(ctx context.Context, binding lazyBinding, path string) 
 		return lazyHTTPResponse{}, fmt.Errorf("%w: daemon request failed", ErrLazyContentMalformed)
 	}
 	defer resp.Body.Close()
+	if err := requireIdentityEncoding(resp.Header); err != nil {
+		return lazyHTTPResponse{}, err
+	}
+	// Error bodies are never useful to the browser and may contain prompt,
+	// filesystem, or other daemon details.  Do not consume them.
+	if resp.StatusCode != http.StatusOK {
+		return lazyHTTPResponse{status: resp.StatusCode, headers: resp.Header.Clone()}, nil
+	}
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, lazyContentLimit+1))
 	if readErr != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -126,6 +142,17 @@ func (c *Client) lazyGET(ctx context.Context, binding lazyBinding, path string) 
 		return lazyHTTPResponse{}, ErrLazyContentOversized
 	}
 	return lazyHTTPResponse{status: resp.StatusCode, headers: resp.Header.Clone(), body: data}, nil
+}
+
+func requireIdentityEncoding(headers http.Header) error {
+	values := headers.Values("Content-Encoding")
+	if len(values) == 0 {
+		return nil
+	}
+	if len(values) != 1 || !strings.EqualFold(strings.TrimSpace(values[0]), "identity") {
+		return fmt.Errorf("%w: non-identity content encoding", ErrLazyContentMalformed)
+	}
+	return nil
 }
 
 func requireMediaType(headers http.Header, expected string) error {
@@ -237,14 +264,326 @@ func decodeFallbackPrompt(data []byte, id int64) (string, error) {
 	return prompt, nil
 }
 
-func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {
+type lazyOwnerHTTPResponse struct {
+	status  int
+	headers http.Header
+	repoID  int64
+	found   bool
+}
+
+// lazyOwnerGET reads only the bounded identity prefix of a v0.64 jobs list.
+// In particular it does not use json.Decoder or io.ReadAll: queued/running
+// rows can retain their prompt even with omit_prompt=true, so reading the
+// complete response would violate authorization-before-content.
+func (c *Client) lazyOwnerGET(ctx context.Context, binding lazyBinding, path string, expectedID int64) (lazyOwnerHTTPResponse, error) {
+	if !c.lazyBindingCurrent(binding) {
+		return lazyOwnerHTTPResponse{}, ErrBindingChanged
+	}
+	client := c.HTTP
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+path, nil)
+	if err != nil {
+		return lazyOwnerHTTPResponse{}, fmt.Errorf("%w: request could not be built", ErrLazyContentMalformed)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return lazyOwnerHTTPResponse{}, ctxErr
+		}
+		if isUnreachableHealthError(err) {
+			return lazyOwnerHTTPResponse{}, ErrLazyContentOffline
+		}
+		return lazyOwnerHTTPResponse{}, fmt.Errorf("%w: daemon request failed", ErrLazyContentMalformed)
+	}
+	defer resp.Body.Close()
+	if err := requireIdentityEncoding(resp.Header); err != nil {
+		return lazyOwnerHTTPResponse{}, err
+	}
+	// Never read a non-success body during ownership authorization.
+	if resp.StatusCode != http.StatusOK {
+		return lazyOwnerHTTPResponse{status: resp.StatusCode, headers: resp.Header.Clone()}, nil
+	}
+	if err := requireMediaType(resp.Header, "application/json"); err != nil {
+		return lazyOwnerHTTPResponse{}, err
+	}
+	repoID, found, err := parseLazyOwnerPrefix(resp.Body, expectedID)
+	if err != nil {
+		return lazyOwnerHTTPResponse{}, err
+	}
+	return lazyOwnerHTTPResponse{status: resp.StatusCode, headers: resp.Header.Clone(), repoID: repoID, found: found}, nil
+}
+
+type lazyOwnerPrefixReader struct {
+	r     io.Reader
+	read  int
+	limit int
+}
+
+func (r *lazyOwnerPrefixReader) Read(p []byte) (int, error) {
+	if r.read >= r.limit {
+		return 0, ErrLazyContentOversized
+	}
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	if r.limit-r.read < len(p) {
+		p = p[:r.limit-r.read]
+	}
+	n, err := r.r.Read(p)
+	r.read += n
+	return n, err
+}
+
+func readLazyOwnerByte(reader *lazyOwnerPrefixReader) (byte, error) {
+	var one [1]byte
+	n, err := reader.Read(one[:])
+	if n == 1 {
+		return one[0], nil
+	}
+	if err == nil {
+		return 0, io.ErrUnexpectedEOF
+	}
+	return 0, err
+}
+
+func lazyJSONWhitespace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
+}
+
+func readLazyOwnerNonWhitespace(reader *lazyOwnerPrefixReader) (byte, error) {
+	for {
+		value, err := readLazyOwnerByte(reader)
+		if err != nil {
+			return 0, err
+		}
+		if !lazyJSONWhitespace(value) {
+			return value, nil
+		}
+	}
+}
+
+func readLazyOwnerString(reader *lazyOwnerPrefixReader, first byte) (string, error) {
+	if first != '"' {
+		return "", errors.New("expected JSON string")
+	}
+	value := []byte{'"'}
+	escaped := false
+	for {
+		one, err := readLazyOwnerByte(reader)
+		if err != nil {
+			return "", err
+		}
+		value = append(value, one)
+		if escaped {
+			escaped = false
+			continue
+		}
+		if one == '\\' {
+			escaped = true
+			continue
+		}
+		if one == '"' {
+			var result string
+			if err := json.Unmarshal(value, &result); err != nil {
+				return "", err
+			}
+			return result, nil
+		}
+		if one < 0x20 {
+			return "", errors.New("control byte in JSON string")
+		}
+	}
+}
+
+func readLazyOwnerKey(reader *lazyOwnerPrefixReader, want string) error {
+	first, err := readLazyOwnerNonWhitespace(reader)
+	if err != nil {
+		return err
+	}
+	key, err := readLazyOwnerString(reader, first)
+	if err != nil {
+		return err
+	}
+	if key != want {
+		return fmt.Errorf("expected key %q", want)
+	}
+	colon, err := readLazyOwnerNonWhitespace(reader)
+	if err != nil {
+		return err
+	}
+	if colon != ':' {
+		return fmt.Errorf("expected colon after %q", want)
+	}
+	return nil
+}
+
+func readLazyOwnerPositiveInt(reader *lazyOwnerPrefixReader) (int64, byte, error) {
+	first, err := readLazyOwnerNonWhitespace(reader)
+	if err != nil {
+		return 0, 0, err
+	}
+	if first < '1' || first > '9' {
+		return 0, 0, errors.New("expected positive JSON integer")
+	}
+	digits := []byte{first}
+	for {
+		one, err := readLazyOwnerByte(reader)
+		if err != nil {
+			return 0, 0, err
+		}
+		if one >= '0' && one <= '9' {
+			digits = append(digits, one)
+			continue
+		}
+		for lazyJSONWhitespace(one) {
+			one, err = readLazyOwnerByte(reader)
+			if err != nil {
+				return 0, 0, err
+			}
+		}
+		if one != ',' && one != '}' {
+			return 0, 0, errors.New("expected JSON object delimiter")
+		}
+		parsed, parseErr := strconv.ParseInt(string(digits), 10, 64)
+		if parseErr != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != string(digits) {
+			return 0, 0, errors.New("JSON integer is outside positive int64 range")
+		}
+		return parsed, one, nil
+	}
+}
+
+func lazyOwnerPrefixFailure(err error, detail string) error {
+	if errors.Is(err, ErrLazyContentOversized) {
+		return fmt.Errorf("%w: %s", ErrLazyContentOversized, detail)
+	}
+	return fmt.Errorf("%w: %s", ErrLazyContentMalformed, detail)
+}
+
+func parseLazyOwnerPrefix(body io.Reader, expectedID int64) (int64, bool, error) {
+	reader := &lazyOwnerPrefixReader{r: body, limit: lazyOwnerPrefixLimit}
+	first, err := readLazyOwnerNonWhitespace(reader)
+	if err != nil || first != '{' {
+		return 0, false, lazyOwnerPrefixFailure(err, "jobs response must begin with an object")
+	}
+	if err := readLazyOwnerKey(reader, "jobs"); err != nil {
+		return 0, false, lazyOwnerPrefixFailure(err, err.Error())
+	}
+	array, err := readLazyOwnerNonWhitespace(reader)
+	if err != nil || array != '[' {
+		return 0, false, lazyOwnerPrefixFailure(err, "jobs must be an array")
+	}
+	first, err = readLazyOwnerNonWhitespace(reader)
+	if err != nil {
+		return 0, false, lazyOwnerPrefixFailure(err, "jobs array is incomplete")
+	}
+	if first == ']' {
+		return 0, false, nil
+	}
+	if first != '{' {
+		return 0, false, lazyOwnerPrefixFailure(nil, "first job row must be an object")
+	}
+	if err := readLazyOwnerKey(reader, "id"); err != nil {
+		return 0, false, lazyOwnerPrefixFailure(err, err.Error())
+	}
+	jobID, delimiter, err := readLazyOwnerPositiveInt(reader)
+	if err != nil || delimiter != ',' {
+		return 0, false, lazyOwnerPrefixFailure(err, "job id must precede repo_id")
+	}
+	if expectedID > 0 && jobID != expectedID {
+		return 0, false, lazyOwnerPrefixFailure(nil, "target job ID does not match request")
+	}
+	if err := readLazyOwnerKey(reader, "repo_id"); err != nil {
+		return 0, false, lazyOwnerPrefixFailure(err, err.Error())
+	}
+	repoID, delimiter, err := readLazyOwnerPositiveInt(reader)
+	if err != nil || delimiter != ',' {
+		return 0, false, lazyOwnerPrefixFailure(err, "repo_id must be followed by a later job field")
+	}
+	// readLazyOwnerPositiveInt consumes only the delimiter after repo_id.  No
+	// read is performed for the following field, which is where prompt bytes
+	// appear in queued/running rows.
+	return repoID, true, nil
+}
+
+func lazyOwnerQuery(id int64, repo string) string {
+	query := url.Values{}
+	if id > 0 {
+		query.Set("id", strconv.FormatInt(id, 10))
+	}
+	if repo != "" {
+		query.Set("repo", repo)
+	}
+	query.Set("limit", "1")
+	query.Set("omit_prompt", "true")
+	return "/api/jobs?" + query.Encode()
+}
+
+func (c *Client) authorizeLazyContent(ctx context.Context, binding lazyBinding, id int64, registeredPaths []string) error {
+	target, err := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(id, ""), id)
+	if err != nil {
+		return err
+	}
+	if target.status == http.StatusNotFound || (target.status == http.StatusOK && !target.found) {
+		return ErrLazyContentNotFound
+	}
+	if target.status != http.StatusOK {
+		return lazyStatusError(target.status)
+	}
+	if !target.found || target.repoID <= 0 {
+		return fmt.Errorf("%w: target repository identity is missing", ErrLazyContentMalformed)
+	}
+	if !c.lazyBindingCurrent(binding) {
+		return ErrBindingChanged
+	}
+	for _, path := range registeredPaths {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("%w: registered repository path is empty", ErrLazyContentMalformed)
+		}
+		witness, witnessErr := c.lazyOwnerGET(ctx, binding, lazyOwnerQuery(0, path), 0)
+		if witnessErr != nil {
+			return witnessErr
+		}
+		if witness.status == http.StatusNotFound {
+			continue
+		}
+		if witness.status != http.StatusOK {
+			return lazyStatusError(witness.status)
+		}
+		if witness.found && witness.repoID == target.repoID {
+			if !c.lazyBindingCurrent(binding) {
+				return ErrBindingChanged
+			}
+			return nil
+		}
+	}
+	if !c.lazyBindingCurrent(binding) {
+		return ErrBindingChanged
+	}
+	return ErrLazyContentForbidden
+}
+
+const lazyContentOperationTimeout = 15 * time.Second
+
+func (c *Client) AuthorizedPrompt(ctx context.Context, id int64, registeredPaths []string) (string, error) {
 	if err := validateJobID(id); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, lazyContentOperationTimeout)
+	defer cancel()
 	binding, err := c.lazyPreflight(ctx)
 	if err != nil {
 		return "", err
 	}
+	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+		return "", err
+	}
+	return c.promptWithBinding(ctx, binding, id)
+}
+
+func (c *Client) promptWithBinding(ctx context.Context, binding lazyBinding, id int64) (string, error) {
 	query := url.Values{}
 	query.Set("job_id", strconv.FormatInt(id, 10))
 	response, err := c.lazyGET(ctx, binding, "/api/review?"+query.Encode())
@@ -288,6 +627,17 @@ func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {
 	return value, nil
 }
 
+func (c *Client) Prompt(ctx context.Context, id int64) (string, error) {
+	if err := validateJobID(id); err != nil {
+		return "", err
+	}
+	binding, err := c.lazyPreflight(ctx)
+	if err != nil {
+		return "", err
+	}
+	return c.promptWithBinding(ctx, binding, id)
+}
+
 var knownLazyJobStatuses = map[string]struct{}{
 	"queued": {}, "running": {}, "done": {}, "failed": {}, "canceled": {}, "applied": {}, "rebased": {}, "skipped": {},
 }
@@ -323,6 +673,26 @@ func (c *Client) Log(ctx context.Context, id int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return c.logWithBinding(ctx, binding, id)
+}
+
+func (c *Client) AuthorizedLog(ctx context.Context, id int64, registeredPaths []string) (string, error) {
+	if err := validateJobID(id); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, lazyContentOperationTimeout)
+	defer cancel()
+	binding, err := c.lazyPreflight(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := c.authorizeLazyContent(ctx, binding, id, registeredPaths); err != nil {
+		return "", err
+	}
+	return c.logWithBinding(ctx, binding, id)
+}
+
+func (c *Client) logWithBinding(ctx context.Context, binding lazyBinding, id int64) (string, error) {
 	query := url.Values{}
 	query.Set("job_id", strconv.FormatInt(id, 10))
 	query.Set("offset", "0")
