@@ -139,22 +139,6 @@ type RuntimeDiagnosticsService interface {
 	RuntimeDiagnostics(context.Context) (RuntimeDiagnostics, error)
 }
 
-// ReviewMetadataExportService is deliberately optional so the long-lived
-// Service interface remains source-compatible with existing adapters and
-// fakes. The method accepts only the freshly inspected canonical Git root;
-// browser repository identities and display names never cross this boundary.
-type ReviewMetadataExportService interface {
-	ReviewMetadataExport(context.Context, string) (ReviewMetadataExportResult, error)
-}
-
-// ReviewMetadataExportResult contains the already contract-validated
-// upstream JSON document. Raw is returned verbatim so the download does not
-// reserialize or otherwise alter RoboRev's export representation.
-type ReviewMetadataExportResult struct {
-	Raw       json.RawMessage
-	Truncated bool
-}
-
 type RuntimeDiagnostics struct {
 	Daemon  RuntimeDiagnosticsDaemon  `json:"daemon"`
 	Workers RuntimeDiagnosticsWorkers `json:"workers"`

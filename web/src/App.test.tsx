@@ -77,6 +77,33 @@ class FakeEventSource {
 afterEach(() => { cleanup(); FakeEventSource.instances = []; vi.useRealTimers(); vi.restoreAllMocks(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
 
 describe('App review workflow', () => {
+  it('shows the blocked export only on Reviews and never requests a download', async () => {
+    let exportCalls = 0
+    vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/bootstrap') return response(bootstrap)
+      if (path.startsWith('/api/reviews?')) return response([])
+      if (path.startsWith('/api/exports/reviews')) {
+        exportCalls++
+        return response({ phase: 'review-export-repository-isolation-blocked' }, 501)
+      }
+      return response({ success: true })
+    }))
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: 'Export reviews' })).toBeDisabled()
+    expect(screen.getByText('RoboRev v0.64.0 cannot safely provide repository-scoped review export.')).toBeInTheDocument()
+    expect(exportCalls).toBe(0)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Export reviews' })).not.toBeInTheDocument())
+    expect(exportCalls).toBe(0)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Reviews' }))
+    expect(await screen.findByRole('button', { name: 'Export reviews' })).toBeDisabled()
+    expect(exportCalls).toBe(0)
+  })
+
   it('opens the Tasks workspace from the sidebar without Soon or roadmap placeholder', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
