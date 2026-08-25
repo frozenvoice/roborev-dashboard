@@ -52,6 +52,14 @@ Daemon Start/Stop/Restart는 typed `daemon start|stop|restart` argv만 사용하
 
 전역 operation gate의 runtime-control lease는 setup, Panel Refine, ordinary mutation과 다른 runtime control 모두와 fail-fast 409로 충돌한다. setup도 runtime control을, mutation/refine도 active runtime control을 거부한다. Queue Pause/Resume은 짧은 runtime-control lease를, daemon lifecycle은 terminal success/failure/cancel까지 유지되는 lease를 사용한다. 따라서 active Panel Refine 중 queue pause나 daemon restart가 workflow를 중간에 stall시키지 않는다.
 
+### Runtime Diagnostics v1
+
+Runtime Diagnostics는 global daemon 상태를 읽는 strict browser-authorized queryless `GET /api/runtime/diagnostics`다. `repositoryIdentity`를 받지 않으며 repository registry, Git identity, operation gate와 무관하다. authorization과 empty-query 검증(`RawQuery`가 있으면 400)은 service/daemon read보다 먼저 수행한다. endpoint handler가 exact supported CLI와 daemon version이 모두 v0.64.0으로 일치하는지 확인하는 동작 gate를 적용하며, 별도의 bootstrap capability flag를 만들지 않는다. daemon이 already-running일 때만 기존 binding을 통해 `/api/health`를 먼저, `/api/status`를 다음으로 한 번씩 읽는다. offline에서는 daemon을 시작·재시작하지 않고 typed unavailable을 반환한다.
+
+두 daemon response는 각각 256 KiB 상한의 `application/json` UTF-8 body로 bounded read하고, exactly one JSON value와 strict typed parser를 적용한다. 기존 client를 shallow-copy해 redirect를 비활성화하며, non-200 response는 body를 읽지 않고 거부한다. required fields, known nonnegative counters와 worker의 의미상 타당성(예: active가 max를 초과하지 않음)을 검증하며 missing, negative, nonsensical, unknown 또는 trailing value는 fail closed한다. 유효한 `healthy:false` health response는 transport failure가 아니므로 정상적인 degraded diagnostics DTO로 반환하고, malformed/oversized/contract-invalid health는 거부한다. Browser DTO는 Dashboard-owned daemon version/running/uptime, worker active/max, queue paused/processing/queued/running, completed/failed/skipped counters와 health/component state 및 제공되는 recent error count만 포함한다. upstream status/health raw JSON, machine/network identity, filesystem paths, free-form messages와 recent-error payload는 전달하지 않는다.
+
+이 GET은 read-only이며 operation gate, lifecycle manager, queue control, repository lease, background polling을 획득하거나 시작하지 않는다. 기존 `/api/runtime`는 version/health TTL polling과 runtime-control lifecycle의 별도 surface로 유지하며 Diagnostics read와 결합하지 않는다. Frontend는 최초 mount에서 요청하지 않고 사용자가 Diagnostics를 명시적으로 처음 열 때만 한 번 요청한다. collapse/reopen은 성공 state를 cache하고, Refresh/Retry만 각각 정확히 하나의 fresh request를 시작한다. 각 request는 `AbortController`와 generation/stale guard로 unmount, superseded refresh와 late response를 차단한다. locale 전환은 현재 DTO와 collapsed/open/error state를 보존하며 fetch를 시작하지 않는다.
+
 ### transport
 
 stable JSON CLI를 우선한다. v0.64.0의 `review` 명령에는 JSON launch receipt가 없으므로 새 review는 감지된 daemon endpoint의 public `/api/enqueue` 계약을 version capability로 캡슐화한다. Dashboard가 요청 시점에 Git으로 `HEAD`를 full SHA로 고정해 daemon에 전송하고, enqueue receipt와 동일한 fresh repository metadata를 browser에 반환하므로 실제 target이 audit 가능하다. UI는 실행되지 않는 CLI command preview를 만들지 않는다.

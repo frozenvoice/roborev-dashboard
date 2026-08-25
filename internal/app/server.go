@@ -217,6 +217,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/bootstrap", s.bootstrap)
 	s.mux.HandleFunc("GET /api/runtime", s.runtime)
+	s.mux.HandleFunc("GET /api/runtime/diagnostics", s.runtimeDiagnostics)
 	s.mux.HandleFunc("GET /api/agents", s.agentStatuses)
 	s.mux.HandleFunc("GET /api/runtime-control", s.runtimeControlStatus)
 	s.mux.HandleFunc("GET /api/setup/roborev", s.setupStatus)

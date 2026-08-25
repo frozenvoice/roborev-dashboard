@@ -8,6 +8,21 @@ function declaration(selector: string): string {
   return stylesheet.match(new RegExp(`\\.${escaped}[^\\{]*\\{[^}]*\\}`))?.[0] ?? ''
 }
 
+function cssHexValue(selectorPattern: string, property: string): string {
+  return stylesheet.match(new RegExp(`${selectorPattern}\\{[^}]*${property}:(#[0-9a-f]{6})`, 'i'))?.[1] ?? ''
+}
+
+function relativeLuminance(hex: string): number {
+  const channels = [0, 2, 4].map(offset => parseInt(hex.slice(offset + 1, offset + 3), 16) / 255).map(channel => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const foregroundLuminance = relativeLuminance(foreground)
+  const backgroundLuminance = relativeLuminance(background)
+  return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+}
+
 describe('setup theme stylesheet contract', () => {
   it('uses the semantic panel token for large setup surfaces', () => {
     for (const selector of ['setup-runtime', 'configured-agents', 'setup-facts', 'setup-safety']) {
@@ -107,5 +122,24 @@ describe('setup theme stylesheet contract', () => {
     expect(stylesheet).toContain('.merge-dialog{padding:14px}')
     expect(stylesheet).toContain('.merge-facts,.merge-preview-facts{grid-template-columns:1fr}')
     expect(stylesheet).not.toContain('.merge-dialog .move-')
+  })
+
+  it('keeps runtime diagnostics scan-friendly and responsive', () => {
+    expect(stylesheet).toContain('.runtime-diagnostics{margin-top:22px;background:var(--panel)')
+    expect(stylesheet).toContain('.runtime-diagnostics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))')
+    expect(stylesheet).toContain('.runtime-diagnostics-row{display:flex;align-items:baseline')
+    expect(stylesheet).toContain('@media(max-width:760px){.runtime-diagnostics{padding:14px}')
+  })
+
+  it('keeps diagnostics pass and failure pills WCAG AA against incumbent light backgrounds', () => {
+    const passForeground = cssHexValue('\\.runtime-diagnostics \\.status-pass', 'color')
+    const passBackground = cssHexValue('\\.status-pass,\\.status-passed', 'background')
+    const failedForeground = cssHexValue('\\.runtime-diagnostics \\.status-failed', 'color')
+    const failedBackground = cssHexValue('\\.status-failed,\\.status-error', 'background')
+    expect(passForeground).toBe('#086047')
+    expect(failedForeground).toBe('#a51f34')
+    expect(contrastRatio(passForeground, passBackground)).toBeGreaterThanOrEqual(4.5)
+    expect(contrastRatio(failedForeground, failedBackground)).toBeGreaterThanOrEqual(4.5)
+    expect(stylesheet).not.toContain('.runtime-diagnostics .status-queued{color:')
   })
 })

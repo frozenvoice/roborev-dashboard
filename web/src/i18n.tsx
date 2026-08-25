@@ -533,6 +533,38 @@ export const en = {
   'setup.runtimeDescription': 'Typed controls reflect the daemon source of truth. Actions are serialized while an operation is active.',
   'setup.runtimeUnavailable': 'Runtime controls unavailable',
   'setup.runtimeRefresh': 'Refresh to retrieve the typed daemon and queue state.',
+  'diagnostics.title': 'Runtime Diagnostics',
+  'diagnostics.description': 'Read-only daemon, worker, queue, job, and health signals.',
+  'diagnostics.open': 'Diagnostics',
+  'diagnostics.collapse': 'Hide diagnostics',
+  'diagnostics.refresh': 'Refresh diagnostics',
+  'diagnostics.loading': 'Loading runtime diagnostics…',
+  'diagnostics.unavailable': 'Unavailable / Offline',
+  'diagnostics.unavailableBody': 'Runtime diagnostics are not available right now.',
+  'diagnostics.retry': 'Retry diagnostics',
+  'diagnostics.daemon': 'Daemon',
+  'diagnostics.workers': 'Workers',
+  'diagnostics.queue': 'Queue',
+  'diagnostics.jobs': 'Jobs',
+  'diagnostics.health': 'Health',
+  'diagnostics.running': 'Running',
+  'diagnostics.offline': 'Offline',
+  'diagnostics.version': 'Version',
+  'diagnostics.uptime': 'Uptime',
+  'diagnostics.activeMax': 'Active / max',
+  'diagnostics.paused': 'Paused',
+  'diagnostics.processing': 'Processing',
+  'diagnostics.queued': 'Queued',
+  'diagnostics.runningJobs': 'Running jobs',
+  'diagnostics.completed': 'Completed',
+  'diagnostics.failed': 'Failed',
+  'diagnostics.skipped': 'Skipped',
+  'diagnostics.healthy': 'Healthy',
+  'diagnostics.degraded': 'Degraded',
+  'diagnostics.errors24h': 'Errors (24h)',
+  'diagnostics.components': 'Components',
+  'diagnostics.componentHealthy': 'Healthy',
+  'diagnostics.componentUnhealthy': 'Unhealthy',
   'setup.reviewQueue': 'Review queue',
   'setup.queuePaused': 'Queue Paused',
   'setup.queueProcessing': 'Queue Processing',
@@ -1000,6 +1032,38 @@ ko['repo.moveEligibilitySourceExists'] = '이 추적 경로가 디스크에 아�
 ko['repo.moveEligibilityRegistered'] = '이 저장소는 이미 Dashboard에 등록되어 있습니다.'
 ko['repo.moveEligibilityFailed'] = '경로 복구 가능 여부를 확인하지 못했습니다.'
 ko['repo.moveEligibilityMalformed'] = 'Dashboard가 경로 복구 가능 여부 응답을 검증하지 못했습니다.'
+ko['diagnostics.title'] = '런타임 진단'
+ko['diagnostics.description'] = '데몬, 워커, 대기열, 작업 및 상태를 읽기 전용으로 확인합니다.'
+ko['diagnostics.open'] = '진단'
+ko['diagnostics.collapse'] = '진단 숨기기'
+ko['diagnostics.refresh'] = '진단 새로고침'
+ko['diagnostics.loading'] = '런타임 진단 불러오는 중…'
+ko['diagnostics.unavailable'] = '사용 불가 / 오프라인'
+ko['diagnostics.unavailableBody'] = '현재 런타임 진단을 사용할 수 없습니다.'
+ko['diagnostics.retry'] = '진단 다시 시도'
+ko['diagnostics.daemon'] = '데몬'
+ko['diagnostics.workers'] = '워커'
+ko['diagnostics.queue'] = '대기열'
+ko['diagnostics.jobs'] = '작업'
+ko['diagnostics.health'] = '상태'
+ko['diagnostics.running'] = '실행 중'
+ko['diagnostics.offline'] = '오프라인'
+ko['diagnostics.version'] = '버전'
+ko['diagnostics.uptime'] = '가동 시간'
+ko['diagnostics.activeMax'] = '활성 / 최대'
+ko['diagnostics.paused'] = '일시중지'
+ko['diagnostics.processing'] = '처리 중'
+ko['diagnostics.queued'] = '대기 중'
+ko['diagnostics.runningJobs'] = '실행 중인 작업'
+ko['diagnostics.completed'] = '완료'
+ko['diagnostics.failed'] = '실패'
+ko['diagnostics.skipped'] = '건너뜀'
+ko['diagnostics.healthy'] = '정상'
+ko['diagnostics.degraded'] = '저하됨'
+ko['diagnostics.errors24h'] = '오류 (24시간)'
+ko['diagnostics.components'] = '구성 요소'
+ko['diagnostics.componentHealthy'] = '정상'
+ko['diagnostics.componentUnhealthy'] = '비정상'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

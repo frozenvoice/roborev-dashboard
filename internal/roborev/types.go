@@ -131,6 +131,56 @@ type InsightsService interface {
 	Insights(context.Context, insights.Request, insights.Preflight) (insights.LaunchResult, error)
 }
 
+// RuntimeDiagnosticsService is deliberately optional so the long-lived
+// Service interface remains source-compatible with existing adapters and
+// fakes. It exposes only the Dashboard-owned, sanitized diagnostics DTO; the
+// upstream status and health payloads never cross this boundary.
+type RuntimeDiagnosticsService interface {
+	RuntimeDiagnostics(context.Context) (RuntimeDiagnostics, error)
+}
+
+type RuntimeDiagnostics struct {
+	Daemon  RuntimeDiagnosticsDaemon  `json:"daemon"`
+	Workers RuntimeDiagnosticsWorkers `json:"workers"`
+	Queue   RuntimeDiagnosticsQueue   `json:"queue"`
+	Jobs    RuntimeDiagnosticsJobs    `json:"jobs"`
+	Health  RuntimeDiagnosticsHealth  `json:"health"`
+}
+
+type RuntimeDiagnosticsDaemon struct {
+	Running bool   `json:"running"`
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+}
+
+type RuntimeDiagnosticsWorkers struct {
+	Active int64 `json:"active"`
+	Max    int64 `json:"max"`
+}
+
+type RuntimeDiagnosticsQueue struct {
+	Paused  bool  `json:"paused"`
+	Queued  int64 `json:"queued"`
+	Running int64 `json:"running"`
+}
+
+type RuntimeDiagnosticsJobs struct {
+	Completed int64 `json:"completed"`
+	Failed    int64 `json:"failed"`
+	Skipped   int64 `json:"skipped"`
+}
+
+type RuntimeDiagnosticsHealth struct {
+	Healthy       bool                          `json:"healthy"`
+	ErrorCount24h int64                         `json:"errorCount24h"`
+	Components    []RuntimeDiagnosticsComponent `json:"components"`
+}
+
+type RuntimeDiagnosticsComponent struct {
+	Name    string `json:"name"`
+	Healthy bool   `json:"healthy"`
+}
+
 type JobMetadata struct {
 	ID           int64  `json:"id"`
 	RepoPath     string `json:"repo_path"`

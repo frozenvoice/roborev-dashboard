@@ -12,6 +12,38 @@ export type Repository = {
   hasConfig: boolean
 }
 
+export type RuntimeDiagnosticsComponent = {
+  name: string
+  healthy: boolean
+}
+
+export type RuntimeDiagnostics = {
+  daemon: {
+    running: boolean
+    version: string
+    uptime: string
+  }
+  workers: {
+    active: number
+    max: number
+  }
+  queue: {
+    paused: boolean
+    queued: number
+    running: number
+  }
+  jobs: {
+    completed: number
+    failed: number
+    skipped: number
+  }
+  health: {
+    healthy: boolean
+    errorCount24h: number
+    components: RuntimeDiagnosticsComponent[]
+  }
+}
+
 export type Installation = {
   installed: boolean
   binary?: string
@@ -291,6 +323,49 @@ export function validateRepositoryRenameName(input: string, currentName: string)
 
 function nonNegativeSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function exactObject(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) return null
+  const object = value as Record<string, unknown>
+  return hasExactKeys(object, keys) ? object : null
+}
+
+/** Normalize the Dashboard-owned, read-only runtime diagnostics DTO. */
+export function normalizeRuntimeDiagnostics(value: unknown): RuntimeDiagnostics | null {
+  const root = exactObject(value, ['daemon', 'workers', 'queue', 'jobs', 'health'])
+  if (!root) return null
+
+  const daemon = exactObject(root.daemon, ['running', 'version', 'uptime'])
+  const workers = exactObject(root.workers, ['active', 'max'])
+  const queue = exactObject(root.queue, ['paused', 'queued', 'running'])
+  const jobs = exactObject(root.jobs, ['completed', 'failed', 'skipped'])
+  const health = exactObject(root.health, ['healthy', 'errorCount24h', 'components'])
+  if (!daemon || !workers || !queue || !jobs || !health) return null
+  if (typeof daemon.running !== 'boolean' || typeof daemon.version !== 'string' || !daemon.version.trim() || typeof daemon.uptime !== 'string' || !daemon.uptime.trim()) return null
+  if (!nonNegativeSafeInteger(workers.active) || !nonNegativeSafeInteger(workers.max) || workers.max === 0 || workers.active > workers.max) return null
+  if (typeof queue.paused !== 'boolean' || !nonNegativeSafeInteger(queue.queued) || !nonNegativeSafeInteger(queue.running)) return null
+  if (!nonNegativeSafeInteger(jobs.completed) || !nonNegativeSafeInteger(jobs.failed) || !nonNegativeSafeInteger(jobs.skipped)) return null
+  if (typeof health.healthy !== 'boolean' || !nonNegativeSafeInteger(health.errorCount24h) || !Array.isArray(health.components)) return null
+
+  const components: RuntimeDiagnosticsComponent[] = []
+  const names = new Set<string>()
+  for (const value of health.components) {
+    const component = exactObject(value, ['name', 'healthy'])
+    if (!component || typeof component.name !== 'string' || !component.name.trim() || typeof component.healthy !== 'boolean' || names.has(component.name)) return null
+    names.add(component.name)
+    components.push({ name: component.name, healthy: component.healthy })
+  }
+  if (health.healthy && components.some(component => !component.healthy)) return null
+  return {
+    daemon: { running: daemon.running, version: daemon.version, uptime: daemon.uptime },
+    workers: { active: workers.active, max: workers.max },
+    queue: { paused: queue.paused, queued: queue.queued, running: queue.running },
+    jobs: { completed: jobs.completed, failed: jobs.failed, skipped: jobs.skipped },
+    health: { healthy: health.healthy, errorCount24h: health.errorCount24h, components },
+  }
 }
 
 /**

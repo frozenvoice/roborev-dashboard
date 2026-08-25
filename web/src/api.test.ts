@@ -1,7 +1,39 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, validateRepositoryRenameName } from './api'
+import { normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, validateRepositoryRenameName } from './api'
 
 const row = { name: 'repo', path: 'E:\\repo', jobCount: 2, dashboardRegistered: true }
+
+const diagnostics = {
+  daemon: { running: true, version: 'v0.64.0', uptime: '2h' },
+  workers: { active: 1, max: 4 },
+  queue: { paused: false, queued: 2, running: 1 },
+  jobs: { completed: 100, failed: 3, skipped: 4 },
+  health: { healthy: true, errorCount24h: 0, components: [{ name: 'database', healthy: true }] },
+}
+
+describe('runtime diagnostics API normalization', () => {
+  it('accepts the exact Dashboard DTO', () => {
+    expect(normalizeRuntimeDiagnostics(diagnostics)).toEqual(diagnostics)
+  })
+
+  it('rejects unknown fields, unsafe counters, invalid worker bounds, and duplicate components', () => {
+    const invalid: unknown[] = [
+      { ...diagnostics, extra: true },
+      { ...diagnostics, daemon: { ...diagnostics.daemon, version: ' ' } },
+      { ...diagnostics, workers: { active: 5, max: 4 } },
+      { ...diagnostics, workers: { active: 0, max: 0 } },
+      { ...diagnostics, jobs: { ...diagnostics.jobs, failed: -1 } },
+      { ...diagnostics, health: { ...diagnostics.health, components: [{ name: 'database', healthy: true, extra: false }] } },
+      { ...diagnostics, health: { ...diagnostics.health, components: [{ name: 'database', healthy: true }, { name: 'database', healthy: false }] } },
+      { ...diagnostics, health: { ...diagnostics.health, components: [{ name: 'database', healthy: false }] } },
+      { ...diagnostics, health: { ...diagnostics.health, errorCount24h: Number.MAX_SAFE_INTEGER + 1 } },
+    ]
+    for (const value of invalid) expect(normalizeRuntimeDiagnostics(value)).toBeNull()
+    const inherited = Object.create({ extra: true }) as Record<string, unknown>
+    Object.assign(inherited, diagnostics)
+    expect(normalizeRuntimeDiagnostics(inherited)).toBeNull()
+  })
+})
 
 describe('repository inventory API normalization', () => {
   it('accepts the typed empty and populated DTOs while preserving order and duplicate names', () => {

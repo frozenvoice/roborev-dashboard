@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Check, Download, ExternalLink, Info, LockKeyhole, Pause, Play, RefreshCw, RotateCcw, Server, ShieldAlert, Square, X } from 'lucide-react'
 import { BACKEND_COMMAND_SENTINEL, type AgentsResponse, type AgentHealth, type ConfiguredReviewAgent, type DaemonCommandPreview, type RuntimeControlState, type SetupState } from './api'
 import { LanguageSelector, useI18n, type Locale, type MessageKey } from './i18n'
+import { RuntimeDiagnostics } from './RuntimeDiagnostics'
 
 export type SetupAction = () => Promise<void>
 export type AgentCheckAction = (agent: string) => Promise<void>
@@ -337,6 +338,7 @@ export function Setup({ state, busy = false, onInstall, onRetry, onStartDaemon, 
     {!state && <section className="setup-card"><Server /><div><h3>{t('setup.setupUnavailable')}</h3><p>{t('setup.setupResponseInvalid')}</p></div></section>}
     {state && <article className="setup-card setup-detail-card"><Server /><div><h3>RoboRev {state.version || t('setup.versionNotDetected')}</h3><code>{state.binaryPath || t('setup.pathUnavailable')}</code><p>{healthyReady ? t('setup.daemonRunningDetail') : state.daemonRunning ? t('setup.daemonNeedsAttentionDetail') : state.installed ? t('setup.daemonStoppedDetail') : t('setup.daemonNotInstalledDetail')}</p></div><span className={`status ${healthyReady ? 'status-pass' : state.daemonRunning ? 'status-failed' : state.installed ? 'status-queued' : 'status-failed'}`}><span className="status-dot" />{healthyReady ? t('status.ready') : state.daemonRunning ? t('status.error') : state.installed ? t('status.stopped') : t('status.setupRequired')}</span></article>}
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
+    <RuntimeDiagnostics />
     <ConfiguredReviewAgents agents={agents} loading={agentsLoading} error={agentsError} busy={busy || actionBusy} onRefresh={onRefreshAgents} onCheck={onCheckAgent} />
     {state && <section className="setup-facts" aria-label={t('setup.verifiedInstallation')}><h2>{t('setup.verifiedInstallation')}</h2><dl>
       <div><dt>{t('setup.requestedVersion')}</dt><dd>{recommended}</dd></div>
