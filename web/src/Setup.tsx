@@ -3,6 +3,7 @@ import { Check, Download, ExternalLink, Info, LockKeyhole, Pause, Play, RefreshC
 import { BACKEND_COMMAND_SENTINEL, type AgentsResponse, type AgentHealth, type ConfiguredReviewAgent, type DaemonCommandPreview, type RuntimeControlState, type SetupState } from './api'
 import { LanguageSelector, useI18n, type Locale, type MessageKey } from './i18n'
 import { RuntimeDiagnostics } from './RuntimeDiagnostics'
+import { GitHookStatus } from './GitHookStatus'
 
 export type SetupAction = () => Promise<void>
 export type AgentCheckAction = (agent: string) => Promise<void>
@@ -124,6 +125,7 @@ export function SetupBanner({ state, busy = false, onInstall, onRetry, onStartDa
 
 type SetupProps = {
   state: SetupState | null | undefined
+  repositoryIdentity?: string
   busy?: boolean
   onInstall?: SetupAction
   onRetry?: SetupAction
@@ -310,7 +312,7 @@ export function InstallConfirmation({ state, busy = false, onCancel, onInstall }
   return <div className="prompt-overlay" role="presentation"><section className="prompt-dialog setup-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-confirm-title"><header><div><span className="eyebrow">{t('setup.explicitConfirmation')}</span><h2 id="setup-confirm-title">{t('setup.installConfirm')}</h2><p>{t('setup.installOnlyStep')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('setup.closeInstall')} onClick={onCancel}><X /></button></div></header><div className="setup-confirm-facts"><p><strong>{t('setup.repository')}</strong><a href={SOURCE_REPOSITORY} target="_blank" rel="noreferrer">github.com/kenn-io/roborev</a></p><p><strong>{t('setup.releaseSource')}</strong><a href={sourceURL} target="_blank" rel="noreferrer">{sourceLabel(state, t)}</a></p><p><strong>{t('setup.version')}</strong><code>{state.recommendedVersion}</code></p><p><strong>{t('setup.assetBytes')}</strong><code>{exactBytes}</code></p><p><strong>{t('setup.target')}</strong><code>{state.targetPath || t('setup.verifiedTarget')}</code></p><p><strong>{t('setup.sha256')}</strong><code>{state.sha256 || t('setup.checksumBackend')}</code></p><p><strong>{t('setup.compatibility')}</strong><span>{state.compatible === true ? t('setup.compatibleWindows') : t('setup.verifyCompatibility')}</span></p></div><div className="setup-confirm-scope"><div><strong>{t('setup.willDo')}</strong><span>{t('setup.installWillDo', { version: state.recommendedVersion })}</span></div><div><strong>{t('setup.willNotDo')}</strong><span>{t('setup.installWillNotDo')}</span></div></div><footer><button className="button" disabled={busy} onClick={onCancel}>{t('common.cancel')}</button><button className="button primary" disabled={busy} onClick={onInstall}><Download size={16} />{t('setup.installStart')}</button></footer></section></div>
 }
 
-export function Setup({ state, busy = false, onInstall, onRetry, onStartDaemon, agents, agentsLoading, agentsError, onRefreshAgents, onCheckAgent, runtimeControl, runtimeLoading, runtimeError, onRefreshRuntime, onDaemonAction, onQueueAction, panelRefineActive }: SetupProps) {
+export function Setup({ state, repositoryIdentity = '', busy = false, onInstall, onRetry, onStartDaemon, agents, agentsLoading, agentsError, onRefreshAgents, onCheckAgent, runtimeControl, runtimeLoading, runtimeError, onRefreshRuntime, onDaemonAction, onQueueAction, panelRefineActive }: SetupProps) {
   const { t } = useI18n()
   const [confirming, setConfirming] = useState(false)
   const [actionBusy, setActionBusy] = useState(false)
@@ -339,6 +341,7 @@ export function Setup({ state, busy = false, onInstall, onRetry, onStartDaemon, 
     {state && <article className="setup-card setup-detail-card"><Server /><div><h3>RoboRev {state.version || t('setup.versionNotDetected')}</h3><code>{state.binaryPath || t('setup.pathUnavailable')}</code><p>{healthyReady ? t('setup.daemonRunningDetail') : state.daemonRunning ? t('setup.daemonNeedsAttentionDetail') : state.installed ? t('setup.daemonStoppedDetail') : t('setup.daemonNotInstalledDetail')}</p></div><span className={`status ${healthyReady ? 'status-pass' : state.daemonRunning ? 'status-failed' : state.installed ? 'status-queued' : 'status-failed'}`}><span className="status-dot" />{healthyReady ? t('status.ready') : state.daemonRunning ? t('status.error') : state.installed ? t('status.stopped') : t('status.setupRequired')}</span></article>}
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
     <RuntimeDiagnostics />
+    <GitHookStatus repositoryIdentity={repositoryIdentity} />
     <ConfiguredReviewAgents agents={agents} loading={agentsLoading} error={agentsError} busy={busy || actionBusy} onRefresh={onRefreshAgents} onCheck={onCheckAgent} />
     {state && <section className="setup-facts" aria-label={t('setup.verifiedInstallation')}><h2>{t('setup.verifiedInstallation')}</h2><dl>
       <div><dt>{t('setup.requestedVersion')}</dt><dd>{recommended}</dd></div>

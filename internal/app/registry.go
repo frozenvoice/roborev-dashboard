@@ -25,6 +25,10 @@ type repositoryMetadataInspector interface {
 	IsLinkedWorktree(context.Context, string) (bool, error)
 }
 
+type repositoryHookPathResolver interface {
+	HooksPath(context.Context, string) (string, error)
+}
+
 type registryConfig struct {
 	Recent          []string          `json:"recentRepositories"`
 	LastSelected    string            `json:"lastSelectedRepository"`
@@ -566,6 +570,21 @@ func (r *Registry) IsLinkedWorktree(ctx context.Context, path string) (bool, err
 		return false, errors.New("Git metadata inspection is unavailable")
 	}
 	return metadata.IsLinkedWorktree(ctx, path)
+}
+
+// HooksPath delegates read-only effective Git hook-path resolution to the
+// canonical repository inspector. The browser never supplies a path; the
+// endpoint first resolves an opaque registered identity and freshly inspects
+// that root before calling this narrow adapter.
+func (r *Registry) HooksPath(ctx context.Context, path string) (string, error) {
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	resolver, ok := inspector.(repositoryHookPathResolver)
+	if !ok {
+		return "", errors.New("Git hook path inspection is unavailable")
+	}
+	return resolver.HooksPath(ctx, path)
 }
 
 // Identity returns a stable, platform-aware correlation key for a registered

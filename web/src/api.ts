@@ -44,6 +44,57 @@ export type RuntimeDiagnostics = {
   }
 }
 
+export type GitHookOverallStatus = 'ready' | 'needs-attention' | 'not-installed' | 'unknown'
+export type GitHookPostCommitStatus = 'current' | 'outdated' | 'not-installed' | 'unknown'
+export type GitHookPostRewriteStatus = 'current' | 'outdated' | 'missing' | 'not-installed' | 'unknown'
+
+export type GitHookStatus = {
+  repositoryIdentity: string
+  status: GitHookOverallStatus
+  postCommit: { status: GitHookPostCommitStatus }
+  postRewrite: { status: GitHookPostRewriteStatus }
+}
+
+const gitHookOverallStatuses: GitHookOverallStatus[] = ['ready', 'needs-attention', 'not-installed', 'unknown']
+const gitHookPostCommitStatuses: GitHookPostCommitStatus[] = ['current', 'outdated', 'not-installed', 'unknown']
+const gitHookPostRewriteStatuses: GitHookPostRewriteStatus[] = ['current', 'outdated', 'missing', 'not-installed', 'unknown']
+
+function validGitHookCombination(status: GitHookOverallStatus, postCommit: GitHookPostCommitStatus, postRewrite: GitHookPostRewriteStatus) {
+  // When post-commit itself is unreadable, post-rewrite can still report a
+  // factual marker state, but absence cannot be called not-installed because
+  // the unreadable primary hook prevents that installation conclusion.
+  if (postCommit === 'unknown') return status === 'unknown' && (postRewrite === 'current' || postRewrite === 'outdated' || postRewrite === 'unknown')
+  // An unreadable post-rewrite hook makes the aggregate unavailable, including
+  // when post-commit is known not-installed.
+  if (postRewrite === 'unknown') return status === 'unknown'
+  // A missing post-commit hook makes the aggregate not-installed, while a
+  // RoboRev marker in post-rewrite remains factual (current/outdated).
+  if (postCommit === 'not-installed') return status === 'not-installed' && (postRewrite === 'current' || postRewrite === 'outdated' || postRewrite === 'not-installed')
+  // post-rewrite not-installed is only meaningful as part of the same absent
+  // hook set; an installed post-commit hook with no rewrite hook is missing.
+  if (postRewrite === 'not-installed') return false
+  if (postCommit === 'current' && postRewrite === 'current') return status === 'ready'
+  return status === 'needs-attention'
+}
+
+/** Normalize the strict, content-free Git hook status DTO. */
+export function normalizeGitHookStatus(value: unknown, expectedRepositoryIdentity?: string): GitHookStatus | null {
+  const object = objectValue(value)
+  if (!object || !hasExactKeys(object, ['repositoryIdentity', 'status', 'postCommit', 'postRewrite'])) return null
+  if (typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || (expectedRepositoryIdentity !== undefined && object.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  if (typeof object.status !== 'string' || !gitHookOverallStatuses.includes(object.status as GitHookOverallStatus)) return null
+  const postCommit = objectValue(object.postCommit)
+  const postRewrite = objectValue(object.postRewrite)
+  if (!postCommit || !postRewrite || !hasExactKeys(postCommit, ['status']) || !hasExactKeys(postRewrite, ['status'])) return null
+  if (typeof postCommit.status !== 'string' || !gitHookPostCommitStatuses.includes(postCommit.status as GitHookPostCommitStatus)) return null
+  if (typeof postRewrite.status !== 'string' || !gitHookPostRewriteStatuses.includes(postRewrite.status as GitHookPostRewriteStatus)) return null
+  const normalizedPostCommit = postCommit.status as GitHookPostCommitStatus
+  const normalizedPostRewrite = postRewrite.status as GitHookPostRewriteStatus
+  const normalizedOverall = object.status as GitHookOverallStatus
+  if (!validGitHookCombination(normalizedOverall, normalizedPostCommit, normalizedPostRewrite)) return null
+  return { repositoryIdentity: object.repositoryIdentity, status: normalizedOverall, postCommit: { status: normalizedPostCommit }, postRewrite: { status: normalizedPostRewrite } }
+}
+
 export type Installation = {
   installed: boolean
   binary?: string

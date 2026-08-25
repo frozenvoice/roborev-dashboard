@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,174 @@ func (s *Service) command(ctx context.Context, path string, args ...string) (str
 		return "", errors.New(message)
 	}
 	return strings.TrimSpace(result.Stdout), nil
+}
+
+// HooksPath returns Git's effective hooks directory without changing any
+// repository configuration. It follows the v0.1.8 kit semantics: Git's
+// --git-path result is authoritative when absolute; relative results are
+// rooted at the main checkout so linked worktrees share their hooks path.
+// Hook inspection uses a sanitized Git environment so inherited GIT_* values
+// and global/system configuration cannot redirect the read.
+func (s *Service) HooksPath(ctx context.Context, path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("repository path is required")
+	}
+	env := s.sanitizedHookGitEnv(ctx, path)
+	output, err := s.hookCommandWithEnv(ctx, path, env, "rev-parse", "--git-path", "hooks")
+	if err != nil {
+		return "", errors.New("resolve Git hooks path")
+	}
+	hooksPath := normalizeHookPath(output)
+	if filepath.IsAbs(hooksPath) {
+		return filepath.Clean(hooksPath), nil
+	}
+	mainRoot, err := s.mainRootForHooks(ctx, path, env)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(filepath.Join(mainRoot, hooksPath)), nil
+}
+
+func (s *Service) mainRootForHooks(ctx context.Context, path string, env []string) (string, error) {
+	gitDirOutput, err := s.hookCommandWithEnv(ctx, path, env, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", errors.New("resolve Git directory")
+	}
+	commonDirOutput, err := s.hookCommandWithEnv(ctx, path, env, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", errors.New("resolve Git common directory")
+	}
+	gitDir := absoluteHookPath(path, normalizeHookPath(gitDirOutput))
+	commonDir := absoluteHookPath(path, normalizeHookPath(commonDirOutput))
+	if gitDir == "" || commonDir == "" {
+		return "", errors.New("Git metadata path is malformed")
+	}
+	if SameRepositoryPath(gitDir, commonDir) {
+		root, rootErr := s.hookCommandWithEnv(ctx, path, env, "rev-parse", "--show-toplevel")
+		if rootErr != nil {
+			return "", errors.New("resolve Git repository root")
+		}
+		return absoluteHookPath(path, normalizeHookPath(root)), nil
+	}
+	// This mirrors kit's linked-worktree handling. A common directory ending
+	// in .git identifies the ordinary main checkout; submodule/separate-git-dir
+	// layouts use the configured core.worktree from the common config.
+	bare, bareErr := s.hookCommandWithEnv(ctx, path, env, "config", "--file", filepath.Join(commonDir, "config"), "--bool", "core.bare")
+	if bareErr == nil && strings.EqualFold(strings.TrimSpace(bare), "true") {
+		root, rootErr := s.hookCommandWithEnv(ctx, path, env, "rev-parse", "--show-toplevel")
+		if rootErr != nil {
+			return "", errors.New("resolve Git repository root")
+		}
+		return absoluteHookPath(path, normalizeHookPath(root)), nil
+	}
+	if strings.EqualFold(filepath.Base(commonDir), ".git") {
+		return filepath.Dir(commonDir), nil
+	}
+	worktree, worktreeErr := s.hookCommandWithEnv(ctx, path, env, "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
+	if worktreeErr != nil || strings.TrimSpace(worktree) == "" {
+		return "", errors.New("resolve Git main worktree")
+	}
+	return absoluteHookPath(commonDir, normalizeHookPath(worktree)), nil
+}
+
+func (s *Service) hookCommandWithEnv(ctx context.Context, path string, env []string, args ...string) (string, error) {
+	commandArgs := append([]string{"-C", path}, args...)
+	result, err := s.Runner.Run(ctx, proc.Command{
+		Executable:  s.Git,
+		Args:        commandArgs,
+		Env:         env,
+		Timeout:     10 * time.Second,
+		OutputLimit: 64 << 10,
+	})
+	if err != nil || result.StdoutTruncated {
+		return "", errors.New("Git hook path command failed")
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}
+
+// sanitizedHookGitEnv builds the command environment once per HooksPath call.
+// It strips inherited Git injection and then forwards only fresh
+// safe.directory values as command-scope config. Global/system config itself
+// is hidden from the actual resolver; no empty config file is created.
+func (s *Service) sanitizedHookGitEnv(ctx context.Context, path string) []string {
+	base := minimalHookGitEnv(os.Environ())
+	safeDirectories := make([]string, 0, 4)
+	for _, scope := range []string{"--system", "--global"} {
+		result, err := s.Runner.Run(ctx, proc.Command{
+			Executable:  s.Git,
+			Args:        []string{"-C", path, "config", scope, "--includes", "-z", "--get-all", "safe.directory"},
+			Env:         base,
+			Timeout:     10 * time.Second,
+			OutputLimit: 64 << 10,
+		})
+		if err != nil || result.StdoutTruncated {
+			continue
+		}
+		if result.Stdout == "" {
+			continue
+		}
+		for _, value := range strings.Split(strings.TrimSuffix(result.Stdout, "\x00"), "\x00") {
+			// Empty safe.directory resets the protected list. Preserve it
+			// exactly, matching kit's command-scope forwarding semantics.
+			safeDirectories = append(safeDirectories, value)
+		}
+	}
+	// Empty GIT_CONFIG_GLOBAL disables global config on Git for Windows and
+	// Unix without the NUL-device compatibility issue or a filesystem write.
+	env := minimalHookGitEnv(os.Environ())
+	env = append(env, "GIT_CONFIG_GLOBAL=", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(safeDirectories)))
+	for i, value := range safeDirectories {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", i), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, value))
+	}
+	return env
+}
+
+// minimalHookGitEnv retains only the process variables required to start Git
+// and resolve home-relative config paths. HOME/USERPROFILE/HOMEDRIVE/HOMEPATH
+// are location hints, not arbitrary config or credential inputs; all
+// inherited GIT_* variables remain excluded by MinimalProbeEnv.
+func minimalHookGitEnv(source []string) []string {
+	env := proc.MinimalProbeEnv(source)
+	return appendAllowedEnv(env, source, "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+}
+
+func appendAllowedEnv(result, source []string, keys ...string) []string {
+	for _, entry := range source {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		for _, key := range keys {
+			if strings.EqualFold(name, key) {
+				result = append(result, entry)
+				break
+			}
+		}
+	}
+	return result
+}
+
+func normalizeHookPath(value string) string {
+	value = strings.TrimSpace(value)
+	if runtime.GOOS == "windows" && len(value) >= 3 && value[0] == '/' && isASCIIAlpha(value[1]) && value[2] == '/' {
+		value = strings.ToUpper(string(value[1])) + ":" + value[2:]
+	}
+	return filepath.FromSlash(value)
+}
+
+func absoluteHookPath(base, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	return filepath.Clean(path)
+}
+
+func isASCIIAlpha(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 // RepositoryKey returns the platform-aware identity key for a canonical

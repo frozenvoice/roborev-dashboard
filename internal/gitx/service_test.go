@@ -20,6 +20,175 @@ type recordingRunner struct {
 	err      error
 }
 
+type hooksPathRunner struct {
+	commands []proc.Command
+	outputs  map[string]string
+}
+
+func (r *hooksPathRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.commands = append(r.commands, command)
+	key := strings.Join(command.Args[2:], " ")
+	return proc.Result{Stdout: r.outputs[key]}, nil
+}
+
+func TestHooksPathUsesGitPathAndSanitizedEnvironment(t *testing.T) {
+	t.Setenv("HOME", `C:\Users\hook-home`)
+	t.Setenv("USERPROFILE", `C:\Users\hook-user`)
+	t.Setenv("HOMEDRIVE", `C:`)
+	t.Setenv("HOMEPATH", `\Users\hook-user`)
+	t.Setenv("GIT_DIR", `C:\attacker\git`)
+	t.Setenv("GIT_CONFIG_GLOBAL", `C:\attacker\config`)
+	t.Setenv("HOOK_STATUS_SECRET", "must-not-leak")
+	root := filepath.Join(t.TempDir(), "repo")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --git-path hooks": ".githooks",
+		"rev-parse --git-dir":        filepath.Join(root, ".git"),
+		"rev-parse --git-common-dir": filepath.Join(root, ".git"),
+		"rev-parse --show-toplevel":  root,
+	}}
+	service := New(runner)
+	got, err := service.HooksPath(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, ".githooks"); got != want {
+		t.Fatalf("hooks path=%q want=%q", got, want)
+	}
+	if len(runner.commands) != 6 {
+		t.Fatalf("commands=%#v", runner.commands)
+	}
+	var command proc.Command
+	for _, candidate := range runner.commands {
+		if strings.Contains(strings.Join(candidate.Args, " "), "rev-parse --git-path hooks") {
+			command = candidate
+			break
+		}
+	}
+	if command.Executable == "" {
+		t.Fatalf("hooks path command missing: %#v", runner.commands)
+	}
+	if !reflect.DeepEqual(command.Args, []string{"-C", root, "rev-parse", "--git-path", "hooks"}) {
+		t.Fatalf("unexpected args=%#v", command.Args)
+	}
+	for _, entry := range command.Env {
+		if strings.HasPrefix(strings.ToUpper(entry), "GIT_DIR=") || strings.HasPrefix(strings.ToUpper(entry), "GIT_WORK_TREE=") {
+			t.Fatalf("unsafe inherited Git environment: %q", entry)
+		}
+	}
+	if !containsEnv(command.Env, "GIT_CONFIG_NOSYSTEM=1") || !containsEnv(command.Env, "GIT_CONFIG_GLOBAL=") || !containsEnv(command.Env, "GIT_CONFIG_COUNT=0") {
+		t.Fatalf("missing config isolation env: %#v", command.Env)
+	}
+	for _, expected := range []string{
+		`HOME=C:\Users\hook-home`,
+		`USERPROFILE=C:\Users\hook-user`,
+		`HOMEDRIVE=C:`,
+		`HOMEPATH=\Users\hook-user`,
+	} {
+		if !containsEnv(command.Env, expected) {
+			t.Fatalf("home-location variable %q missing from resolver env: %#v", expected, command.Env)
+		}
+	}
+	for _, entry := range command.Env {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "GIT_DIR=") || strings.HasPrefix(upper, "GIT_CONFIG_GLOBAL=C:") || strings.HasPrefix(upper, "HOOK_STATUS_SECRET=") {
+			t.Fatalf("unsafe resolver environment entry: %q", entry)
+		}
+	}
+}
+
+func TestHooksPathForwardsSafeDirectoryResetValuesAtCommandScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"config --system --includes -z --get-all safe.directory": "C:/trusted\x00\x00",
+		"config --global --includes -z --get-all safe.directory": "D:/trusted\x00",
+		"rev-parse --git-path hooks":                             filepath.Join(root, ".git", "hooks"),
+	}}
+	if _, err := New(runner).HooksPath(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	var resolverCommand *proc.Command
+	for index := range runner.commands {
+		if strings.Contains(strings.Join(runner.commands[index].Args, " "), "rev-parse --git-path hooks") {
+			resolverCommand = &runner.commands[index]
+			break
+		}
+	}
+	if resolverCommand == nil {
+		t.Fatalf("resolver command missing: %#v", runner.commands)
+	}
+	if !containsEnv(resolverCommand.Env, "GIT_CONFIG_COUNT=3") ||
+		!containsEnv(resolverCommand.Env, "GIT_CONFIG_KEY_0=safe.directory") ||
+		!containsEnv(resolverCommand.Env, "GIT_CONFIG_VALUE_0=C:/trusted") ||
+		!containsEnv(resolverCommand.Env, "GIT_CONFIG_VALUE_1=") ||
+		!containsEnv(resolverCommand.Env, "GIT_CONFIG_VALUE_2=D:/trusted") {
+		t.Fatalf("safe.directory forwarding=%#v", resolverCommand.Env)
+	}
+}
+
+func TestHooksPathResolvesLinkedWorktreeMainRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "main")
+	common := filepath.Join(root, ".git")
+	worktree := filepath.Join(common, "worktrees", "feature")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --git-path hooks": ".githooks",
+		"rev-parse --git-dir":        worktree,
+		"rev-parse --git-common-dir": common,
+	}}
+	got, err := New(runner).HooksPath(context.Background(), filepath.Join(root, "feature"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, ".githooks"); got != want {
+		t.Fatalf("hooks path=%q want=%q", got, want)
+	}
+}
+
+func TestHooksPathResolvesSeparateGitDirThroughCoreWorktree(t *testing.T) {
+	base := t.TempDir()
+	worktree := filepath.Join(base, "checkout")
+	mainRoot := filepath.Join(base, "main")
+	common := filepath.Join(base, "metadata")
+	gitDir := filepath.Join(common, "worktrees", "checkout")
+	configFile := filepath.Join(common, "config")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --git-path hooks":                        ".githooks",
+		"rev-parse --git-dir":                               gitDir,
+		"rev-parse --git-common-dir":                        common,
+		"config --file " + configFile + " --bool core.bare": "false",
+		"config --file " + configFile + " core.worktree":    filepath.Join("..", "main"),
+	}}
+	got, err := New(runner).HooksPath(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(mainRoot, ".githooks"); got != want {
+		t.Fatalf("hooks path=%q want=%q", got, want)
+	}
+}
+
+func TestHooksPathNormalizesMSYSAbsoluteOutput(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("MSYS path conversion is Windows-specific")
+	}
+	runner := &hooksPathRunner{outputs: map[string]string{"rev-parse --git-path hooks": "/c/Workspace/hooks"}}
+	got, err := New(runner).HooksPath(context.Background(), `C:\Workspace`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `C:\Workspace\hooks` {
+		t.Fatalf("hooks path=%q", got)
+	}
+}
+
+func containsEnv(env []string, expected string) bool {
+	for _, entry := range env {
+		if entry == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *recordingRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	return proc.Result{Stdout: r.stdout}, r.err
