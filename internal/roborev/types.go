@@ -228,6 +228,13 @@ const (
 	SkillsReadinessConfigUnavailable  SkillsReadinessStatus = "config-unavailable"
 )
 
+// SkillsPreLaunchGuard is the narrow, backend-only safety callback used by
+// the Skills mutation transport. It is invoked exactly once after the
+// transport's fresh binding probe and immediately before the mutation
+// process. The server owns the guard implementation; browser input cannot
+// supply one.
+type SkillsPreLaunchGuard func(context.Context) error
+
 // AgentHookManagementTransport is optional so existing RoboRev adapters and
 // fakes remain source-compatible. The server uses this narrow transport for
 // one allowlisted agent at a time; config paths and raw CLI output stay
@@ -246,7 +253,7 @@ type AgentHookManagementTransport interface {
 type SkillsManagementTransport interface {
 	SkillsReadiness(context.Context) (SkillsReadiness, error)
 	ProbeSkillsBinding(context.Context) (GitHookBinding, error)
-	RunSkillsInstall(context.Context, string, string, GitHookBinding) (GitHookExecution, error)
+	RunSkillsInstall(context.Context, string, string, GitHookBinding, SkillsPreLaunchGuard) (GitHookExecution, error)
 }
 
 type AgentHookDryRun struct {

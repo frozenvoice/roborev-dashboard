@@ -148,23 +148,25 @@ func (f *skillsTestFS) IsReparse(path string, _ os.FileInfo) bool {
 
 type skillsManagementTestTransport struct {
 	*fakeService
-	mu           sync.Mutex
-	binding      roborev.GitHookBinding
-	readiness    []roborev.SkillsReadiness
-	readCalls    int
-	probeCalls   int
-	runCalls     int
-	runAgent     string
-	runDir       string
-	runBinding   roborev.GitHookBinding
-	execution    roborev.GitHookExecution
-	runErr       error
-	readinessErr error
-	bindingErr   error
-	onRun        func()
-	events       *[]string
-	readCanceled []bool
-	bindCanceled []bool
+	mu                sync.Mutex
+	binding           roborev.GitHookBinding
+	readiness         []roborev.SkillsReadiness
+	readCalls         int
+	probeCalls        int
+	runCalls          int
+	runAgent          string
+	runDir            string
+	runBinding        roborev.GitHookBinding
+	execution         roborev.GitHookExecution
+	runErr            error
+	readinessErr      error
+	bindingErr        error
+	afterFinalBinding func()
+	finalGuardCalls   int
+	onRun             func()
+	events            *[]string
+	readCanceled      []bool
+	bindCanceled      []bool
 }
 
 func (f *skillsManagementTestTransport) SkillsReadiness(ctx context.Context) (roborev.SkillsReadiness, error) {
@@ -202,7 +204,33 @@ func (f *skillsManagementTestTransport) ProbeSkillsBinding(ctx context.Context) 
 	return f.binding, nil
 }
 
-func (f *skillsManagementTestTransport) RunSkillsInstall(_ context.Context, agent, skillsDir string, binding roborev.GitHookBinding) (roborev.GitHookExecution, error) {
+func (f *skillsManagementTestTransport) RunSkillsInstall(ctx context.Context, agent, skillsDir string, binding roborev.GitHookBinding, guard roborev.SkillsPreLaunchGuard) (roborev.GitHookExecution, error) {
+	// Mirror the concrete transport's uncached binding check. The final
+	// mutation guard is deliberately called outside the transport mutex so a
+	// deterministic test seam can mutate the fake filesystem after this last
+	// binding and before the guard.
+	fresh, err := f.ProbeSkillsBinding(ctx)
+	if err != nil || fresh != binding {
+		return roborev.GitHookExecution{}, roborev.ErrBindingChanged
+	}
+	f.mu.Lock()
+	afterFinalBinding := f.afterFinalBinding
+	f.mu.Unlock()
+	if afterFinalBinding != nil {
+		afterFinalBinding()
+	}
+	if guard == nil {
+		return roborev.GitHookExecution{}, roborev.ErrSkillsPreLaunchGuard
+	}
+	f.mu.Lock()
+	f.finalGuardCalls++
+	if f.events != nil {
+		*f.events = append(*f.events, "FINAL_TREE_GUARD")
+	}
+	f.mu.Unlock()
+	if err := guard(ctx); err != nil {
+		return roborev.GitHookExecution{}, roborev.ErrSkillsPreLaunchGuard
+	}
 	f.mu.Lock()
 	f.runCalls++
 	if f.events != nil {
@@ -552,6 +580,71 @@ func TestSkillsManagementStalePreviewBoundariesDoNotLaunch(t *testing.T) {
 	}
 }
 
+func TestSkillsManagementFinalGuardBlocksLegacyCreatedAfterLastBinding(t *testing.T) {
+	fs := skillsTargetFS()
+	fs.addDir(`C:\fake-home\.codex\skills`, "skills")
+	transport := &skillsManagementTestTransport{
+		fakeService: &fakeService{}, binding: skillsTestBinding(),
+		readiness: []roborev.SkillsReadiness{skillsNeedsReadiness(), skillsNeedsReadiness()},
+	}
+	transport.afterFinalBinding = func() {
+		fs.addFile(`C:\fake-home\.codex\skills\roborev-address`, "legacy", "legacy")
+	}
+	server := newSkillsManagementTestServer(t, transport, fs, []string{"CODEX_HOME=C:\\fake-home\\.codex"})
+	preview := httptest.NewRecorder()
+	server.Handler().ServeHTTP(preview, skillsMutationRequest(server, "/api/skills/preview", `{"agent":"codex"}`))
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var dto skillsManagementPreviewDTO
+	if err := json.Unmarshal(preview.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	execute := httptest.NewRecorder()
+	server.Handler().ServeHTTP(execute, skillsMutationRequest(server, "/api/skills/execute", `{"token":"`+dto.Token+`"}`))
+	if execute.Code != http.StatusConflict || transport.runCalls != 0 || transport.finalGuardCalls != 1 {
+		t.Fatalf("status=%d runs=%d guards=%d body=%s", execute.Code, transport.runCalls, transport.finalGuardCalls, execute.Body.String())
+	}
+	if transport.readCalls != 2 || transport.probeCalls != 4 {
+		t.Fatalf("early/final calls reads=%d probes=%d", transport.readCalls, transport.probeCalls)
+	}
+	if strings.Contains(execute.Body.String(), `C:\fake-home`) || strings.Contains(execute.Body.String(), "roborev-address") {
+		t.Fatalf("stale response leaked private legacy details: %s", execute.Body.String())
+	}
+}
+
+func TestSkillsManagementFinalGuardBlocksManagedSkillFingerprintDriftAfterLastBinding(t *testing.T) {
+	fs := skillsTargetFS()
+	fs.addDir(`C:\fake-home\.codex\skills`, "skills")
+	fs.addDir(`C:\fake-home\.codex\skills\roborev-fix`, "fix-dir")
+	fs.addFile(`C:\fake-home\.codex\skills\roborev-fix\SKILL.md`, "before", "fix-file")
+	transport := &skillsManagementTestTransport{
+		fakeService: &fakeService{}, binding: skillsTestBinding(),
+		readiness: []roborev.SkillsReadiness{skillsNeedsReadiness(), skillsNeedsReadiness()},
+	}
+	transport.afterFinalBinding = func() {
+		fs.setFileData(`C:\fake-home\.codex\skills\roborev-fix\SKILL.md`, "after")
+	}
+	server := newSkillsManagementTestServer(t, transport, fs, []string{"CODEX_HOME=C:\\fake-home\\.codex"})
+	preview := httptest.NewRecorder()
+	server.Handler().ServeHTTP(preview, skillsMutationRequest(server, "/api/skills/preview", `{"agent":"codex"}`))
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var dto skillsManagementPreviewDTO
+	if err := json.Unmarshal(preview.Body.Bytes(), &dto); err != nil {
+		t.Fatal(err)
+	}
+	execute := httptest.NewRecorder()
+	server.Handler().ServeHTTP(execute, skillsMutationRequest(server, "/api/skills/execute", `{"token":"`+dto.Token+`"}`))
+	if execute.Code != http.StatusConflict || transport.runCalls != 0 || transport.finalGuardCalls != 1 {
+		t.Fatalf("status=%d runs=%d guards=%d body=%s", execute.Code, transport.runCalls, transport.finalGuardCalls, execute.Body.String())
+	}
+	if transport.readCalls != 2 || transport.probeCalls != 4 {
+		t.Fatalf("early/final calls reads=%d probes=%d", transport.readCalls, transport.probeCalls)
+	}
+}
+
 func skillsReadinessCountsFixture(current, outdated, missing int) roborev.SkillsReadiness {
 	readiness := skillsNeedsReadiness()
 	readiness.Agents[0] = roborev.SkillsReadinessAgent{Agent: "codex", Status: "needs-install-update", Current: current, Outdated: outdated, Missing: missing, Total: 10}
@@ -750,8 +843,16 @@ func TestSkillsManagementPreservesRequiredCallOrdering(t *testing.T) {
 	}
 	execute := httptest.NewRecorder()
 	server.Handler().ServeHTTP(execute, skillsMutationRequest(server, "/api/skills/execute", `{"token":"`+dto.Token+`"}`))
-	if execute.Code != http.StatusOK || !equalStrings(events, []string{"readiness", "binding", "binding", "readiness", "binding", "run", "readiness", "binding"}) {
+	if execute.Code != http.StatusOK || !equalStrings(events, []string{"readiness", "binding", "binding", "readiness", "binding", "binding", "FINAL_TREE_GUARD", "run", "readiness", "binding"}) {
 		t.Fatalf("status=%d events=%#v body=%s", execute.Code, events, execute.Body.String())
+	}
+	for index, event := range events {
+		if event == "FINAL_TREE_GUARD" {
+			if index+1 >= len(events) || events[index+1] != "run" {
+				t.Fatalf("final guard was not immediately followed by run: events=%#v", events)
+			}
+			break
+		}
 	}
 }
 

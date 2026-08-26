@@ -2,6 +2,7 @@ package roborev
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 type skillsInstallRunner struct {
 	mu       sync.Mutex
 	commands []proc.Command
+	events   *[]string
 }
 
 func (r *skillsInstallRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
@@ -22,6 +24,14 @@ func (r *skillsInstallRunner) Run(_ context.Context, command proc.Command) (proc
 	copyCommand.Args = append([]string(nil), command.Args...)
 	copyCommand.Env = append([]string(nil), command.Env...)
 	r.commands = append(r.commands, copyCommand)
+	if r.events != nil {
+		switch {
+		case len(command.Args) == 2 && command.Args[0] == "version" && command.Args[1] == "--json":
+			*r.events = append(*r.events, "VERSION_PROBE")
+		case len(command.Args) == 6 && command.Args[0] == "skills" && command.Args[1] == "install":
+			*r.events = append(*r.events, "RUN")
+		}
+	}
 	r.mu.Unlock()
 	if len(command.Args) == 2 && command.Args[0] == "version" && command.Args[1] == "--json" {
 		return proc.Result{Started: true, ExitCode: 0, Stdout: `{"name":"roborev","version":"v0.64.0"}`}, nil
@@ -30,6 +40,66 @@ func (r *skillsInstallRunner) Run(_ context.Context, command proc.Command) (proc
 		return proc.Result{Started: true, ExitCode: 0}, nil
 	}
 	return proc.Result{Started: true, ExitCode: 1}, os.ErrInvalid
+}
+
+func TestSkillsManagementTransportFinalBindingGuardRunsImmediatelyBeforeMutation(t *testing.T) {
+	events := make([]string, 0, 4)
+	runner := &skillsInstallRunner{events: &events}
+	client := skillsReadinessTestClient(t, runner)
+	binding, err := client.ProbeSkillsBinding(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The initial probe binds the preview. The transport must perform one
+	// fresh probe, invoke the guard exactly once, then run without another
+	// subprocess or command preparation step.
+	events = events[:0]
+	directory := filepath.Join(t.TempDir(), "skills")
+	guardCalls := 0
+	execution, runErr := client.RunSkillsInstall(context.Background(), "codex", directory, binding, func(context.Context) error {
+		guardCalls++
+		events = append(events, "FINAL_TREE_GUARD")
+		return nil
+	})
+	if runErr != nil || !execution.Started || execution.ExitCode != 0 {
+		t.Fatalf("execution=%#v err=%v", execution, runErr)
+	}
+	if guardCalls != 1 || !equalStrings(events, []string{"VERSION_PROBE", "FINAL_TREE_GUARD", "RUN"}) {
+		t.Fatalf("guard calls=%d events=%#v", guardCalls, events)
+	}
+}
+
+func TestSkillsManagementTransportGuardFailureAndNilFailClosed(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "skills")
+	for _, test := range []struct {
+		name   string
+		guard  SkillsPreLaunchGuard
+		marker string
+	}{
+		{name: "callback error", guard: func(context.Context) error { return errors.New(`private path C:\secret\roborev-address`) }, marker: "C:\\secret"},
+		{name: "nil", guard: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &skillsInstallRunner{}
+			client := skillsReadinessTestClient(t, runner)
+			binding, err := client.ProbeSkillsBinding(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			execution, runErr := client.RunSkillsInstall(context.Background(), "codex", directory, binding, test.guard)
+			if !errors.Is(runErr, ErrSkillsPreLaunchGuard) || execution.Started {
+				t.Fatalf("execution=%#v err=%v", execution, runErr)
+			}
+			if test.marker != "" && strings.Contains(runErr.Error(), test.marker) {
+				t.Fatalf("guard error leaked marker %q: %v", test.marker, runErr)
+			}
+			for _, command := range runner.snapshot() {
+				if len(command.Args) > 0 && command.Args[0] == "skills" {
+					t.Fatalf("guard failure launched install=%#v", command.Args)
+				}
+			}
+		})
+	}
 }
 
 func (r *skillsInstallRunner) snapshot() []proc.Command {
@@ -58,7 +128,7 @@ func TestSkillsManagementTransportUsesExactSingleAgentCommandAndMinimalEnv(t *te
 		t.Fatal(err)
 	}
 	for _, agent := range []string{"codex", "claude", "grok", "droid"} {
-		if execution, runErr := client.RunSkillsInstall(context.Background(), agent, directory, binding); runErr != nil || !execution.Started || execution.ExitCode != 0 {
+		if execution, runErr := client.RunSkillsInstall(context.Background(), agent, directory, binding, func(context.Context) error { return nil }); runErr != nil || !execution.Started || execution.ExitCode != 0 {
 			t.Fatalf("agent=%s execution=%#v err=%v", agent, execution, runErr)
 		}
 	}
@@ -106,7 +176,7 @@ func TestSkillsManagementTransportRejectsRelativeOrUnsupportedMutation(t *testin
 		{agent: "all", path: filepath.Join("relative", "skills")},
 		{agent: "codex", path: filepath.Join("relative", "skills")},
 	} {
-		if execution, runErr := client.RunSkillsInstall(context.Background(), test.agent, test.path, binding); runErr == nil || execution.Started {
+		if execution, runErr := client.RunSkillsInstall(context.Background(), test.agent, test.path, binding, func(context.Context) error { return nil }); runErr == nil || execution.Started {
 			t.Fatalf("agent=%s path=%s execution=%#v err=%v", test.agent, test.path, execution, runErr)
 		}
 	}

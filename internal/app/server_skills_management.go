@@ -279,7 +279,21 @@ func (s *Server) skillsManagementExecute(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusConflict, "skills preview is stale", "stale")
 		return
 	}
-	execution, runErr := transport.RunSkillsInstall(r.Context(), record.Agent, record.Target.SkillsDir, binding)
+	finalGuard := roborev.SkillsPreLaunchGuard(func(_ context.Context) error {
+		finalTarget, resolveErr := planner.Resolver.Resolve(record.Agent, s.skillsTargetEnv())
+		if resolveErr != nil || !sameSkillsTarget(finalTarget, record.Target) {
+			return errors.New("skills final target changed")
+		}
+		if _, revalidateErr := planner.Revalidate(record.Snapshot, finalTarget); revalidateErr != nil {
+			return revalidateErr
+		}
+		return nil
+	})
+	execution, runErr := transport.RunSkillsInstall(r.Context(), record.Agent, record.Target.SkillsDir, binding, finalGuard)
+	if errors.Is(runErr, roborev.ErrSkillsPreLaunchGuard) {
+		writeError(w, http.StatusConflict, "skills preview is stale", "stale")
+		return
+	}
 	if !execution.Started {
 		result := skillsManagementResultDTO{Status: "failed-unverified", Agent: record.Agent, ErrorCode: "cli-not-started"}
 		writeJSON(w, http.StatusOK, result)

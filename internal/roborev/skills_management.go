@@ -13,6 +13,12 @@ import (
 
 const skillsInstallTimeout = 30 * time.Second
 
+// ErrSkillsPreLaunchGuard is a sanitized typed failure for a final
+// Dashboard-owned target/tree/legacy check. The underlying filesystem or
+// target error is intentionally not retained because it may contain private
+// paths and must not cross the adapter boundary.
+var ErrSkillsPreLaunchGuard = errors.New("skills pre-launch validation failed")
+
 // ProbeSkillsBinding deliberately shares the exact uncached v0.64 executable
 // probe used by Agent Hook Management. A preview token therefore binds the
 // executable path, version, generation, and file identity before launch.
@@ -30,7 +36,10 @@ func SkillsTargetEnvFromProcess() []string { return readinessProbeEnvFromProcess
 // install. The destination is already fixed by the server-derived --path;
 // no working directory, shell, inherited environment, broad install, update,
 // retry, rollback, or detached child is permitted here.
-func (c *Client) RunSkillsInstall(ctx context.Context, agent, skillsDir string, expected GitHookBinding) (GitHookExecution, error) {
+func (c *Client) RunSkillsInstall(ctx context.Context, agent, skillsDir string, expected GitHookBinding, guard SkillsPreLaunchGuard) (GitHookExecution, error) {
+	if guard == nil {
+		return GitHookExecution{}, ErrSkillsPreLaunchGuard
+	}
 	if !skillsmanagement.IsSupportedAgent(agent) || expected.Version != skillsmanagement.Version || strings.TrimSpace(expected.Binary) == "" || expected.Generation == 0 || strings.TrimSpace(expected.FileID) == "" {
 		return GitHookExecution{}, errors.New("skills install is unavailable")
 	}
@@ -38,18 +47,24 @@ func (c *Client) RunSkillsInstall(ctx context.Context, agent, skillsDir string, 
 	if err != nil {
 		return GitHookExecution{}, err
 	}
-	fresh, err := c.ProbeSkillsBinding(ctx)
-	if err != nil || fresh != expected {
-		return GitHookExecution{}, ErrBindingChanged
-	}
-	result, runErr := c.Runner.Run(ctx, proc.Command{
+	// Construct the complete typed command before the final binding check. No
+	// command or environment preparation is allowed after a successful guard.
+	command := proc.Command{
 		Executable:  expected.Binary,
 		Args:        args,
 		Dir:         "",
 		Env:         proc.MinimalProbeEnv(os.Environ()),
 		Timeout:     skillsInstallTimeout,
 		OutputLimit: 1 << 20,
-	})
+	}
+	fresh, err := c.ProbeSkillsBinding(ctx)
+	if err != nil || fresh != expected {
+		return GitHookExecution{}, ErrBindingChanged
+	}
+	if err := guard(ctx); err != nil {
+		return GitHookExecution{}, ErrSkillsPreLaunchGuard
+	}
+	result, runErr := c.Runner.Run(ctx, command)
 	execution := GitHookExecution{Started: result.Started, ExitCode: result.ExitCode}
 	if runErr != nil {
 		return execution, errors.New("RoboRev skills install failed")
