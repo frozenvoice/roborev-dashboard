@@ -22,6 +22,19 @@ type mappingInspector struct {
 	errors       map[string]error
 }
 
+type ciRegistryInspector struct {
+	state gitx.CIWorkflowRepositoryState
+	err   error
+}
+
+func (ciRegistryInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	return gitx.Repository{Path: path}, nil
+}
+
+func (i ciRegistryInspector) InspectCIWorkflow(context.Context, string) (gitx.CIWorkflowRepositoryState, error) {
+	return i.state, i.err
+}
+
 type slowRegistryInspector struct {
 	delays  map[string]time.Duration
 	active  atomic.Int32
@@ -225,6 +238,61 @@ func TestRegistryInspectRejectsCanonicalRootDrift(t *testing.T) {
 	_, err := registry.Inspect(context.Background(), "registered")
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("expected clear root mismatch error, got %v", err)
+	}
+}
+
+func TestRegistryInspectCIWorkflowDelegatesOpaqueIdentityAndChecksRegisteredRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "registered repo")
+	registry := NewRegistry(ciRegistryInspector{state: gitx.CIWorkflowRepositoryState{Root: root, Branch: "main", Head: strings.Repeat("a", 40)}}, "")
+	if _, err := registry.Add(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := registry.InspectCIWorkflow(context.Background(), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gitx.SameRepositoryPath(state.Root, root) || state.Branch != "main" || state.Head != strings.Repeat("a", 40) {
+		t.Fatalf("state=%#v", state)
+	}
+}
+
+func TestRegistryInspectCIWorkflowRejectsAdapterRootMismatchWithoutLeakingPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private registered repo")
+	other := filepath.Join(t.TempDir(), "private replacement repo")
+	registry := NewRegistry(ciRegistryInspector{state: gitx.CIWorkflowRepositoryState{Root: other, Branch: "main", Head: strings.Repeat("b", 40)}}, "")
+	if _, err := registry.Add(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = registry.InspectCIWorkflow(context.Background(), identity)
+	if err == nil || !strings.Contains(err.Error(), "root mismatch") {
+		t.Fatalf("expected sanitized root mismatch error, got %v", err)
+	}
+	if strings.Contains(err.Error(), root) || strings.Contains(err.Error(), other) {
+		t.Fatalf("private path leaked through registry boundary: %v", err)
+	}
+}
+
+func TestRegistryInspectCIWorkflowSanitizesAdapterError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private registered repo")
+	registry := NewRegistry(ciRegistryInspector{err: errors.New(`private root C:\secret`)}, "")
+	if _, err := registry.Add(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = registry.InspectCIWorkflow(context.Background(), identity)
+	if err == nil || !strings.Contains(err.Error(), "inspection is unavailable") || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("adapter error was not sanitized: %v", err)
 	}
 }
 

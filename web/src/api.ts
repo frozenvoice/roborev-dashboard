@@ -252,7 +252,14 @@ export type CIWorkflowPreview = {
     content: string
     sha256: string
   }
+  write: CIWorkflowWrite
 }
+
+export type CIWorkflowWrite =
+  | { status: 'available'; token: string; expiresAt: string }
+  | { status: 'exists' | 'unsafe' | 'ignored' | 'dirty' }
+
+export type CIWorkflowExecuteResult = { status: 'verified-created' | 'failed-unverified' }
 
 const ciWorkflowVersion = 'v0.64.0' as const
 const ciWorkflowTarget = '.github/workflows/roborev.yml' as const
@@ -280,11 +287,28 @@ function validUtf8WorkflowContent(value: unknown): value is string {
 /** Normalize the strict, read-only CI workflow preview DTO. */
 export function normalizeCIWorkflowPreview(value: unknown, expectedRepositoryIdentity?: string): CIWorkflowPreview | null {
   const root = objectValue(value)
-  if (!root || (Object.getPrototypeOf(root) !== Object.prototype && Object.getPrototypeOf(root) !== null) || Object.keys(root).some(key => !['version', 'repositoryIdentity', 'target', 'workflow'].includes(key)) || !['version', 'repositoryIdentity', 'target', 'workflow'].every(key => Object.prototype.hasOwnProperty.call(root, key))) return null
+  if (!root || (Object.getPrototypeOf(root) !== Object.prototype && Object.getPrototypeOf(root) !== null) || Object.keys(root).some(key => !['version', 'repositoryIdentity', 'target', 'workflow', 'write'].includes(key)) || !['version', 'repositoryIdentity', 'target', 'workflow', 'write'].every(key => Object.prototype.hasOwnProperty.call(root, key))) return null
   if (!root || root.version !== ciWorkflowVersion || root.target !== ciWorkflowTarget || typeof root.repositoryIdentity !== 'string' || !root.repositoryIdentity.trim() || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity)) return null
   const workflow = exactObject(root.workflow, ['content', 'sha256'])
   if (!workflow || !validUtf8WorkflowContent(workflow.content) || typeof workflow.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(workflow.sha256)) return null
-  return { version: ciWorkflowVersion, repositoryIdentity: root.repositoryIdentity, target: ciWorkflowTarget, workflow: { content: workflow.content, sha256: workflow.sha256 } }
+  const write = normalizeCIWorkflowWrite(root.write)
+  if (!write) return null
+  return { version: ciWorkflowVersion, repositoryIdentity: root.repositoryIdentity, target: ciWorkflowTarget, workflow: { content: workflow.content, sha256: workflow.sha256 }, write }
+}
+
+function normalizeCIWorkflowWrite(value: unknown): CIWorkflowWrite | null {
+  const object = objectValue(value)
+  if (!object || typeof object.status !== 'string') return null
+  if (object.status === 'available') {
+    const available = exactObject(object, ['status', 'token', 'expiresAt'])
+    if (!available || typeof available.token !== 'string' || !available.token.trim() || available.token.length > 4096 || typeof available.expiresAt !== 'string' || !available.expiresAt.trim() || !Number.isFinite(Date.parse(available.expiresAt))) return null
+    return { status: 'available', token: available.token, expiresAt: available.expiresAt }
+  }
+  if (object.status === 'exists' || object.status === 'unsafe' || object.status === 'ignored' || object.status === 'dirty') {
+    const unavailable = exactObject(object, ['status'])
+    return unavailable ? { status: object.status } : null
+  }
+  return null
 }
 
 export type GitHookClassification = 'absent' | 'unmanaged' | 'managed-current' | 'managed-outdated' | 'managed-stale-binary' | 'ambiguous' | 'unreadable'
@@ -1650,6 +1674,23 @@ export async function fetchCIWorkflowPreview(repositoryIdentity: string, signal?
   const normalized = normalizeCIWorkflowPreview(value, repositoryIdentity)
   if (!normalized) throw new APIError('invalid-ci-workflow-preview')
   return normalized
+}
+
+/** Execute one server-bound, single-use CI workflow create token. */
+export async function executeCIWorkflow(token: string): Promise<CIWorkflowExecuteResult> {
+  const value = await request<unknown>('/api/ci-workflow/execute', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+  const normalized = normalizeCIWorkflowExecuteResult(value)
+  if (!normalized) throw new APIError('invalid-ci-workflow-execute-result')
+  return normalized
+}
+
+export function normalizeCIWorkflowExecuteResult(value: unknown): CIWorkflowExecuteResult | null {
+  const object = exactObject(value, ['status'])
+  if (!object || (object.status !== 'verified-created' && object.status !== 'failed-unverified')) return null
+  return { status: object.status }
 }
 
 export function jobsFromPayload(value: unknown): ReviewJob[] {

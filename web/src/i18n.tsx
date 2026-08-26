@@ -623,6 +623,25 @@ export const en = {
   'setup.ciWorkflowPreviewCopy': 'Copy',
   'setup.ciWorkflowPreviewCopied': 'Copied',
   'setup.ciWorkflowPreviewCopyFailed': 'The workflow could not be copied because clipboard access was unavailable.',
+  'setup.ciWorkflowCreate': 'Create Workflow',
+  'setup.ciWorkflowCreateAvailable': 'The exact preview is available to create in this clean repository.',
+  'setup.ciWorkflowAlreadyExists': 'Workflow already exists. Overwrite is not supported.',
+  'setup.ciWorkflowIgnored': 'Workflow path is ignored by Git.',
+  'setup.ciWorkflowDirty': 'Repository must be clean before creating workflow.',
+  'setup.ciWorkflowUnsafe': 'Workflow target is unavailable.',
+  'setup.ciWorkflowConfirmEyebrow': 'Explicit confirmation',
+  'setup.ciWorkflowConfirmTitle': 'Create RoboRev CI Workflow',
+  'setup.ciWorkflowCloseConfirmation': 'Close workflow creation confirmation',
+  'setup.ciWorkflowConfirmDescription': 'The exact YAML shown in this preview will be created in the selected repository.',
+  'setup.ciWorkflowCreateOnly': 'Create-only: the fixed workflow target is created only when it is absent.',
+  'setup.ciWorkflowNoOverwrite': 'Existing files are never overwritten.',
+  'setup.ciWorkflowNoAutomation': 'The repository is not committed or pushed automatically.',
+  'setup.ciWorkflowExactPreview': 'Only the exact preview bytes will be created.',
+  'setup.ciWorkflowCreating': 'Creating…',
+  'setup.ciWorkflowCreated': 'Workflow created',
+  'setup.ciWorkflowCreatedNext': 'Review it, then commit and push with Git.',
+  'setup.ciWorkflowFailed': 'Workflow creation could not be verified. Inspect the repository before retrying.',
+  'setup.ciWorkflowExecuteError': 'Workflow creation could not be verified. Inspect the repository before retrying.',
   'setup.agentHookReadinessTitle': 'Agent Hook Readiness',
   'setup.agentHookReadinessDescription': 'AI coding agent harness integration configuration status.',
   'setup.agentHookReadinessLoading': 'Checking agent hook readiness…',
@@ -1384,6 +1403,25 @@ ko['setup.ciWorkflowPreviewYaml'] = '생성된 YAML'
 ko['setup.ciWorkflowPreviewCopy'] = '복사'
 ko['setup.ciWorkflowPreviewCopied'] = '복사됨'
 ko['setup.ciWorkflowPreviewCopyFailed'] = '클립보드에 접근할 수 없어 workflow를 복사하지 못했습니다.'
+ko['setup.ciWorkflowCreate'] = 'Workflow 생성'
+ko['setup.ciWorkflowCreateAvailable'] = '현재 깨끗한 저장소에 exact 미리보기를 생성할 수 있습니다.'
+ko['setup.ciWorkflowAlreadyExists'] = 'Workflow가 이미 존재합니다. 덮어쓰기는 지원하지 않습니다.'
+ko['setup.ciWorkflowIgnored'] = 'Workflow 경로가 Git에서 ignore되어 있습니다.'
+ko['setup.ciWorkflowDirty'] = 'Workflow를 생성하려면 저장소가 clean 상태여야 합니다.'
+ko['setup.ciWorkflowUnsafe'] = 'Workflow 대상을 사용할 수 없습니다.'
+ko['setup.ciWorkflowConfirmEyebrow'] = '명시적 확인'
+ko['setup.ciWorkflowConfirmTitle'] = 'RoboRev CI Workflow 생성'
+ko['setup.ciWorkflowCloseConfirmation'] = 'Workflow 생성 확인 닫기'
+ko['setup.ciWorkflowConfirmDescription'] = '이 미리보기에 표시된 exact YAML이 선택한 저장소에 생성됩니다.'
+ko['setup.ciWorkflowCreateOnly'] = 'Create-only: 고정된 workflow 대상이 없을 때만 생성합니다.'
+ko['setup.ciWorkflowNoOverwrite'] = '기존 파일은 절대 덮어쓰지 않습니다.'
+ko['setup.ciWorkflowNoAutomation'] = '저장소를 자동으로 commit하거나 push하지 않습니다.'
+ko['setup.ciWorkflowExactPreview'] = '미리보기의 exact bytes만 생성합니다.'
+ko['setup.ciWorkflowCreating'] = '생성 중…'
+ko['setup.ciWorkflowCreated'] = 'Workflow가 생성되었습니다'
+ko['setup.ciWorkflowCreatedNext'] = '검토한 다음 Git으로 commit하고 push하세요.'
+ko['setup.ciWorkflowFailed'] = 'Workflow 생성을 확인하지 못했습니다. 재시도하기 전에 저장소를 확인하세요.'
+ko['setup.ciWorkflowExecuteError'] = 'Workflow 생성을 확인하지 못했습니다. 재시도하기 전에 저장소를 확인하세요.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

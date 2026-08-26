@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchCIWorkflowPreview, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
+import { executeCIWorkflow, fetchCIWorkflowPreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
-const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) } }
+const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -41,6 +41,30 @@ describe('CI workflow preview API contract', () => {
     expect(JSON.parse(String(init.body))).toEqual({ repositoryIdentity: 'repo-1' })
     expect(Object.keys(JSON.parse(String(init.body)))).toEqual(['repositoryIdentity'])
     expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('test-csrf')
+  })
+
+  it('requires exact write availability unions and rejects private fields', () => {
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' } }, 'repo-1')?.write).toEqual({ status: 'exists' })
+    for (const write of [
+      { status: 'available', token: 'x', expiresAt: '2099-01-01T00:00:00.000Z', extra: true },
+      { status: 'available', token: '', expiresAt: '2099-01-01T00:00:00.000Z' },
+      { status: 'exists', token: 'private' },
+      { status: 'unknown' },
+    ]) expect(normalizeCIWorkflowPreview({ ...ciPreview, write }, 'repo-1')).toBeNull()
+  })
+
+  it('POSTs exactly the opaque token for execute and strictly normalizes the result', async () => {
+    setCSRF('test-csrf')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'verified-created' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(executeCIWorkflow('opaque-create-token')).resolves.toEqual({ status: 'verified-created' })
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/ci-workflow/execute')
+    expect(JSON.parse(String(init.body))).toEqual({ token: 'opaque-create-token' })
+    expect(Object.keys(JSON.parse(String(init.body)))).toEqual(['token'])
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('test-csrf')
+    expect(normalizeCIWorkflowExecuteResult({ status: 'failed-unverified' })).toEqual({ status: 'failed-unverified' })
+    expect(normalizeCIWorkflowExecuteResult({ status: 'verified-created', token: 'secret' })).toBeNull()
   })
 })
 

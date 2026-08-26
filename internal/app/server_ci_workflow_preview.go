@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/froze/roborev-dashboard/internal/ciworkflowmanagement"
 	"github.com/froze/roborev-dashboard/internal/ciworkflowpreview"
 	"github.com/froze/roborev-dashboard/internal/gitx"
 )
@@ -26,6 +28,16 @@ type ciWorkflowPreviewDTO struct {
 	RepositoryIdentity string                       `json:"repositoryIdentity"`
 	Target             string                       `json:"target"`
 	Workflow           ciWorkflowPreviewWorkflowDTO `json:"workflow"`
+	Write              ciWorkflowWriteDTO           `json:"write"`
+}
+
+// ciWorkflowWriteDTO is an allowlisted wire shape. Available is the only
+// status that carries authority; all unavailable states intentionally contain
+// no token, expiry, path, or filesystem diagnostic.
+type ciWorkflowWriteDTO struct {
+	Status    string     `json:"status"`
+	Token     string     `json:"token,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // ciWorkflowPreview is a strict, selected-repository-only read endpoint. It
@@ -83,12 +95,74 @@ func (s *Server) ciWorkflowPreview(w http.ResponseWriter, r *http.Request) {
 	// supplied. Production Service already computes this same digest.
 	digest := sha256.Sum256([]byte(workflow.Content))
 	workflow.SHA256 = hex.EncodeToString(digest[:])
+
+	write := ciWorkflowWriteDTO{Status: "unsafe"}
+	if s.CIWorkflowManagement != nil && s.ciWorkflowWrites != nil {
+		state, stateErr := s.Registry.InspectCIWorkflow(r.Context(), identity)
+		plan, planErr := s.CIWorkflowManagement.Plan(r.Context(), repo.Path)
+		status := ciWorkflowWriteStatus(state, stateErr, plan, planErr, repo.Path)
+		write.Status = status
+		if status == "available" {
+			expires := s.ciWorkflowWrites.expiresAt()
+			record := ciWorkflowWriteRecord{
+				Identity: identity,
+				Root:     repo.Path,
+				Git:      state,
+				Plan:     plan,
+				Content:  []byte(workflow.Content),
+				Digest:   workflow.SHA256,
+				Version:  ciworkflowpreview.Version,
+				Expires:  expires,
+			}
+			token, tokenErr := s.ciWorkflowWrites.put(record)
+			if tokenErr != nil {
+				write.Status = "unsafe"
+			} else {
+				write.Token, write.ExpiresAt = token, &expires
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, ciWorkflowPreviewDTO{
 		Version:            ciworkflowpreview.Version,
 		RepositoryIdentity: identity,
 		Target:             ciworkflowpreview.WorkflowTarget,
 		Workflow:           ciWorkflowPreviewWorkflowDTO{Content: workflow.Content, SHA256: workflow.SHA256},
+		Write:              write,
 	})
+}
+
+func ciWorkflowWriteStatus(state gitx.CIWorkflowRepositoryState, stateErr error, plan ciworkflowmanagement.Plan, planErr error, root string) string {
+	if stateErr != nil || planErr != nil || !gitx.SameRepositoryPath(state.Root, root) || state.Detached || strings.TrimSpace(state.Branch) == "" || !validFullCommitSHA(state.Head) || plan.Status() == ciworkflowmanagement.TargetUnsafe {
+		return "unsafe"
+	}
+	// The precedence is deliberate: an existing target is reported as such
+	// even when Git would also classify it as ignored or the checkout is dirty.
+	if plan.Status() == ciworkflowmanagement.TargetExists {
+		return "exists"
+	}
+	if !plan.Valid() {
+		return "unsafe"
+	}
+	if state.Ignored {
+		return "ignored"
+	}
+	if state.Dirty {
+		return "dirty"
+	}
+	return "available"
+}
+
+func validFullCommitSHA(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // authorizeCIWorkflowPreview requires the complete same-origin browser Fetch

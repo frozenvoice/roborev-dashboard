@@ -284,6 +284,213 @@ type inspectRunner struct {
 	branch   string
 }
 
+type ciWorkflowInspectRunner struct {
+	root       string
+	branch     string
+	head       string
+	dirty      bool
+	ignored    bool
+	detached   bool
+	commands   []proc.Command
+	malformed  string
+	truncated  bool
+	branchExit int
+	configExit int
+	failRoot   bool
+	safeSystem string
+	safeGlobal string
+}
+
+func (r *ciWorkflowInspectRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.commands = append(r.commands, command)
+	args := command.Args
+	if len(args) >= 3 && args[2] == "config" {
+		if r.configExit != 0 {
+			return proc.Result{ExitCode: r.configExit, Stderr: `C:\private\config-error`}, errors.New("private config failure")
+		}
+		if len(args) >= 4 && args[3] == "--system" {
+			return proc.Result{Stdout: r.safeSystem, ExitCode: 0}, nil
+		}
+		return proc.Result{Stdout: r.safeGlobal, ExitCode: 0}, nil
+	}
+	if len(args) >= 4 && args[2] == "rev-parse" && args[3] == "--show-toplevel" {
+		if r.failRoot {
+			return proc.Result{ExitCode: 2, Stderr: `C:\private\repo-error`}, errors.New("private root failure")
+		}
+		return proc.Result{Stdout: r.root, ExitCode: 0}, nil
+	}
+	if len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--verify" {
+		result := proc.Result{Stdout: r.head, ExitCode: 0}
+		if r.malformed == "head" {
+			result.Stdout = "not-a-sha"
+		} else if r.malformed == "utf8" {
+			result.Stdout = string([]byte{0xff, 0xfe})
+		}
+		if r.truncated {
+			result.StdoutTruncated = true
+		}
+		return result, nil
+	}
+	if len(args) >= 6 && args[2] == "symbolic-ref" && args[3] == "--quiet" {
+		if r.detached {
+			return proc.Result{ExitCode: 1}, errors.New("process exited with code 1")
+		}
+		return proc.Result{Stdout: r.branch, ExitCode: r.branchExit}, nil
+	}
+	if len(args) >= 5 && args[2] == "status" && args[3] == "--porcelain=v1" {
+		status := ""
+		if r.dirty {
+			status = " M file.txt\n"
+		}
+		return proc.Result{Stdout: status, ExitCode: 0}, nil
+	}
+	if len(args) >= 7 && args[2] == "check-ignore" {
+		if r.ignored {
+			return proc.Result{ExitCode: 0}, nil
+		}
+		return proc.Result{ExitCode: 1}, errors.New("process exited with code 1")
+	}
+	return proc.Result{}, errors.New("unexpected Git command")
+}
+
+func TestInspectCIWorkflowUsesFixedTargetAndSanitizedTypedCommands(t *testing.T) {
+	t.Setenv("GIT_DIR", `C:\attacker\git`)
+	t.Setenv("GIT_WORK_TREE", `C:\attacker\worktree`)
+	t.Setenv("GIT_CONFIG_GLOBAL", `C:\attacker\config`)
+	t.Setenv("OPENAI_API_KEY", "secret")
+	root := t.TempDir()
+	runner := &ciWorkflowInspectRunner{root: root, branch: "main", head: strings.Repeat("a", 40)}
+	state, err := New(runner).InspectCIWorkflow(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Root != root || state.Branch != "main" || state.Detached || state.Head != strings.Repeat("a", 40) || state.Dirty || state.Ignored {
+		t.Fatalf("state=%#v", state)
+	}
+	want := [][]string{
+		{"-C", root, "rev-parse", "--show-toplevel"},
+		{"-C", root, "rev-parse", "--verify", "HEAD^{commit}"},
+		{"-C", root, "symbolic-ref", "--quiet", "--short", "HEAD"},
+		{"-C", root, "status", "--porcelain=v1", "--untracked-files=normal"},
+		{"-C", root, "check-ignore", "--quiet", "--no-index", "--", CIWorkflowTarget},
+	}
+	var actual [][]string
+	for _, command := range runner.commands {
+		if len(command.Args) > 2 && command.Args[2] == "config" {
+			continue
+		}
+		actual = append(actual, command.Args)
+	}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("Git args=%#v want=%#v", actual, want)
+	}
+	for _, command := range runner.commands {
+		if len(command.Args) > 2 && command.Args[2] == "config" {
+			continue
+		}
+		if containsEnv(command.Env, "GIT_DIR=") || containsEnv(command.Env, "GIT_WORK_TREE=") || containsEnv(command.Env, "GIT_CONFIG_GLOBAL=C:\\attacker\\config") || containsEnv(command.Env, "OPENAI_API_KEY=secret") {
+			t.Fatalf("unsafe environment leaked: %#v", command.Env)
+		}
+		if !containsEnv(command.Env, "GIT_OPTIONAL_LOCKS=0") {
+			t.Fatalf("missing lock-free Git environment: %#v", command.Env)
+		}
+	}
+}
+
+func TestInspectCIWorkflowReportsDirtyAndIgnored(t *testing.T) {
+	root := t.TempDir()
+	runner := &ciWorkflowInspectRunner{root: root, branch: "main", head: strings.Repeat("b", 40), dirty: true, ignored: true}
+	state, err := New(runner).InspectCIWorkflow(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Dirty || !state.Ignored {
+		t.Fatalf("state=%#v", state)
+	}
+}
+
+func TestInspectCIWorkflowForwardsSafeDirectoryValuesToEveryProbe(t *testing.T) {
+	root := t.TempDir()
+	runner := &ciWorkflowInspectRunner{
+		root:       root,
+		branch:     "main",
+		head:       strings.Repeat("e", 40),
+		safeSystem: filepath.Join(root, "system-trusted") + "\x00",
+		safeGlobal: filepath.Join(root, "global-trusted") + "\x00",
+	}
+	if _, err := New(runner).InspectCIWorkflow(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range runner.commands {
+		if len(command.Args) < 3 || command.Args[2] == "config" {
+			continue
+		}
+		if !containsEnv(command.Env, "GIT_CONFIG_COUNT=2") || !containsEnv(command.Env, "GIT_CONFIG_KEY_0=safe.directory") || !containsEnv(command.Env, "GIT_CONFIG_KEY_1=safe.directory") {
+			t.Fatalf("safe.directory was not forwarded to command %#v env=%#v", command.Args, command.Env)
+		}
+	}
+}
+
+func TestInspectCIWorkflowDistinguishesDetachedFromLiteralBranch(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name       string
+		branch     string
+		detached   bool
+		wantBranch string
+	}{
+		{name: "detached", detached: true, wantBranch: "detached"},
+		{name: "literal detached branch", branch: "detached", wantBranch: "detached"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &ciWorkflowInspectRunner{root: root, branch: test.branch, detached: test.detached, head: strings.Repeat("c", 40)}
+			state, err := New(runner).InspectCIWorkflow(context.Background(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Branch != test.wantBranch || state.Detached != test.detached {
+				t.Fatalf("state=%#v", state)
+			}
+		})
+	}
+}
+
+func TestInspectCIWorkflowRejectsMalformedHeadAndTruncatedOutput(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name      string
+		malformed string
+		truncated bool
+	}{
+		{name: "malformed", malformed: "head"},
+		{name: "malformed UTF-8", malformed: "utf8"},
+		{name: "truncated", truncated: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &ciWorkflowInspectRunner{root: root, branch: "main", head: strings.Repeat("d", 40), malformed: test.malformed, truncated: test.truncated}
+			if _, err := New(runner).InspectCIWorkflow(context.Background(), root); err == nil {
+				t.Fatal("malformed Git response was accepted")
+			}
+		})
+	}
+}
+
+func TestInspectCIWorkflowSanitizesGitAndConfigErrors(t *testing.T) {
+	root := t.TempDir()
+	for _, runner := range []*ciWorkflowInspectRunner{
+		{root: root, configExit: 2},
+		{root: root, failRoot: true},
+	} {
+		_, err := New(runner).InspectCIWorkflow(context.Background(), root)
+		if err == nil || !strings.Contains(err.Error(), "inspection unavailable") {
+			t.Fatalf("expected sanitized inspection error, got %v", err)
+		}
+		if strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), root) {
+			t.Fatalf("private Git diagnostic leaked: %v", err)
+		}
+	}
+}
+
 func (r *inspectRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	args := command.Args

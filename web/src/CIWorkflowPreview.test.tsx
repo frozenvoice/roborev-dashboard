@@ -7,7 +7,7 @@ import { StrictMode } from 'react'
 import { Setup } from './Setup'
 
 const content = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n\n# ${{ secrets.OPENAI_API_KEY }}\n'
-const response = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content, sha256: 'a'.repeat(64) } }
+const response = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
 
 function jsonResponse(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }))
@@ -160,5 +160,67 @@ describe('CIWorkflowPreview', () => {
     resolve(new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await pending
     expect(document.body.textContent).not.toContain(content)
+  })
+
+  it('shows create-only eligibility messages and no create CTA for blocked states', async () => {
+    for (const status of ['exists', 'unsafe', 'ignored', 'dirty'] as const) {
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status } })))
+      renderPreview()
+      await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
+      await screen.findByText('.github/workflows/roborev.yml')
+      expect(screen.queryByRole('button', { name: 'Create Workflow' })).not.toBeInTheDocument()
+      expect(screen.queryByText(/overwrite is not supported|ignored by Git|must be clean|target is unavailable/i)).toBeInTheDocument()
+      cleanup()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('opens confirmation without network, cancels without execute, and posts only the token once', async () => {
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ path: String(input), init })
+      return jsonResponse(String(input).endsWith('/execute') ? { status: 'verified-created' } : response)
+    }))
+    renderPreview()
+    await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
+    await screen.findByRole('button', { name: 'Create Workflow' })
+    await userEvent.click(screen.getByRole('button', { name: 'Create Workflow' }))
+    expect(calls).toHaveLength(1)
+    expect(screen.getByRole('dialog')).toHaveTextContent('The exact YAML shown in this preview will be created in the selected repository.')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Existing files are never overwritten.')
+    expect(screen.getByRole('dialog')).toHaveTextContent('The repository is not committed or pushed automatically.')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Only RoboRev itself is pinned to v0.64.0')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(calls).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Create Workflow' }))
+    const confirm = screen.getByRole('dialog').querySelector('footer .button.primary') as HTMLButtonElement
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    await screen.findByText('Workflow created')
+    expect(calls).toHaveLength(2)
+    expect(calls[1].path).toBe('/api/ci-workflow/execute')
+    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ token: 'opaque-create-token' })
+    expect(screen.queryByRole('button', { name: 'Create Workflow' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('.github/workflows/roborev.yml').length).toBeGreaterThan(0)
+    expect(document.body.textContent).not.toContain('C:\\Users\\private')
+  })
+
+  it('supports Escape cancellation and renders a generic failed-unverified result without retry', async () => {
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push(String(input))
+      return jsonResponse(String(input).endsWith('/execute') ? { status: 'failed-unverified' } : response)
+    }))
+    renderPreview()
+    await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Workflow' }))
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(calls).toHaveLength(1)
+    await userEvent.click(screen.getByRole('button', { name: 'Create Workflow' }))
+    await userEvent.click(screen.getByRole('dialog').querySelector('footer .button.primary') as HTMLButtonElement)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Workflow creation could not be verified. Inspect the repository before retrying.')
+    expect(calls).toHaveLength(2)
+    expect(screen.queryByRole('button', { name: 'Create Workflow' })).not.toBeInTheDocument()
   })
 })

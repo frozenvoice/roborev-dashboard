@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
 )
@@ -58,6 +59,23 @@ type HookLayout struct {
 type Service struct {
 	Git    string
 	Runner proc.Runner
+}
+
+// CIWorkflowTarget is the only repository target inspected by CI Workflow
+// Management. It is intentionally a relative, server-owned constant; callers
+// must never substitute a browser-provided path.
+const CIWorkflowTarget = ".github/workflows/roborev.yml"
+
+// CIWorkflowRepositoryState is the small, typed Git snapshot needed by the
+// CI workflow management flow. Root and all other fields are server-side
+// values and are not a browser path-selection API.
+type CIWorkflowRepositoryState struct {
+	Root     string
+	Branch   string
+	Detached bool
+	Head     string
+	Dirty    bool
+	Ignored  bool
 }
 
 func New(runner proc.Runner) *Service { return &Service{Git: "git", Runner: runner} }
@@ -504,4 +522,211 @@ func (s *Service) Inspect(ctx context.Context, path string) (Repository, error) 
 	configInfo, configErr := os.Stat(filepath.Join(root, ".roborev.toml"))
 	hasConfig := configErr == nil && !configInfo.IsDir()
 	return Repository{Name: filepath.Base(root), Path: root, Branch: branch, Detached: detached, Head: head, HeadShort: short, CommitSubject: subject, Dirty: status != "", HasConfig: hasConfig}, nil
+}
+
+// InspectCIWorkflow performs the fixed-target, read-only Git inspection used
+// by CI Workflow Management. Every invocation uses one sanitized environment
+// and typed argument arrays; in particular, no inherited GIT_* routing is
+// allowed to redirect the repository or config lookup.
+//
+// The method deliberately does not inspect a caller-supplied target path. The
+// target is always CIWorkflowTarget, resolved relative to the canonical Git
+// root returned by rev-parse.
+func (s *Service) InspectCIWorkflow(ctx context.Context, path string) (CIWorkflowRepositoryState, error) {
+	if strings.TrimSpace(path) == "" {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+	input, err := filepath.Abs(path)
+	if err != nil {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(input); evalErr == nil {
+		input = filepath.Clean(resolved)
+	} else {
+		input = filepath.Clean(input)
+	}
+	env, err := s.sanitizedCIWorkflowGitEnv(ctx, input)
+	if err != nil {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+
+	rootResult, err := s.runCIWorkflowGit(ctx, input, env, "rev-parse", "--show-toplevel")
+	if err != nil || rootResult.ExitCode != 0 {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+	root, err := canonicalCIWorkflowPath(rootResult.Stdout)
+	if err != nil || !SameRepositoryPath(root, input) {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+
+	headResult, err := s.runCIWorkflowGit(ctx, root, env, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil || headResult.ExitCode != 0 {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+	head, ok := fullCommitSHA(headResult.Stdout)
+	if !ok {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+
+	branchResult, branchErr := s.runCIWorkflowGit(ctx, root, env, "symbolic-ref", "--quiet", "--short", "HEAD")
+	detached := false
+	branch := ""
+	if branchResult.ExitCode == 1 {
+		// Git uses exit 1 specifically for a detached HEAD. Keep this separate
+		// from a branch literally named "detached".
+		if branchErr == nil || strings.TrimSpace(branchResult.Stdout) != "" {
+			return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+		}
+		detached = true
+		branch = "detached"
+	} else {
+		if branchErr != nil || branchResult.ExitCode != 0 {
+			return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+		}
+		branch, ok = singleLineGitOutput(branchResult.Stdout)
+		if !ok {
+			return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+		}
+	}
+
+	statusResult, err := s.runCIWorkflowGit(ctx, root, env, "status", "--porcelain=v1", "--untracked-files=normal")
+	if err != nil || statusResult.ExitCode != 0 {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+
+	ignoreResult, ignoreErr := s.runCIWorkflowGit(ctx, root, env, "check-ignore", "--quiet", "--no-index", "--", CIWorkflowTarget)
+	ignored := false
+	if ignoreResult.ExitCode == 0 {
+		if ignoreErr != nil || strings.TrimSpace(ignoreResult.Stdout) != "" {
+			return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+		}
+		ignored = true
+	} else if ignoreResult.ExitCode == 1 {
+		if ignoreErr == nil || strings.TrimSpace(ignoreResult.Stdout) != "" {
+			return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+		}
+	} else {
+		return CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection unavailable")
+	}
+
+	return CIWorkflowRepositoryState{
+		Root:     root,
+		Branch:   branch,
+		Detached: detached,
+		Head:     head,
+		Dirty:    strings.TrimSpace(statusResult.Stdout) != "",
+		Ignored:  ignored,
+	}, nil
+}
+
+// InspectCIWorkflowTarget is an explicit alias for callers that prefer to
+// name the fixed-target nature of InspectCIWorkflow. Both methods retain the
+// same server-owned path and read-only semantics.
+func (s *Service) InspectCIWorkflowTarget(ctx context.Context, path string) (CIWorkflowRepositoryState, error) {
+	return s.InspectCIWorkflow(ctx, path)
+}
+
+func (s *Service) runCIWorkflowGit(ctx context.Context, path string, env []string, args ...string) (proc.Result, error) {
+	commandArgs := append([]string{"-C", path}, args...)
+	result, runErr := s.Runner.Run(ctx, proc.Command{
+		Executable:  s.Git,
+		Args:        commandArgs,
+		Env:         env,
+		Timeout:     10 * time.Second,
+		OutputLimit: 1 << 20,
+	})
+	if result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return result, errors.New("Git CI workflow inspection unavailable")
+	}
+	return result, runErr
+}
+
+// sanitizedCIWorkflowGitEnv is the strict counterpart to the broader hook
+// inspection environment helper. A missing safe.directory key is expected
+// (Git exits 1); every other config-probe failure is rejected so an unknown
+// or truncated probe cannot silently broaden repository authority.
+func (s *Service) sanitizedCIWorkflowGitEnv(ctx context.Context, path string) ([]string, error) {
+	base := minimalHookGitEnv(os.Environ())
+	base = append(base, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	safeDirectories := make([]string, 0, 4)
+	for _, scope := range []string{"--system", "--global"} {
+		result, runErr := s.Runner.Run(ctx, proc.Command{
+			Executable:  s.Git,
+			Args:        []string{"-C", path, "config", scope, "--includes", "-z", "--get-all", "safe.directory"},
+			Env:         base,
+			Timeout:     10 * time.Second,
+			OutputLimit: 64 << 10,
+		})
+		if result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+			return nil, errors.New("Git CI workflow inspection unavailable")
+		}
+		if result.ExitCode == 1 {
+			if strings.TrimSpace(result.Stdout) != "" {
+				return nil, errors.New("Git CI workflow inspection unavailable")
+			}
+			continue
+		}
+		if runErr != nil || result.ExitCode != 0 {
+			return nil, errors.New("Git CI workflow inspection unavailable")
+		}
+		if result.Stdout == "" {
+			continue
+		}
+		if !strings.HasSuffix(result.Stdout, "\x00") {
+			return nil, errors.New("Git CI workflow inspection unavailable")
+		}
+		for _, value := range strings.Split(strings.TrimSuffix(result.Stdout, "\x00"), "\x00") {
+			safeDirectories = append(safeDirectories, value)
+		}
+	}
+	env := minimalHookGitEnv(os.Environ())
+	env = append(env, "GIT_CONFIG_GLOBAL=", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(safeDirectories)))
+	for index, value := range safeDirectories {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=safe.directory", index), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", index, value))
+	}
+	return env, nil
+}
+
+func canonicalCIWorkflowPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n") {
+		return "", errors.New("Git CI workflow inspection unavailable")
+	}
+	path := filepath.FromSlash(value)
+	if !filepath.IsAbs(path) {
+		return "", errors.New("Git CI workflow inspection unavailable")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", errors.New("Git CI workflow inspection unavailable")
+	}
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = resolved
+	}
+	return filepath.Clean(abs), nil
+}
+
+func fullCommitSHA(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if !utf8.ValidString(value) || (len(value) != 40 && len(value) != 64) {
+		return "", false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func singleLineGitOutput(value string) (string, bool) {
+	if !utf8.ValidString(value) {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\r\n") {
+		return "", false
+	}
+	return value, true
 }

@@ -99,8 +99,14 @@ func TestCIWorkflowPreviewEndpointReturnsExactWorkflowDTO(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 4 {
+	if len(got) != 5 {
 		t.Fatalf("DTO keys=%v", got)
+	}
+	var write struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(got["write"], &write); err != nil || write.Status != "unsafe" {
+		t.Fatalf("write=%#v err=%v", write, err)
 	}
 	var version, gotIdentity, target string
 	if err := json.Unmarshal(got["version"], &version); err != nil || version != "v0.64.0" {

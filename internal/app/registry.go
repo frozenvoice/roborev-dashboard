@@ -33,6 +33,13 @@ type repositoryHookLayoutResolver interface {
 	ResolveHookLayout(context.Context, string) (gitx.HookLayout, error)
 }
 
+// repositoryCIWorkflowInspector is an optional capability. Keeping it
+// separate from RepositoryInspector prevents the general registry contract
+// from acquiring a fixed CI target or other management-only fields.
+type repositoryCIWorkflowInspector interface {
+	InspectCIWorkflow(context.Context, string) (gitx.CIWorkflowRepositoryState, error)
+}
+
 type registryConfig struct {
 	Recent          []string          `json:"recentRepositories"`
 	LastSelected    string            `json:"lastSelectedRepository"`
@@ -640,6 +647,36 @@ func (r *Registry) InspectIdentity(ctx context.Context, identity string) (gitx.R
 		return gitx.Repository{}, err
 	}
 	return r.inspectExpected(ctx, path)
+}
+
+// InspectCIWorkflow resolves an opaque registered repository identity and
+// delegates the fixed-target read-only inspection to an optional Git adapter.
+// The adapter's returned root is checked against the registered canonical
+// root before the snapshot is accepted. Browser callers never provide a path
+// or target to this method.
+func (r *Registry) InspectCIWorkflow(ctx context.Context, identity string) (gitx.CIWorkflowRepositoryState, error) {
+	path, err := r.ResolveIdentity(identity)
+	if err != nil {
+		return gitx.CIWorkflowRepositoryState{}, err
+	}
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	ciInspector, ok := inspector.(repositoryCIWorkflowInspector)
+	if !ok {
+		return gitx.CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection is unavailable")
+	}
+	state, err := ciInspector.InspectCIWorkflow(ctx, path)
+	if err != nil {
+		// Adapter errors may contain private filesystem/process details. The
+		// optional registry boundary exposes only a stable capability error;
+		// callers can classify it without receiving a path-bearing diagnostic.
+		return gitx.CIWorkflowRepositoryState{}, errors.New("Git CI workflow inspection is unavailable")
+	}
+	if !gitx.SameRepositoryPath(state.Root, path) {
+		return gitx.CIWorkflowRepositoryState{}, errors.New("Git CI workflow repository root mismatch")
+	}
+	return state, nil
 }
 
 func (r *Registry) Selected() string {
