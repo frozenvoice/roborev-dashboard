@@ -636,6 +636,17 @@ export const en = {
   'setup.agentHookManagementMalformed': 'The Dashboard could not validate the typed agent hook response.',
   'setup.agentHookManagementPreviewFailed': 'The agent hook preview could not be prepared.',
   'setup.agentHookManagementExecuteFailed': 'The agent hook action could not be completed or verified.',
+  'setup.skillsReadinessTitle': 'Skills Readiness',
+  'setup.skillsReadinessDescription': 'Read-only status of the bundled RoboRev v0.64.0 skills.',
+  'setup.skillsReadinessLoading': 'Checking bundled skill readiness…',
+  'setup.skillsReadinessRefresh': 'Refresh skills readiness',
+  'setup.skillsReadinessUnavailable': 'Skills readiness unavailable',
+  'setup.skillsReadinessRetry': 'The bundled skill status could not be verified. Refresh to try again.',
+  'setup.skillsReadinessCurrent': 'Current',
+  'setup.skillsReadinessNeedsUpdate': 'Needs install/update',
+  'setup.skillsReadinessConfigUnavailable': 'Agent config not detected',
+  'setup.skillsReadinessCurrentCount': '{current} / {total} current',
+  'setup.skillsReadinessBreakdown': '{current} current · {outdated} outdated · {missing} missing',
   'diagnostics.title': 'Runtime Diagnostics',
   'diagnostics.description': 'Read-only daemon, worker, queue, job, and health signals.',
   'diagnostics.open': 'Diagnostics',
@@ -1270,6 +1281,17 @@ ko['setup.agentHookManagementResultDetail'] = '최종 hook 상태를 authoritati
 ko['setup.agentHookManagementMalformed'] = 'Dashboard가 typed agent hook 응답을 검증하지 못했습니다.'
 ko['setup.agentHookManagementPreviewFailed'] = 'agent hook preview를 준비하지 못했습니다.'
 ko['setup.agentHookManagementExecuteFailed'] = 'agent hook 작업을 완료하거나 확인하지 못했습니다.'
+ko['setup.skillsReadinessTitle'] = 'Skills 준비 상태'
+ko['setup.skillsReadinessDescription'] = 'RoboRev v0.64.0 번들 skill의 읽기 전용 상태입니다.'
+ko['setup.skillsReadinessLoading'] = '번들 skill 준비 상태 확인 중…'
+ko['setup.skillsReadinessRefresh'] = 'Skills 준비 상태 새로고침'
+ko['setup.skillsReadinessUnavailable'] = 'Skills 준비 상태를 사용할 수 없음'
+ko['setup.skillsReadinessRetry'] = '번들 skill 상태를 확인하지 못했습니다. 새로고침하여 다시 시도하세요.'
+ko['setup.skillsReadinessCurrent'] = '최신'
+ko['setup.skillsReadinessNeedsUpdate'] = '설치/업데이트 필요'
+ko['setup.skillsReadinessConfigUnavailable'] = '에이전트 구성을 감지하지 못함'
+ko['setup.skillsReadinessCurrentCount'] = '{current} / {total} 최신'
+ko['setup.skillsReadinessBreakdown'] = '{current} 최신 · {outdated} 오래됨 · {missing} 없음'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

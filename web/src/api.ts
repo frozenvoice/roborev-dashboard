@@ -55,6 +55,48 @@ export type AgentHookReadiness = {
   agents: AgentHookReadinessAgentState[]
 }
 
+export type SkillsReadinessAgent = 'codex' | 'claude' | 'grok' | 'droid'
+export type SkillsReadinessStatus = 'current' | 'needs-install-update' | 'config-unavailable'
+export type SkillsReadinessAgentState = {
+  agent: SkillsReadinessAgent
+  status: SkillsReadinessStatus
+  current: number
+  outdated: number
+  missing: number
+  total: 10
+}
+export type SkillsReadiness = {
+  version: 'v0.64.0'
+  agents: SkillsReadinessAgentState[]
+}
+
+const skillsReadinessVersion = 'v0.64.0' as const
+const skillsReadinessAgents: readonly SkillsReadinessAgent[] = ['codex', 'claude', 'grok', 'droid']
+const skillsReadinessStatuses: readonly SkillsReadinessStatus[] = ['current', 'needs-install-update', 'config-unavailable']
+const skillsReadinessTotal = 10 as const
+
+/** Normalize the content-free, fixed-catalog Skills Readiness DTO. */
+export function normalizeSkillsReadiness(value: unknown): SkillsReadiness | null {
+  const root = exactObject(value, ['version', 'agents'])
+  if (!root || root.version !== skillsReadinessVersion || !Array.isArray(root.agents) || root.agents.length !== skillsReadinessAgents.length) return null
+  const agents: SkillsReadinessAgentState[] = []
+  for (let index = 0; index < skillsReadinessAgents.length; index += 1) {
+    const item = exactObject(root.agents[index], ['agent', 'status', 'current', 'outdated', 'missing', 'total'])
+    const expectedAgent = skillsReadinessAgents[index]
+    if (!item || item.agent !== expectedAgent || typeof item.status !== 'string' || !skillsReadinessStatuses.includes(item.status as SkillsReadinessStatus)) return null
+    if (item.total !== skillsReadinessTotal || !nonNegativeSafeInteger(item.current) || !nonNegativeSafeInteger(item.outdated) || !nonNegativeSafeInteger(item.missing)) return null
+    const status = item.status as SkillsReadinessStatus
+    const current = item.current as number
+    const outdated = item.outdated as number
+    const missing = item.missing as number
+    if (status === 'current' && (current !== skillsReadinessTotal || outdated !== 0 || missing !== 0)) return null
+    if (status === 'needs-install-update' && (current + outdated + missing !== skillsReadinessTotal || outdated + missing === 0)) return null
+    if (status === 'config-unavailable' && (current !== 0 || outdated !== 0 || missing !== 0)) return null
+    agents.push({ agent: expectedAgent, status, current, outdated, missing, total: skillsReadinessTotal })
+  }
+  return { version: skillsReadinessVersion, agents }
+}
+
 const agentHookReadinessVersion = 'v0.64.0' as const
 const agentHookReadinessAgents: readonly AgentHookReadinessAgent[] = ['codex', 'claude', 'grok', 'droid']
 const agentHookReadinessStatuses: readonly AgentHookReadinessStatus[] = ['current', 'needs-update', 'unavailable']

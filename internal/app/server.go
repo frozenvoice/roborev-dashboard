@@ -235,6 +235,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runtime", s.runtime)
 	s.mux.HandleFunc("GET /api/runtime/diagnostics", s.runtimeDiagnostics)
 	s.mux.HandleFunc("GET /api/agent-hooks/readiness", s.agentHookReadiness)
+	s.mux.HandleFunc("GET /api/skills/readiness", s.skillsReadiness)
 	s.mux.HandleFunc("POST /api/agent-hooks/preview", s.agentHookManagementPreview)
 	s.mux.HandleFunc("POST /api/agent-hooks/execute", s.agentHookManagementExecute)
 	s.mux.HandleFunc("GET /api/exports/reviews", s.reviewMetadataExport)

@@ -198,6 +198,36 @@ const (
 	AgentHookReadinessUnavailable AgentHookReadinessStatus = "unavailable"
 )
 
+// SkillsReadinessService is deliberately optional so the long-lived Service
+// interface remains source-compatible with existing adapters and fakes. It
+// exposes only the fixed, read-only v0.64.0 skill status DTO; config paths,
+// skill files, descriptions, and raw CLI output never cross this boundary.
+type SkillsReadinessService interface {
+	SkillsReadiness(context.Context) (SkillsReadiness, error)
+}
+
+type SkillsReadiness struct {
+	Version string                 `json:"version"`
+	Agents  []SkillsReadinessAgent `json:"agents"`
+}
+
+type SkillsReadinessAgent struct {
+	Agent    string `json:"agent"`
+	Status   string `json:"status"`
+	Current  int    `json:"current"`
+	Outdated int    `json:"outdated"`
+	Missing  int    `json:"missing"`
+	Total    int    `json:"total"`
+}
+
+type SkillsReadinessStatus string
+
+const (
+	SkillsReadinessCurrent            SkillsReadinessStatus = "current"
+	SkillsReadinessNeedsInstallUpdate SkillsReadinessStatus = "needs-install-update"
+	SkillsReadinessConfigUnavailable  SkillsReadinessStatus = "config-unavailable"
+)
+
 // AgentHookManagementTransport is optional so existing RoboRev adapters and
 // fakes remain source-compatible. The server uses this narrow transport for
 // one allowlisted agent at a time; config paths and raw CLI output stay
