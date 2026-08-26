@@ -21,6 +21,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/fixoperation"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/hookmanagement"
 	"github.com/froze/roborev-dashboard/internal/hookstatus"
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/operation"
@@ -60,6 +61,8 @@ type Server struct {
 	repositoryMoveFS repomove.FileSystem
 	Insights         *insights.Manager
 	HookStatus       *hookstatus.Service
+	HookManagement   *hookmanagement.Service
+	hookPreviews     *hookManagementPreviewStore
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -148,7 +151,11 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if candidate, ok := service.(hookstatus.VersionProbe); ok {
 		versionProbe = candidate
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil)}
+	var management *hookmanagement.Service
+	if _, ok := registry.inspector.(repositoryHookLayoutResolver); ok {
+		management = hookmanagement.New(registry, nil)
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil), HookManagement: management, hookPreviews: newHookManagementPreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -226,6 +233,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runtime/diagnostics", s.runtimeDiagnostics)
 	s.mux.HandleFunc("GET /api/exports/reviews", s.reviewMetadataExport)
 	s.mux.HandleFunc("GET /api/repositories/hooks", s.repositoryHooks)
+	s.mux.HandleFunc("GET /api/repositories/hooks/management", s.repositoryHookManagement)
+	s.mux.HandleFunc("POST /api/repositories/hooks/preview", s.mutationAuth(s.repositoryHookManagementPreview))
+	s.mux.HandleFunc("POST /api/repositories/hooks/execute", s.mutationAuth(s.repositoryHookManagementExecute))
 	s.mux.HandleFunc("GET /api/agents", s.agentStatuses)
 	s.mux.HandleFunc("GET /api/runtime-control", s.runtimeControlStatus)
 	s.mux.HandleFunc("GET /api/setup/roborev", s.setupStatus)

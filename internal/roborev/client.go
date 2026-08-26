@@ -180,6 +180,103 @@ func (c *Client) BindingIdentity() string {
 func (c *Client) HasExplicitOverride() bool                        { return c.explicitOverride }
 func (c *Client) ProbeVersion(ctx context.Context) (string, error) { return c.detectVersion(ctx) }
 
+// ProbeGitHookBinding performs an uncached version probe for the currently
+// bound executable. Management previews and executes use this instead of the
+// ordinary installation cache because a preview must be bound to the exact
+// v0.64 binary generation and file identity.
+func (c *Client) ProbeGitHookBinding(ctx context.Context) (GitHookBinding, error) {
+	binary, _, generation := c.snapshot()
+	if strings.TrimSpace(binary) == "" {
+		return GitHookBinding{}, errors.New("roborev executable is unavailable")
+	}
+	abs, err := filepath.Abs(binary)
+	if err != nil {
+		return GitHookBinding{}, errors.New("roborev executable path is malformed")
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Some Windows filesystems do not expose a resolvable link target for
+		// an ordinary regular file. Lstat below still rejects symlinks/reparse
+		// points; retain the cleaned absolute path for that non-ambiguous case.
+		resolved = abs
+	}
+	if !sameExecutablePath(abs, resolved) {
+		return GitHookBinding{}, errors.New("roborev executable path is not canonical")
+	}
+	binary = filepath.Clean(resolved)
+	info, err := os.Lstat(binary)
+	if err != nil || !safeExecutableInfo(info) {
+		return GitHookBinding{}, errors.New("roborev executable is not a regular file")
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: []string{"version", "--json"}, Env: sanitizedGitHookEnv(), Timeout: 5 * time.Second, OutputLimit: 64 << 10})
+	if runErr != nil || result.StdoutTruncated {
+		return GitHookBinding{}, errors.New("roborev version probe failed")
+	}
+	var version struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if json.Unmarshal([]byte(result.Stdout), &version) != nil || roborevcompat.ValidateVersionIdentity(version.Name, version.Version) != nil || !roborevcompat.IsSupportedVersion(version.Version) {
+		return GitHookBinding{}, errors.New("unsupported RoboRev version")
+	}
+	return GitHookBinding{Binary: binary, Version: version.Version, Generation: generation, FileID: fmt.Sprintf("%d:%d:%o", info.Size(), info.ModTime().UnixNano(), info.Mode())}, nil
+}
+
+func sameExecutablePath(left, right string) bool {
+	return gitx.SameRepositoryPath(filepath.Clean(left), filepath.Clean(right))
+}
+
+// RunGitHook launches exactly one allowlisted hook command in the authorized
+// repository root. It re-probes the binding immediately before launch and
+// refuses to run if the executable/version/generation changed.
+func (c *Client) RunGitHook(ctx context.Context, root string, action GitHookAction, expected GitHookBinding) (GitHookExecution, error) {
+	binding, err := c.ProbeGitHookBinding(ctx)
+	if err != nil || binding != expected {
+		return GitHookExecution{}, ErrBindingChanged
+	}
+	var args []string
+	switch action {
+	case GitHookInstall:
+		args = []string{"install-hook", "--binary", binding.Binary}
+	case GitHookRepair:
+		args = []string{"install-hook", "repair", "--binary", binding.Binary}
+	case GitHookRemove:
+		args = []string{"uninstall-hook"}
+	default:
+		return GitHookExecution{}, errors.New("unsupported Git hook action")
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: binding.Binary, Args: args, Dir: root, Env: sanitizedGitHookEnv(), Timeout: 30 * time.Second, OutputLimit: 1 << 20})
+	execution := GitHookExecution{Started: result.Started, ExitCode: result.ExitCode}
+	if runErr != nil {
+		return execution, errors.New("RoboRev hook command failed")
+	}
+	return execution, nil
+}
+
+// sanitizedGitHookEnv removes inherited Git routing/configuration variables
+// from both the fresh binding probe and the mutation launch. RoboRev invokes
+// Git from the repository cwd; retaining any GIT_* value here could redirect
+// that operation away from the server-authorized root. HOME hints and the
+// platform runtime allowlist are retained so normal Git safe.directory and
+// user configuration behavior continues to work.
+func sanitizedGitHookEnv() []string {
+	source := os.Environ()
+	env := proc.MinimalProbeEnv(source)
+	for _, entry := range source {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		for _, allowed := range []string{"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"} {
+			if strings.EqualFold(name, allowed) {
+				env = append(env, entry)
+				break
+			}
+		}
+	}
+	return env
+}
+
 func (c *Client) Rebind(ctx context.Context, binary string) error {
 	if strings.TrimSpace(binary) == "" {
 		return errors.New("roborev binary path is required")

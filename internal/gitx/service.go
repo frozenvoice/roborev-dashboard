@@ -37,6 +37,24 @@ type RepositoryMetadata struct {
 	CommonDir string
 }
 
+// HookLayout is the complete, server-side Git hook resolution snapshot used
+// by mutation preflight. Paths in this type never cross the HTTP boundary.
+// HooksPath is Git's effective path; GitDir and CommonDir are the two
+// allowlisted containment roots. EffectiveHooksPath records the effective
+// core.hooksPath value (when present) so callers can reject the v0.64
+// EnsureAbsoluteHooksPath normalization side effect before launching CLI.
+type HookLayout struct {
+	Root                         string
+	GitDir                       string
+	CommonDir                    string
+	HooksPath                    string
+	EffectiveHooksPath           string
+	EffectiveHooksPathSet        bool
+	EffectiveHooksPathIsRelative bool
+	Safe                         bool
+	Ambiguous                    bool
+}
+
 type Service struct {
 	Git    string
 	Runner proc.Runner
@@ -81,6 +99,147 @@ func (s *Service) HooksPath(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 	return filepath.Clean(filepath.Join(mainRoot, hooksPath)), nil
+}
+
+// ResolveHookLayout resolves Git's effective hook directory and metadata with
+// one sanitized environment. It is deliberately read-only: unlike the
+// upstream install-hook command it never invokes EnsureAbsoluteHooksPath or
+// writes repository configuration.
+func (s *Service) ResolveHookLayout(ctx context.Context, path string) (HookLayout, error) {
+	if strings.TrimSpace(path) == "" {
+		return HookLayout{}, errors.New("repository path is required")
+	}
+	input, err := filepath.Abs(path)
+	if err != nil {
+		return HookLayout{}, errors.New("repository path is malformed")
+	}
+	env := s.sanitizedHookGitEnv(ctx, input)
+	rootValue, err := s.hookCommandWithEnv(ctx, input, env, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return HookLayout{}, errors.New("resolve Git repository root")
+	}
+	root := absoluteHookPath(input, normalizeHookPath(rootValue))
+	if root == "" {
+		return HookLayout{}, errors.New("Git repository root is malformed")
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(root); resolveErr == nil {
+		root = filepath.Clean(resolved)
+	}
+	gitDirValue, err := s.hookCommandWithEnv(ctx, root, env, "rev-parse", "--git-dir")
+	if err != nil {
+		return HookLayout{}, errors.New("resolve Git directory")
+	}
+	commonDirValue, err := s.hookCommandWithEnv(ctx, root, env, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return HookLayout{}, errors.New("resolve Git common directory")
+	}
+	hooksValue, err := s.hookCommandWithEnv(ctx, root, env, "rev-parse", "--git-path", "hooks")
+	if err != nil {
+		return HookLayout{}, errors.New("resolve Git hooks path")
+	}
+	gitDir := absoluteHookPath(root, normalizeHookPath(gitDirValue))
+	commonDir := absoluteHookPath(root, normalizeHookPath(commonDirValue))
+	hooksPath := absoluteHookPath(root, normalizeHookPath(hooksValue))
+	if gitDir == "" || commonDir == "" || hooksPath == "" {
+		return HookLayout{}, errors.New("Git metadata path is malformed")
+	}
+	// rev-parse --git-path hooks returns a relative path rooted in the main
+	// checkout for linked worktrees, matching kit v0.1.8 HooksPath.
+	if !filepath.IsAbs(normalizeHookPath(hooksValue)) {
+		mainRoot, mainErr := s.mainRootForHooks(ctx, root, env)
+		if mainErr != nil {
+			return HookLayout{}, mainErr
+		}
+		hooksPath = filepath.Clean(filepath.Join(mainRoot, normalizeHookPath(hooksValue)))
+	}
+	effectiveValue, effectiveSet, configErr := s.effectiveHooksPath(ctx, root, env)
+	if configErr != nil {
+		return HookLayout{}, configErr
+	}
+	lower := strings.TrimSpace(effectiveValue)
+	relative := effectiveSet && lower != "" && !filepath.IsAbs(normalizeHookPath(lower)) && !isTildePath(lower)
+	canonicalGit, gitAmbiguous := strictCanonicalPath(gitDir)
+	canonicalCommon, commonAmbiguous := strictCanonicalPath(commonDir)
+	canonicalHooks, hooksAmbiguous := strictCanonicalPath(hooksPath)
+	if canonicalGit == "" || canonicalCommon == "" || canonicalHooks == "" {
+		gitAmbiguous, commonAmbiguous, hooksAmbiguous = true, true, true
+	}
+	safe := false
+	if !gitAmbiguous && !commonAmbiguous && !hooksAmbiguous {
+		safe = pathWithin(canonicalHooks, canonicalGit) || pathWithin(canonicalHooks, canonicalCommon)
+	}
+	return HookLayout{Root: root, GitDir: canonicalGit, CommonDir: canonicalCommon, HooksPath: canonicalHooks, EffectiveHooksPath: effectiveValue, EffectiveHooksPathSet: effectiveSet, EffectiveHooksPathIsRelative: relative, Safe: safe, Ambiguous: gitAmbiguous || commonAmbiguous || hooksAmbiguous}, nil
+}
+
+// effectiveHooksPath mirrors the exact read performed by kit v0.1.8's
+// EnsureAbsoluteHooksPath: `git config core.hooksPath`, not --local/--get. Git exit
+// status 1 means the key is unset; every other command failure is an
+// inspection error and therefore fails closed instead of being treated as a
+// safe default.
+func (s *Service) effectiveHooksPath(ctx context.Context, root string, env []string) (string, bool, error) {
+	args := []string{"-C", root, "config", "core.hooksPath"}
+	result, err := s.Runner.Run(ctx, proc.Command{Executable: s.Git, Args: args, Env: env, Timeout: 10 * time.Second, OutputLimit: 64 << 10})
+	if err != nil || result.StdoutTruncated {
+		if !result.StdoutTruncated && result.ExitCode == 1 {
+			return "", false, nil
+		}
+		return "", false, errors.New("read Git hooks path configuration")
+	}
+	value := strings.TrimSpace(result.Stdout)
+	if value == "" {
+		return "", false, nil
+	}
+	return value, true, nil
+}
+
+func isTildePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "~" || strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		return true
+	}
+	return len(value) > 1 && value[0] == '~' && (isASCIIAlpha(value[1]) || value[1] == '_')
+}
+
+// strictCanonicalPath resolves every existing component and fails closed on
+// symlink/reparse ambiguity. A not-yet-created final hooks directory is safe
+// when all existing parents are ordinary directories.
+func strictCanonicalPath(path string) (string, bool) {
+	path, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", true
+	}
+	root := filepath.VolumeName(path) + string(filepath.Separator)
+	if root == string(filepath.Separator) {
+		root = string(filepath.Separator)
+	}
+	current := root
+	remainder := strings.TrimPrefix(path, root)
+	for _, component := range strings.FieldsFunc(remainder, func(r rune) bool { return r == '/' || r == '\\' }) {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				return filepath.Clean(path), false
+			}
+			return "", true
+		}
+		if pathComponentAmbiguous(info) {
+			return "", true
+		}
+		if current == path && !info.IsDir() {
+			return "", true
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path), false
+	}
+	return filepath.Clean(resolved), false
+}
+
+func pathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
 }
 
 func (s *Service) mainRootForHooks(ctx context.Context, path string, env []string) (string, error) {

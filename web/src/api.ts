@@ -55,6 +55,56 @@ export type GitHookStatus = {
   postRewrite: { status: GitHookPostRewriteStatus }
 }
 
+export type GitHookClassification = 'absent' | 'unmanaged' | 'managed-current' | 'managed-outdated' | 'managed-stale-binary' | 'ambiguous' | 'unreadable'
+export type GitHookManagementStatus = 'not-installed' | 'current' | 'outdated' | 'unknown'
+export type GitHookManagementHook = {
+  name: 'post-commit' | 'post-rewrite'
+  status: GitHookManagementStatus
+  classification: GitHookClassification
+  managed: boolean
+  shell: boolean
+  binaryCurrent: boolean
+}
+export type GitHookAvailability = { available: boolean; recommended: boolean; reason: string }
+export type GitHookSafety = {
+  hooksDirectorySafe: boolean
+  configurationMutationRequired: boolean
+  unmanagedHookPresent: boolean
+  nonShellHookPresent: boolean
+  ambiguousRoborevContent: boolean
+  unreadableHookPresent: boolean
+}
+export type GitHookManagement = {
+  repositoryIdentity: string
+  postCommit: GitHookManagementHook
+  postRewrite: GitHookManagementHook
+  install: GitHookAvailability
+  repair: GitHookAvailability
+  remove: GitHookAvailability
+  safety: GitHookSafety
+  summaryCode: string
+  warningCodes: string[]
+}
+export type GitHookManagementCommand = { executable: string; args: string[] }
+export type GitHookManagementPreview = {
+  token: string
+  action: GitHookAction
+  repository: string
+  preflight: GitHookManagement
+  summary: string
+  warningCodes: string[]
+  command: GitHookManagementCommand
+  expiresAt: string
+}
+export type GitHookAction = 'install' | 'repair' | 'remove'
+export type GitHookManagementOutcome = 'verified-success' | 'partial' | 'failed-unverified'
+export type GitHookManagementResult = {
+  status: GitHookManagementOutcome
+  action: GitHookAction
+  preflight: GitHookManagement
+  errorCode?: string
+}
+
 const gitHookOverallStatuses: GitHookOverallStatus[] = ['ready', 'needs-attention', 'not-installed', 'unknown']
 const gitHookPostCommitStatuses: GitHookPostCommitStatus[] = ['current', 'outdated', 'not-installed', 'unknown']
 const gitHookPostRewriteStatuses: GitHookPostRewriteStatus[] = ['current', 'outdated', 'missing', 'not-installed', 'unknown']
@@ -93,6 +143,139 @@ export function normalizeGitHookStatus(value: unknown, expectedRepositoryIdentit
   const normalizedOverall = object.status as GitHookOverallStatus
   if (!validGitHookCombination(normalizedOverall, normalizedPostCommit, normalizedPostRewrite)) return null
   return { repositoryIdentity: object.repositoryIdentity, status: normalizedOverall, postCommit: { status: normalizedPostCommit }, postRewrite: { status: normalizedPostRewrite } }
+}
+
+const gitHookManagementClassifications: GitHookClassification[] = ['absent', 'unmanaged', 'managed-current', 'managed-outdated', 'managed-stale-binary', 'ambiguous', 'unreadable']
+const gitHookManagementStatuses: GitHookManagementStatus[] = ['not-installed', 'current', 'outdated', 'unknown']
+const gitHookManagementActions: GitHookAction[] = ['install', 'repair', 'remove']
+const gitHookWarningCodes = ['relative-hooks-path-normalization', 'non-shell-hook', 'ambiguous-roborev-content', 'unsafe-hooks-directory']
+const gitHookSummaryCodes = ['blocked', 'repair-recommended', 'managed-current', 'not-installed', 'attention']
+
+function normalizeGitHookManagementHook(value: unknown): GitHookManagementHook | null {
+  const object = objectValue(value)
+  if (!object || !hasExactKeys(object, ['name', 'status', 'classification', 'managed', 'shell', 'binaryCurrent'])) return null
+  if (object.name !== 'post-commit' && object.name !== 'post-rewrite') return null
+  if (typeof object.status !== 'string' || !gitHookManagementStatuses.includes(object.status as GitHookManagementStatus)) return null
+  if (typeof object.classification !== 'string' || !gitHookManagementClassifications.includes(object.classification as GitHookClassification)) return null
+  if (typeof object.managed !== 'boolean' || typeof object.shell !== 'boolean' || typeof object.binaryCurrent !== 'boolean') return null
+  const classification = object.classification as GitHookClassification
+  const status = object.status as GitHookManagementStatus
+  const managed = object.managed
+  const binaryCurrent = object.binaryCurrent
+  if (classification === 'absent' && (status !== 'not-installed' || managed || binaryCurrent)) return null
+  if (classification === 'unmanaged' && (status !== 'not-installed' || managed || binaryCurrent)) return null
+  if (classification === 'managed-current' && (status !== 'current' || !managed || !binaryCurrent)) return null
+  if (classification === 'managed-outdated' && (status !== 'outdated' || !managed)) return null
+  if (classification === 'managed-stale-binary' && (status !== 'outdated' || !managed || binaryCurrent)) return null
+  if (classification === 'ambiguous' && (status !== 'outdated' || managed || binaryCurrent)) return null
+  if (classification === 'unreadable' && (status !== 'unknown' || binaryCurrent)) return null
+  return { name: object.name, status: object.status as GitHookManagementStatus, classification: object.classification as GitHookClassification, managed: object.managed, shell: object.shell, binaryCurrent: object.binaryCurrent }
+}
+
+const gitHookAvailabilityReasons = ['eligible', 'already-current', 'repair-recommended', 'managed-hook-needs-repair', 'no-managed-hook-needs-repair', 'managed-hook-present', 'no-managed-hook', 'unsafe-hooks-directory', 'relative-hooks-path-normalization', 'unreadable-hook', 'non-shell-hook', 'ambiguous-roborev-content']
+function normalizeGitHookAvailability(value: unknown): GitHookAvailability | null {
+  const object = objectValue(value)
+  if (!object || Object.keys(object).some(key => !['available', 'recommended', 'reason'].includes(key)) || typeof object.available !== 'boolean') return null
+  if (object.recommended !== undefined && typeof object.recommended !== 'boolean') return null
+  if (object.reason !== undefined && (typeof object.reason !== 'string' || !gitHookAvailabilityReasons.includes(object.reason))) return null
+  return { available: object.available, recommended: object.recommended === true, reason: typeof object.reason === 'string' ? object.reason : '' }
+}
+
+function normalizeGitHookSafety(value: unknown): GitHookSafety | null {
+  const object = objectValue(value)
+  if (!object || !hasExactKeys(object, ['hooksDirectorySafe', 'configurationMutationRequired', 'unmanagedHookPresent', 'nonShellHookPresent', 'ambiguousRoborevContent', 'unreadableHookPresent'])) return null
+  for (const key of ['hooksDirectorySafe', 'configurationMutationRequired', 'unmanagedHookPresent', 'nonShellHookPresent', 'ambiguousRoborevContent', 'unreadableHookPresent'] as const) if (typeof object[key] !== 'boolean') return null
+  return { hooksDirectorySafe: object.hooksDirectorySafe as boolean, configurationMutationRequired: object.configurationMutationRequired as boolean, unmanagedHookPresent: object.unmanagedHookPresent as boolean, nonShellHookPresent: object.nonShellHookPresent as boolean, ambiguousRoborevContent: object.ambiguousRoborevContent as boolean, unreadableHookPresent: object.unreadableHookPresent as boolean }
+}
+
+function normalizeGitHookCodes(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && gitHookWarningCodes.includes(item))) return null
+  const result = value as string[]
+  return new Set(result).size === result.length ? result : null
+}
+
+function sameGitHookCodes(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((code, index) => code === right[index])
+}
+
+function expectedGitHookWarningCodes(safety: GitHookSafety) {
+  const result: string[] = []
+  if (safety.configurationMutationRequired) result.push('relative-hooks-path-normalization')
+  if (safety.nonShellHookPresent) result.push('non-shell-hook')
+  if (safety.ambiguousRoborevContent) result.push('ambiguous-roborev-content')
+  if (!safety.hooksDirectorySafe) result.push('unsafe-hooks-directory')
+  return result
+}
+
+function expectedGitHookSummaryCode(preflight: Pick<GitHookManagement, 'postCommit' | 'postRewrite' | 'repair' | 'safety'>): string {
+  if (!preflight.safety.hooksDirectorySafe || preflight.safety.nonShellHookPresent || preflight.safety.ambiguousRoborevContent || preflight.safety.unreadableHookPresent) return 'blocked'
+  if (preflight.repair.available) return 'repair-recommended'
+  if (preflight.postCommit.classification === 'managed-current' && preflight.postRewrite.classification === 'managed-current') return 'managed-current'
+  if (preflight.postCommit.classification === 'absent' && preflight.postRewrite.classification === 'absent') return 'not-installed'
+  return 'attention'
+}
+
+/** Normalize the content-free, typed Git hook management preflight. */
+export function normalizeGitHookManagement(value: unknown, expectedRepositoryIdentity?: string): GitHookManagement | null {
+  const object = objectValue(value)
+  if (!object || Object.keys(object).some(key => !['repositoryIdentity', 'postCommit', 'postRewrite', 'install', 'repair', 'remove', 'safety', 'summaryCode', 'warningCodes'].includes(key)) || !['repositoryIdentity', 'postCommit', 'postRewrite', 'install', 'repair', 'remove', 'safety', 'summaryCode'].every(key => Object.prototype.hasOwnProperty.call(object, key))) return null
+  if (typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || (expectedRepositoryIdentity !== undefined && object.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  const postCommit = normalizeGitHookManagementHook(object.postCommit)
+  const postRewrite = normalizeGitHookManagementHook(object.postRewrite)
+  const install = normalizeGitHookAvailability(object.install)
+  const repair = normalizeGitHookAvailability(object.repair)
+  const remove = normalizeGitHookAvailability(object.remove)
+  const safety = normalizeGitHookSafety(object.safety)
+  const warningCodes = object.warningCodes === undefined ? [] : normalizeGitHookCodes(object.warningCodes)
+  if (!postCommit || !postRewrite || postCommit.name !== 'post-commit' || postRewrite.name !== 'post-rewrite' || !install || !repair || !remove || !safety || typeof object.summaryCode !== 'string' || !gitHookSummaryCodes.includes(object.summaryCode) || !warningCodes) return null
+  const hooks = [postCommit, postRewrite]
+  const unmanagedHookPresent = hooks.some(hook => hook.classification === 'unmanaged')
+  const ambiguousRoborevContent = hooks.some(hook => hook.classification === 'ambiguous')
+  const unreadableHookPresent = hooks.some(hook => hook.classification === 'unreadable')
+  // The backend's Present bit is intentionally not exposed. Absent and IO
+  // unreadable hooks cannot prove a present non-shell file. An unreadable
+  // managed hook, however, comes from a present parser-error block and keeps
+  // Managed=true, so it remains a known present hook for this safety flag.
+  const nonShellHookPresent = hooks.some(hook => {
+    const knownPresent = hook.classification !== 'absent' && (hook.classification !== 'unreadable' || hook.managed)
+    return knownPresent && !hook.shell
+  })
+  if (safety.unmanagedHookPresent !== unmanagedHookPresent || safety.ambiguousRoborevContent !== ambiguousRoborevContent || safety.unreadableHookPresent !== unreadableHookPresent || safety.nonShellHookPresent !== nonShellHookPresent) return null
+  if (!sameGitHookCodes(warningCodes, expectedGitHookWarningCodes(safety))) return null
+  const normalizedSummaryCode = object.summaryCode as string
+  if (normalizedSummaryCode !== expectedGitHookSummaryCode({ postCommit, postRewrite, repair, safety })) return null
+  return { repositoryIdentity: object.repositoryIdentity, postCommit, postRewrite, install, repair, remove, safety, summaryCode: normalizedSummaryCode, warningCodes: warningCodes as string[] }
+}
+
+function normalizeGitHookManagementCommand(value: unknown, action: GitHookAction): GitHookManagementCommand | null {
+  const object = objectValue(value)
+  if (!object || !hasExactKeys(object, ['executable', 'args']) || typeof object.executable !== 'string' || !object.executable.trim() || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
+  const args = object.args as string[]
+  const expected = action === 'install' ? ['install-hook', '--binary', object.executable] : action === 'repair' ? ['install-hook', 'repair', '--binary', object.executable] : ['uninstall-hook']
+  if (args.length !== expected.length || args.some((arg, index) => arg !== expected[index]) || args.some(arg => ['--force', '--registered', 'agent-hook', 'init', 'status'].includes(arg))) return null
+  return { executable: object.executable, args }
+}
+
+/** Normalize a preview while enforcing the narrow Dashboard-owned CLI allowlist. */
+export function normalizeGitHookManagementPreview(value: unknown, expectedRepositoryIdentity?: string, expectedAction?: GitHookAction): GitHookManagementPreview | null {
+  const object = objectValue(value)
+  if (!object || Object.keys(object).some(key => !['token', 'action', 'repository', 'preflight', 'summary', 'warningCodes', 'command', 'expiresAt'].includes(key)) || !['token', 'action', 'repository', 'preflight', 'summary', 'command', 'expiresAt'].every(key => Object.prototype.hasOwnProperty.call(object, key)) || typeof object.token !== 'string' || !object.token.trim() || typeof object.action !== 'string' || !gitHookManagementActions.includes(object.action as GitHookAction) || (expectedAction !== undefined && object.action !== expectedAction) || typeof object.repository !== 'string' || !object.repository.trim() || typeof object.summary !== 'string' || !object.summary.trim() || !rfc3339(object.expiresAt)) return null
+  const action = object.action as GitHookAction
+  const preflight = normalizeGitHookManagement(object.preflight, expectedRepositoryIdentity)
+  const command = normalizeGitHookManagementCommand(object.command, action)
+  const warningCodes = object.warningCodes === undefined ? [] : normalizeGitHookCodes(object.warningCodes)
+  if (!preflight || !command || !warningCodes || warningCodes.length !== preflight.warningCodes.length || warningCodes.some((code, index) => code !== preflight.warningCodes[index]) || (expectedRepositoryIdentity !== undefined && preflight.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  return { token: object.token, action, repository: object.repository, preflight, summary: object.summary, warningCodes: preflight.warningCodes, command, expiresAt: object.expiresAt }
+}
+
+/** Normalize the typed, post-read Git hook mutation receipt. */
+const gitHookResultErrorCodes = ['cli-failed', 'cli-not-started', 'readback-unavailable']
+export function normalizeGitHookManagementResult(value: unknown, expectedRepositoryIdentity?: string, expectedAction?: GitHookAction): GitHookManagementResult | null {
+  const object = objectValue(value)
+  if (!object || (Object.keys(object).some(key => !['status', 'action', 'preflight', 'errorCode'].includes(key))) || typeof object.status !== 'string' || !['verified-success', 'partial', 'failed-unverified'].includes(object.status) || typeof object.action !== 'string' || !gitHookManagementActions.includes(object.action as GitHookAction) || (expectedAction !== undefined && object.action !== expectedAction) || object.errorCode !== undefined && (typeof object.errorCode !== 'string' || !gitHookResultErrorCodes.includes(object.errorCode))) return null
+  const preflight = normalizeGitHookManagement(object.preflight, expectedRepositoryIdentity)
+  if (!preflight) return null
+  return { status: object.status as GitHookManagementOutcome, action: object.action as GitHookAction, preflight, errorCode: typeof object.errorCode === 'string' ? object.errorCode : undefined }
 }
 
 export type Installation = {
@@ -1208,7 +1391,10 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   if (options.body) headers.set('Content-Type', 'application/json')
   if ((options.method ?? 'GET') !== 'GET') headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch(path, { ...options, headers })
-  const text = await response.text()
+  // Clone before parsing so deterministic test doubles may safely service
+  // coalesced endpoint reads with the same Response object. Real fetch
+  // responses retain the same wire semantics.
+  const text = await response.clone().text()
   let payload: unknown = undefined
   if (text) {
     try { payload = JSON.parse(text) } catch { payload = text }

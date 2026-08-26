@@ -5,6 +5,7 @@ package hookstatus
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"os"
@@ -76,6 +77,52 @@ type FileSystem interface {
 type File interface {
 	io.ReadCloser
 	Stat() (os.FileInfo, error)
+}
+
+// HookSnapshot is the bounded, race-aware read primitive shared by status and
+// hook-management preflight/readback. Content is retained only inside the
+// server; HTTP DTOs continue to expose typed states exclusively.
+type HookSnapshot struct {
+	Path        string
+	Present     bool
+	Content     []byte
+	Fingerprint [32]byte
+}
+
+// ReadBounded performs Lstat -> Open -> Stat identity validation and reads at
+// most MaxHookBytes. Only ENOENT is classified as absent; all other failures
+// are errors so mutation callers fail closed.
+func ReadBounded(fs FileSystem, path string) (HookSnapshot, error) {
+	if fs == nil {
+		fs = osFileSystem{}
+	}
+	info, err := fs.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookSnapshot{Path: path}, nil
+		}
+		return HookSnapshot{Path: path}, err
+	}
+	if !safeRegular(info) || info.Size() < 0 || info.Size() > MaxHookBytes {
+		return HookSnapshot{Path: path}, errors.New("hook file is not a bounded regular file")
+	}
+	file, err := fs.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return HookSnapshot{Path: path}, nil
+		}
+		return HookSnapshot{Path: path}, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !safeRegular(openedInfo) || !sameFile(info, openedInfo) {
+		return HookSnapshot{Path: path}, errors.New("hook file changed during read")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, MaxHookBytes+1))
+	if err != nil || len(content) > MaxHookBytes {
+		return HookSnapshot{Path: path}, errors.New("hook file exceeds bounded read")
+	}
+	return HookSnapshot{Path: path, Present: true, Content: content, Fingerprint: sha256.Sum256(content)}, nil
 }
 
 type osFileSystem struct{}
@@ -184,37 +231,14 @@ func (s *Service) readHook(path, marker string, absent Status) (Status, readStat
 }
 
 func (s *Service) readBounded(path string) ([]byte, readState) {
-	fs := s.FS
-	if fs == nil {
-		fs = osFileSystem{}
-	}
-	info, err := fs.Lstat(path)
+	snapshot, err := ReadBounded(s.FS, path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, readMissing
-		}
 		return nil, readUnknown
 	}
-	if !safeRegular(info) || info.Size() < 0 || info.Size() > MaxHookBytes {
-		return nil, readUnknown
+	if !snapshot.Present {
+		return nil, readMissing
 	}
-	file, err := fs.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, readMissing
-		}
-		return nil, readUnknown
-	}
-	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil || !safeRegular(openedInfo) || !sameFile(info, openedInfo) {
-		return nil, readUnknown
-	}
-	content, err := io.ReadAll(io.LimitReader(file, MaxHookBytes+1))
-	if err != nil || len(content) > MaxHookBytes {
-		return nil, readUnknown
-	}
-	return content, readKnown
+	return snapshot.Content, readKnown
 }
 
 func isContextError(err error) bool {

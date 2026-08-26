@@ -185,11 +185,21 @@ describe('localized App presentation', () => {
     const user = userEvent.setup()
     render(withProvider(<App />))
     expect(await screen.findByText('No reviews found')).toBeInTheDocument()
-    await new Promise(resolve => setTimeout(resolve, 50))
+    // The initial ready setup response triggers one authoritative dashboard
+    // refresh. Wait for that bounded settling sequence before taking the
+    // locale-switch request baseline; a fixed sleep can race it under the
+    // full repository test load.
+    await waitFor(() => {
+      expect(calls.filter(path => path === '/api/bootstrap')).toHaveLength(2)
+      expect(calls.filter(path => path === '/api/setup/roborev')).toHaveLength(1)
+      expect(calls.filter(path => path.startsWith('/api/reviews?'))).toHaveLength(2)
+      expect(calls.filter(path => path.startsWith('/api/repos/panels?'))).toHaveLength(3)
+      expect(calls.filter(path => path.startsWith('/api/panel-refines?'))).toHaveLength(1)
+      expect(calls.filter(path => path === '/api/runtime')).toHaveLength(1)
+    })
     const before = calls.length
     await user.selectOptions(screen.getByLabelText('Select language'), 'ko')
     await waitFor(() => expect(screen.getByText('리뷰가 없습니다')).toBeInTheDocument())
-    await new Promise(resolve => setTimeout(resolve, 50))
     expect(calls.length).toBe(before)
     expect(screen.getByText('repo · main')).toBeInTheDocument()
   })

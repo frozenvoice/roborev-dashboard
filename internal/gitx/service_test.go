@@ -23,12 +23,18 @@ type recordingRunner struct {
 type hooksPathRunner struct {
 	commands []proc.Command
 	outputs  map[string]string
+	errors   map[string]error
+	exitCode map[string]int
 }
 
 func (r *hooksPathRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	key := strings.Join(command.Args[2:], " ")
-	return proc.Result{Stdout: r.outputs[key]}, nil
+	result := proc.Result{Stdout: r.outputs[key], ExitCode: r.exitCode[key]}
+	if err := r.errors[key]; err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func TestHooksPathUsesGitPathAndSanitizedEnvironment(t *testing.T) {
@@ -163,6 +169,84 @@ func TestHooksPathResolvesSeparateGitDirThroughCoreWorktree(t *testing.T) {
 	}
 	if want := filepath.Join(mainRoot, ".githooks"); got != want {
 		t.Fatalf("hooks path=%q want=%q", got, want)
+	}
+}
+
+func TestResolveHookLayoutReadsEffectiveCoreHooksPath(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	gitDir := filepath.Join(root, ".git")
+	hooks := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --show-toplevel":  root,
+		"rev-parse --git-dir":        gitDir,
+		"rev-parse --git-common-dir": gitDir,
+		"rev-parse --git-path hooks": hooks,
+		"config core.hooksPath":      "relative-hooks",
+	}}
+	layout, err := New(runner).ResolveHookLayout(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !layout.EffectiveHooksPathSet || !layout.EffectiveHooksPathIsRelative || layout.EffectiveHooksPath != "relative-hooks" || !layout.Safe {
+		t.Fatalf("layout=%#v", layout)
+	}
+	for _, command := range runner.commands {
+		if strings.Contains(strings.Join(command.Args, " "), "core.hooksPath") && !reflect.DeepEqual(command.Args, []string{"-C", root, "config", "core.hooksPath"}) {
+			t.Fatalf("effective config args=%#v", command.Args)
+		}
+	}
+}
+
+func TestResolveHookLayoutTreatsUnsetConfigAsSafeDefault(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	gitDir := filepath.Join(root, ".git")
+	hooks := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --show-toplevel":  root,
+		"rev-parse --git-dir":        gitDir,
+		"rev-parse --git-common-dir": gitDir,
+		"rev-parse --git-path hooks": hooks,
+	}, errors: map[string]error{"config core.hooksPath": errors.New("exit status 1")}, exitCode: map[string]int{"config core.hooksPath": 1}}
+	layout, err := New(runner).ResolveHookLayout(context.Background(), root)
+	if err != nil || layout.EffectiveHooksPathSet || !layout.Safe {
+		t.Fatalf("unset config layout=%#v err=%v", layout, err)
+	}
+}
+
+func TestResolveHookLayoutFailsClosedOnConfigReadError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	gitDir := filepath.Join(root, ".git")
+	hooks := filepath.Join(gitDir, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --show-toplevel":  root,
+		"rev-parse --git-dir":        gitDir,
+		"rev-parse --git-common-dir": gitDir,
+		"rev-parse --git-path hooks": hooks,
+	}, errors: map[string]error{"config core.hooksPath": errors.New("permission denied")}, exitCode: map[string]int{"config core.hooksPath": 2}}
+	if _, err := New(runner).ResolveHookLayout(context.Background(), root); err == nil {
+		t.Fatal("non-unset config error was treated as an absent key")
+	}
+}
+
+func TestIsTildePathMirrorsKitUserHomeForms(t *testing.T) {
+	for _, value := range []string{"~", "~/hooks", `~\hooks`, "~alice/hooks", "~_shared/hooks"} {
+		if !isTildePath(value) {
+			t.Errorf("isTildePath(%q)=false", value)
+		}
+	}
+	for _, value := range []string{"relative/hooks", "./hooks", "C:/hooks"} {
+		if isTildePath(value) {
+			t.Errorf("isTildePath(%q)=true", value)
+		}
 	}
 }
 

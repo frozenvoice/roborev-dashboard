@@ -29,6 +29,10 @@ type repositoryHookPathResolver interface {
 	HooksPath(context.Context, string) (string, error)
 }
 
+type repositoryHookLayoutResolver interface {
+	ResolveHookLayout(context.Context, string) (gitx.HookLayout, error)
+}
+
 type registryConfig struct {
 	Recent          []string          `json:"recentRepositories"`
 	LastSelected    string            `json:"lastSelectedRepository"`
@@ -585,6 +589,19 @@ func (r *Registry) HooksPath(ctx context.Context, path string) (string, error) {
 		return "", errors.New("Git hook path inspection is unavailable")
 	}
 	return resolver.HooksPath(ctx, path)
+}
+
+// ResolveHookLayout exposes the server-only complete Git hook layout to the
+// management service. The HTTP layer still accepts only opaque identities.
+func (r *Registry) ResolveHookLayout(ctx context.Context, path string) (gitx.HookLayout, error) {
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	resolver, ok := inspector.(repositoryHookLayoutResolver)
+	if !ok {
+		return gitx.HookLayout{}, errors.New("Git hook layout inspection is unavailable")
+	}
+	return resolver.ResolveHookLayout(ctx, path)
 }
 
 // Identity returns a stable, platform-aware correlation key for a registered

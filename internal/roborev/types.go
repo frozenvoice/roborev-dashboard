@@ -11,6 +11,38 @@ import (
 	"github.com/froze/roborev-dashboard/internal/reporename"
 )
 
+// GitHookAction is the intentionally tiny mutation transport vocabulary.
+// It is separate from Service so existing RoboRev fakes remain source
+// compatible; management is available only when an adapter implements the
+// optional interface below.
+type GitHookAction string
+
+const (
+	GitHookInstall GitHookAction = "install"
+	GitHookRepair  GitHookAction = "repair"
+	GitHookRemove  GitHookAction = "remove"
+)
+
+type GitHookBinding struct {
+	Binary     string
+	Version    string
+	Generation uint64
+	FileID     string
+}
+
+type GitHookExecution struct {
+	Started  bool
+	ExitCode int
+}
+
+// GitHookTransport is optional and deliberately narrower than Service. The
+// binding probe is fresh (uncached) and RunGitHook rechecks it immediately
+// before one typed CLI launch.
+type GitHookTransport interface {
+	ProbeGitHookBinding(context.Context) (GitHookBinding, error)
+	RunGitHook(context.Context, string, GitHookAction, GitHookBinding) (GitHookExecution, error)
+}
+
 type Installation struct {
 	Installed    bool            `json:"installed"`
 	Binary       string          `json:"binary,omitempty"`

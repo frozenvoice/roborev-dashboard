@@ -42,10 +42,11 @@ function withPanels(handler: (input: RequestInfo | URL, init?: RequestInit) => P
   })
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('out-of-window selected review mutation', () => {
   it('A. normal in-window review Close updates authoritative list row', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
     const job = { id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial', branch: 'main', status: 'done', verdict: 'F', job_type: 'review', closed: false, enqueued_at: '2026-08-17T00:00:00Z', started_at: '2026-08-17T00:00:05Z', finished_at: '2026-08-17T00:00:30Z', review: { output: '# Finding' } }
     let closed = false
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
@@ -60,7 +61,7 @@ describe('out-of-window selected review mutation', () => {
       return response({ success: true })
     }))
 
-    render(<I18nProvider><App /></I18nProvider>)
+    const view = render(<I18nProvider><App /></I18nProvider>)
     await waitFor(() => expect(screen.getByText(/#42/)).toBeInTheDocument())
     await userEvent.click(screen.getByText(/#42/))
     expect(await screen.findByRole('button', { name: 'Close' })).toBeInTheDocument()
@@ -69,6 +70,8 @@ describe('out-of-window selected review mutation', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('B. task outside 100 list Close fetches authoritative detail when absent from recent list', async () => {

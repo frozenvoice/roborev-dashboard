@@ -527,6 +527,7 @@ export function App() {
   const [initialized, setInitialized] = useState(false)
   const [menu, setMenu] = useState(false)
   const [toasts, setToasts] = useState<Toast[]>([])
+  const toastTimers = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
   const [reviewPollError, setReviewPollError] = useState('')
   const [runtimePollError, setRuntimePollError] = useState('')
   const [loadedReviewIdentity, setLoadedReviewIdentity] = useState('')
@@ -616,7 +617,20 @@ export function App() {
     setAgentsLoading(false)
   }, [selectedRepositoryIdentity])
 
-  const toast = useCallback((kind: Toast['kind'], message: string) => { const id = Date.now(); setToasts(old => [...old, { id, kind, message }]); setTimeout(() => setToasts(old => old.filter(item => item.id !== id)), 4500) }, [])
+  useEffect(() => () => {
+    for (const timer of toastTimers.current) clearTimeout(timer)
+    toastTimers.current.clear()
+  }, [])
+
+  const toast = useCallback((kind: Toast['kind'], message: string) => {
+    const id = Date.now()
+    setToasts(old => [...old, { id, kind, message }])
+    const timer = setTimeout(() => {
+      toastTimers.current.delete(timer)
+      setToasts(old => old.filter(item => item.id !== id))
+    }, 4500)
+    toastTimers.current.add(timer)
+  }, [])
   const loadReviews = useCallback(async (repo?: string, identity?: string, expectedEffectEpoch?: number) => {
     if (!repo || !identity) return []
     const generation = ++reviewGeneration.current
