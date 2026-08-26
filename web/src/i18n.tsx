@@ -647,6 +647,37 @@ export const en = {
   'setup.skillsReadinessConfigUnavailable': 'Agent config not detected',
   'setup.skillsReadinessCurrentCount': '{current} / {total} current',
   'setup.skillsReadinessBreakdown': '{current} current · {outdated} outdated · {missing} missing',
+  'setup.skillsManagementCta': 'Install / Update',
+  'setup.skillsManagementTitle': 'Install / Update RoboRev Skills',
+  'setup.skillsManagementDescription': 'Install or update the selected agent’s RoboRev bundled skill files to the embedded RoboRev v0.64.0 version.',
+  'setup.skillsManagementAgent': 'Agent',
+  'setup.skillsManagementAction': 'Action',
+  'setup.skillsManagementActionValue': 'Install / Update',
+  'setup.skillsManagementCommand': 'Semantic command preview',
+  'setup.skillsManagementCommandNote': 'The server supplies the fixed executable and target path. Actual paths and binary locations stay server-side.',
+  'setup.skillsManagementWarningOverwrite': 'RoboRev-managed SKILL.md files may be overwritten.',
+  'setup.skillsManagementWarningCodexPolicy': 'If the selected agent is Codex, its Codex policy files may also be updated.',
+  'setup.skillsManagementWarningUnrelated': 'Unrelated skill directories are not targeted.',
+  'setup.skillsManagementWarningLegacy': 'The Dashboard does not perform legacy cleanup; legacy RoboRev skill cleanup requires manual CLI action. This operation is blocked if roborev-address exists.',
+  'setup.skillsManagementClose': 'Close Skills confirmation',
+  'setup.skillsManagementConfirm': 'Install / Update',
+  'setup.skillsManagementExecuting': 'Installing / Updating…',
+  'setup.skillsManagementPreparing': 'Preparing the {agent} skills preview…',
+  'setup.skillsManagementVerified': 'Verified success',
+  'setup.skillsManagementPartial': 'Partial mutation',
+  'setup.skillsManagementFailed': 'Failed · unverified',
+  'setup.skillsManagementVerifiedCliWarning': 'The CLI reported an error, but a fresh readback verified that the selected agent is current.',
+  'setup.skillsManagementPartialCliWarning': 'The CLI reported an error; a fresh readback found measurable progress, but the selected agent is not current.',
+  'setup.skillsManagementError.cli-failed': 'The CLI reported an error and the final state could not be verified.',
+  'setup.skillsManagementError.cli-not-started': 'The CLI did not start; no successful mutation can be credited.',
+  'setup.skillsManagementError.binding-drift': 'The RoboRev binding changed before the operation could be verified.',
+  'setup.skillsManagementError.readback-unavailable': 'The post-mutation skills readback was unavailable.',
+  'setup.skillsManagementError.target-drift': 'The server-derived skills target changed before verification.',
+  'setup.skillsManagementError.readback-not-current': 'The selected agent is still not current after the operation.',
+  'setup.skillsManagementError.no-improvement': 'The post-mutation readback found no measurable improvement.',
+  'setup.skillsManagementMalformed': 'The Dashboard could not validate the typed Skills Management response.',
+  'setup.skillsManagementPreviewFailed': 'The Skills Management preview could not be prepared.',
+  'setup.skillsManagementExecuteFailed': 'The Skills Management action could not be completed or verified.',
   'diagnostics.title': 'Runtime Diagnostics',
   'diagnostics.description': 'Read-only daemon, worker, queue, job, and health signals.',
   'diagnostics.open': 'Diagnostics',
@@ -1292,6 +1323,37 @@ ko['setup.skillsReadinessNeedsUpdate'] = '설치/업데이트 필요'
 ko['setup.skillsReadinessConfigUnavailable'] = '에이전트 구성을 감지하지 못함'
 ko['setup.skillsReadinessCurrentCount'] = '{current} / {total} 최신'
 ko['setup.skillsReadinessBreakdown'] = '{current} 최신 · {outdated} 오래됨 · {missing} 없음'
+ko['setup.skillsManagementCta'] = '설치 / 업데이트'
+ko['setup.skillsManagementTitle'] = 'RoboRev Skills 설치 / 업데이트'
+ko['setup.skillsManagementDescription'] = '선택한 에이전트의 RoboRev 번들 skill 파일을 내장된 RoboRev v0.64.0 버전으로 설치하거나 업데이트합니다.'
+ko['setup.skillsManagementAgent'] = '에이전트'
+ko['setup.skillsManagementAction'] = '작업'
+ko['setup.skillsManagementActionValue'] = '설치 / 업데이트'
+ko['setup.skillsManagementCommand'] = '의미 기반 명령 미리보기'
+ko['setup.skillsManagementCommandNote'] = '서버가 고정 실행 파일과 target 경로를 제공합니다. 실제 경로와 바이너리 위치는 서버에만 남습니다.'
+ko['setup.skillsManagementWarningOverwrite'] = 'RoboRev가 관리하는 SKILL.md 파일은 덮어써질 수 있습니다.'
+ko['setup.skillsManagementWarningCodexPolicy'] = '선택한 에이전트가 Codex라면 Codex policy 파일도 업데이트될 수 있습니다.'
+ko['setup.skillsManagementWarningUnrelated'] = '관련 없는 skill 디렉터리는 대상이 아닙니다.'
+ko['setup.skillsManagementWarningLegacy'] = 'Dashboard는 legacy cleanup을 수행하지 않습니다. legacy RoboRev skill cleanup은 수동 CLI 작업이 필요하며 roborev-address가 있으면 이 작업은 차단됩니다.'
+ko['setup.skillsManagementClose'] = 'Skills 확인 닫기'
+ko['setup.skillsManagementConfirm'] = '설치 / 업데이트'
+ko['setup.skillsManagementExecuting'] = '설치 / 업데이트 중…'
+ko['setup.skillsManagementPreparing'] = '{agent} skills preview 준비 중…'
+ko['setup.skillsManagementVerified'] = '성공 확인됨'
+ko['setup.skillsManagementPartial'] = '부분 변경'
+ko['setup.skillsManagementFailed'] = '실패 · 확인되지 않음'
+ko['setup.skillsManagementVerifiedCliWarning'] = 'CLI가 오류를 보고했지만 fresh readback에서 선택한 에이전트가 최신임을 확인했습니다.'
+ko['setup.skillsManagementPartialCliWarning'] = 'CLI가 오류를 보고했고 fresh readback에서 일부 개선을 확인했지만 선택한 에이전트는 아직 최신이 아닙니다.'
+ko['setup.skillsManagementError.cli-failed'] = 'CLI가 오류를 보고했고 최종 상태를 확인하지 못했습니다.'
+ko['setup.skillsManagementError.cli-not-started'] = 'CLI가 시작되지 않아 성공한 변경으로 인정할 수 없습니다.'
+ko['setup.skillsManagementError.binding-drift'] = '검증 전에 RoboRev binding이 변경되었습니다.'
+ko['setup.skillsManagementError.readback-unavailable'] = '변경 후 skills readback을 사용할 수 없습니다.'
+ko['setup.skillsManagementError.target-drift'] = '검증 전에 서버가 계산한 skills target이 변경되었습니다.'
+ko['setup.skillsManagementError.readback-not-current'] = '작업 후에도 선택한 에이전트가 최신 상태가 아닙니다.'
+ko['setup.skillsManagementError.no-improvement'] = '변경 후 readback에서 측정 가능한 개선이 없습니다.'
+ko['setup.skillsManagementMalformed'] = 'Dashboard가 typed Skills Management 응답을 검증하지 못했습니다.'
+ko['setup.skillsManagementPreviewFailed'] = 'Skills Management preview를 준비하지 못했습니다.'
+ko['setup.skillsManagementExecuteFailed'] = 'Skills Management 작업을 완료하거나 확인하지 못했습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

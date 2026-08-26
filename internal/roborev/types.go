@@ -238,6 +238,17 @@ type AgentHookManagementTransport interface {
 	RunAgentHookInstall(context.Context, string, GitHookBinding) (GitHookExecution, error)
 }
 
+// SkillsManagementTransport is optional so existing RoboRev adapters and
+// fakes remain source-compatible. It is intentionally narrower than Service:
+// the server resolves the destination and keeps the target tree/binding
+// proofs server-side, while the adapter only launches one typed v0.64 custom
+// path install.
+type SkillsManagementTransport interface {
+	SkillsReadiness(context.Context) (SkillsReadiness, error)
+	ProbeSkillsBinding(context.Context) (GitHookBinding, error)
+	RunSkillsInstall(context.Context, string, string, GitHookBinding) (GitHookExecution, error)
+}
+
 type AgentHookDryRun struct {
 	Agent      string
 	Status     AgentHookReadinessStatus

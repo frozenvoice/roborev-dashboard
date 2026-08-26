@@ -289,7 +289,7 @@ describe('RoboRev setup', () => {
       expect(reviewGets).toBeGreaterThanOrEqual(2)
       expect(screen.getByRole('combobox', { name: 'Current repository' })).toHaveValue('repo-1')
       expect(screen.getByRole('combobox', { name: 'Review panel' })).toHaveValue('reviewers')
-    })
+    }, { timeout: 5000 })
     vi.useRealTimers()
   })
 

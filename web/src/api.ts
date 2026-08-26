@@ -97,6 +97,74 @@ export function normalizeSkillsReadiness(value: unknown): SkillsReadiness | null
   return { version: skillsReadinessVersion, agents }
 }
 
+export type SkillsManagementAction = 'install-update'
+export type SkillsManagementCommand = {
+  executable: 'roborev'
+  args: string[]
+}
+export type SkillsManagementPreview = {
+  token: string
+  agent: SkillsReadinessAgent
+  action: SkillsManagementAction
+  summary: string
+  command: SkillsManagementCommand
+  expiresAt: string
+}
+export type SkillsManagementResultStatus = 'verified-success' | 'partial' | 'failed-unverified'
+export type SkillsManagementErrorCode = 'cli-failed' | 'cli-not-started' | 'binding-drift' | 'readback-unavailable' | 'target-drift' | 'readback-not-current' | 'no-improvement'
+export type SkillsManagementResult = {
+  status: SkillsManagementResultStatus
+  agent: SkillsReadinessAgent
+  errorCode?: SkillsManagementErrorCode
+}
+
+const skillsManagementActions: readonly SkillsManagementAction[] = ['install-update']
+const skillsManagementResultStatuses: readonly SkillsManagementResultStatus[] = ['verified-success', 'partial', 'failed-unverified']
+const skillsManagementErrorCodes: readonly SkillsManagementErrorCode[] = ['cli-failed', 'cli-not-started', 'binding-drift', 'readback-unavailable', 'target-drift', 'readback-not-current', 'no-improvement']
+const skillsManagementAgentLabels: Record<SkillsReadinessAgent, string> = { codex: 'Codex', claude: 'Claude Code', grok: 'Grok Build', droid: 'Factory Droid' }
+const skillsManagementPathPlaceholder = '<agent-skills-directory>'
+
+function strictRfc3339(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value)
+  if (!match || Number.isNaN(Date.parse(value))) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[8] ? Number(match[8]) : 0
+  const offsetMinute = match[9] ? Number(match[9]) : 0
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth && hour <= 23 && minute <= 59 && second <= 59 && offsetHour <= 23 && offsetMinute <= 59
+}
+
+/** Normalize the sanitized single-agent Skills Management preview. */
+export function normalizeSkillsManagementPreview(value: unknown, expectedAgent?: SkillsReadinessAgent): SkillsManagementPreview | null {
+  const root = exactObject(value, ['token', 'agent', 'action', 'summary', 'command', 'expiresAt'])
+  if (!root || typeof root.token !== 'string' || !root.token.trim() || typeof root.agent !== 'string' || !skillsReadinessAgents.includes(root.agent as SkillsReadinessAgent) || (expectedAgent !== undefined && root.agent !== expectedAgent) || typeof root.action !== 'string' || !skillsManagementActions.includes(root.action as SkillsManagementAction) || typeof root.summary !== 'string' || !strictRfc3339(root.expiresAt)) return null
+  const agent = root.agent as SkillsReadinessAgent
+  if (root.summary !== `Install or update RoboRev skills for ${skillsManagementAgentLabels[agent]}`) return null
+  const command = exactObject(root.command, ['executable', 'args'])
+  const expectedArgs = ['skills', 'install', '--path', skillsManagementPathPlaceholder, '--agent', agent]
+  if (!command || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== expectedArgs.length || !command.args.every((item, index) => item === expectedArgs[index])) return null
+  return { token: root.token, agent, action: root.action as SkillsManagementAction, summary: root.summary, command: { executable: 'roborev', args: [...expectedArgs] }, expiresAt: root.expiresAt }
+}
+
+/** Normalize the typed post-execute Skills Management receipt. */
+export function normalizeSkillsManagementResult(value: unknown, expectedAgent?: SkillsReadinessAgent): SkillsManagementResult | null {
+  const root = exactObject(value, ['status', 'agent']) ?? exactObject(value, ['status', 'agent', 'errorCode'])
+  if (!root || typeof root.status !== 'string' || !skillsManagementResultStatuses.includes(root.status as SkillsManagementResultStatus) || typeof root.agent !== 'string' || !skillsReadinessAgents.includes(root.agent as SkillsReadinessAgent) || (expectedAgent !== undefined && root.agent !== expectedAgent)) return null
+  const status = root.status as SkillsManagementResultStatus
+  const errorCode = root.errorCode
+  if (errorCode !== undefined && (typeof errorCode !== 'string' || !skillsManagementErrorCodes.includes(errorCode as SkillsManagementErrorCode))) return null
+  if ((status === 'verified-success' || status === 'partial') && errorCode !== undefined && errorCode !== 'cli-failed') return null
+  if (status === 'failed-unverified' && (typeof errorCode !== 'string' || !skillsManagementErrorCodes.includes(errorCode as SkillsManagementErrorCode))) return null
+  return { status, agent: root.agent as SkillsReadinessAgent, ...(errorCode === undefined ? {} : { errorCode: errorCode as SkillsManagementErrorCode }) }
+}
+
 const agentHookReadinessVersion = 'v0.64.0' as const
 const agentHookReadinessAgents: readonly AgentHookReadinessAgent[] = ['codex', 'claude', 'grok', 'droid']
 const agentHookReadinessStatuses: readonly AgentHookReadinessStatus[] = ['current', 'needs-update', 'unavailable']

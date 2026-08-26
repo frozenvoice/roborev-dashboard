@@ -26,6 +26,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/hookstatus"
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/operation"
+	"github.com/froze/roborev-dashboard/internal/pathsafety"
 	"github.com/froze/roborev-dashboard/internal/refine"
 	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -59,13 +60,17 @@ type Server struct {
 	mergePreviews  *repositoryMergePreviewStore
 	// repositoryMoveFS is nil in production and exists only to make the
 	// read-only stale-source boundary deterministic in app tests.
-	repositoryMoveFS  repomove.FileSystem
-	Insights          *insights.Manager
-	HookStatus        *hookstatus.Service
-	HookManagement    *hookmanagement.Service
-	hookPreviews      *hookManagementPreviewStore
-	AgentHookConfigFS agenthookmanagement.FileSystem
-	agentHookPreviews *agentHookPreviewStore
+	repositoryMoveFS     repomove.FileSystem
+	Insights             *insights.Manager
+	HookStatus           *hookstatus.Service
+	HookManagement       *hookmanagement.Service
+	hookPreviews         *hookManagementPreviewStore
+	AgentHookConfigFS    agenthookmanagement.FileSystem
+	agentHookPreviews    *agentHookPreviewStore
+	SkillsManagementFS   pathsafety.FileSystem
+	SkillsManagementHome string
+	SkillsManagementEnv  func() []string
+	skillsPreviews       *skillsPreviewStore
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -158,7 +163,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if _, ok := registry.inspector.(repositoryHookLayoutResolver); ok {
 		management = hookmanagement.New(registry, nil)
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil), HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil), HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore()}
 	s.routes()
 	return s, nil
 }
@@ -238,6 +243,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/skills/readiness", s.skillsReadiness)
 	s.mux.HandleFunc("POST /api/agent-hooks/preview", s.agentHookManagementPreview)
 	s.mux.HandleFunc("POST /api/agent-hooks/execute", s.agentHookManagementExecute)
+	s.mux.HandleFunc("POST /api/skills/preview", s.skillsManagementPreview)
+	s.mux.HandleFunc("POST /api/skills/execute", s.skillsManagementExecute)
 	s.mux.HandleFunc("GET /api/exports/reviews", s.reviewMetadataExport)
 	s.mux.HandleFunc("GET /api/repositories/hooks", s.repositoryHooks)
 	s.mux.HandleFunc("GET /api/repositories/hooks/management", s.repositoryHookManagement)

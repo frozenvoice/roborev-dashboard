@@ -2,9 +2,12 @@ package roborev
 
 import (
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"github.com/froze/roborev-dashboard/internal/skillsmanagement"
 )
 
 // StreamArgs is the exact v0.64.0 JSONL stream contract.  The repository
@@ -104,4 +107,23 @@ func ValidateReviewRequest(request ReviewRequest) error {
 		return err
 	}
 	return nil
+}
+
+// SkillsInstallArgs is the only mutation command exposed by Skills
+// Management. The path is server-derived and must already be absolute; this
+// builder rejects browser-shaped relative/control-character values so callers
+// cannot accidentally fall back to v0.64's broad multi-agent installer.
+func SkillsInstallArgs(agent, skillsDir string) ([]string, error) {
+	if !skillsmanagement.IsSupportedAgent(agent) {
+		return nil, errors.New("skills agent is not allowed")
+	}
+	if strings.TrimSpace(skillsDir) == "" || !filepath.IsAbs(skillsDir) {
+		return nil, errors.New("skills directory must be absolute")
+	}
+	for _, char := range skillsDir {
+		if unicode.IsControl(char) {
+			return nil, errors.New("skills directory contains control characters")
+		}
+	}
+	return []string{"skills", "install", "--path", filepath.Clean(skillsDir), "--agent", agent}, nil
 }

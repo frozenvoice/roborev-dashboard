@@ -11,16 +11,18 @@ import (
 	"unicode/utf8"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/skillsmanagement"
 )
 
 const (
-	skillsReadinessVersion        = "v0.64.0"
+	skillsReadinessVersion        = skillsmanagement.Version
 	skillsReadinessProbeTimeout   = 5 * time.Second
 	skillsReadinessOverallTimeout = 20 * time.Second
 	skillsReadinessOutputLimit    = 256 << 10
-	skillsReadinessTotal          = 10
 	skillsReadinessGuidance       = "Run 'roborev skills install' to install or update."
 )
+
+var skillsReadinessTotal = skillsmanagement.SkillCount()
 
 var (
 	ErrSkillsReadinessBinding         = errors.New("skills readiness binding is unavailable")
@@ -32,18 +34,7 @@ var (
 // internal/skills. All ten catalog entries are present for each supported
 // agent; the parser nevertheless keeps the membership and invocation details
 // in one allowlist rather than accepting arbitrary roborev-* names.
-var skillsReadinessCatalog = [...]string{
-	"roborev-design-review",
-	"roborev-design-review-branch",
-	"roborev-fix",
-	"roborev-lookahead-review",
-	"roborev-lookahead-review-branch",
-	"roborev-refine",
-	"roborev-respond",
-	"roborev-review",
-	"roborev-review-branch",
-	"roborev-snooze",
-}
+var skillsReadinessCatalog = skillsmanagement.SkillNames()
 
 type skillsReadinessOutputAgent struct {
 	agent  string
@@ -53,12 +44,16 @@ type skillsReadinessOutputAgent struct {
 
 // v0.64's human formatter emits rows in this order. The API intentionally
 // returns the dashboard-wide agent order separately below.
-var skillsReadinessOutputAgents = [...]skillsReadinessOutputAgent{
-	{agent: "claude", label: "Claude Code", prefix: "/"},
-	{agent: "codex", label: "Codex", prefix: "$"},
-	{agent: "droid", label: "Factory Droid", prefix: "/"},
-	{agent: "grok", label: "Grok Build", prefix: "/"},
+func skillsReadinessOutputAgentsFromManifest() []skillsReadinessOutputAgent {
+	specs := skillsmanagement.Agents()
+	result := make([]skillsReadinessOutputAgent, 0, len(specs))
+	for _, spec := range specs {
+		result = append(result, skillsReadinessOutputAgent{agent: spec.ID, label: spec.Label, prefix: spec.Prefix})
+	}
+	return result
 }
+
+var skillsReadinessOutputAgents = skillsReadinessOutputAgentsFromManifest()
 
 var skillsReadinessDashboardAgents = [...]string{"codex", "claude", "grok", "droid"}
 

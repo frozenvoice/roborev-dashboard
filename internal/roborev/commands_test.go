@@ -2,11 +2,44 @@ package roborev
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/froze/roborev-dashboard/internal/process"
 )
+
+func TestSkillsInstallArgsUsesExactSingleAgentCustomPathCommand(t *testing.T) {
+	path, _ := filepath.Abs(filepath.Join("fake-home", ".codex", "skills"))
+	for _, agent := range []string{"codex", "claude", "grok", "droid"} {
+		args, err := SkillsInstallArgs(agent, path)
+		if err != nil {
+			t.Fatalf("agent=%s: %v", agent, err)
+		}
+		want := []string{"skills", "install", "--path", filepath.Clean(path), "--agent", agent}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("agent=%s args=%#v want=%#v", agent, args, want)
+		}
+	}
+}
+
+func TestSkillsInstallArgsRejectsBroadOrBrowserShapedTargets(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		agent string
+		path  string
+	}{
+		{name: "unsupported agent", agent: "all", path: filepath.Join("fake", "skills")},
+		{name: "relative path", agent: "codex", path: filepath.Join("fake", "skills")},
+		{name: "control character", agent: "codex", path: filepath.Join(string(filepath.Separator), "fake\nskills")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if args, err := SkillsInstallArgs(test.agent, test.path); err == nil || args != nil {
+				t.Fatalf("args=%#v err=%v", args, err)
+			}
+		})
+	}
+}
 
 func TestCommentArgsKeepUserTextInOneArgument(t *testing.T) {
 	comment := "한글 복사 붙여넣기; $(danger) & whoami\nsecond line"
