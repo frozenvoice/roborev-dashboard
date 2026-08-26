@@ -52,6 +52,23 @@ func TestConfigGetArgsUseTheV064Contract(t *testing.T) {
 	}
 }
 
+func TestConfigKeyArgsAcceptV064DottedSegments(t *testing.T) {
+	setArgs, err := ConfigSetArgs("agent_hook.turn_threshold", "7", ConfigScopeGlobal)
+	if err != nil {
+		t.Fatalf("dotted config key rejected by set args: %v", err)
+	}
+	if want := []string{"config", "set", "agent_hook.turn_threshold", "7", "--global"}; !reflect.DeepEqual(setArgs, want) {
+		t.Fatalf("set args mismatch\n got: %#v\nwant: %#v", setArgs, want)
+	}
+	getArgs, err := ConfigGetArgs("cost.timeout", ConfigScopeGlobal)
+	if err != nil {
+		t.Fatalf("dotted config key rejected by get args: %v", err)
+	}
+	if want := []string{"config", "get", "cost.timeout", "--global"}; !reflect.DeepEqual(getArgs, want) {
+		t.Fatalf("get args mismatch\n got: %#v\nwant: %#v", getArgs, want)
+	}
+}
+
 func TestParseConfigListAcceptsValidRowsAndPreservesValueSpacing(t *testing.T) {
 	output := strings.Join([]string{
 		"default  max_workers               4",
@@ -80,6 +97,11 @@ func TestParseConfigListFailsClosed(t *testing.T) {
 		"unknown origin":    "machine  max_workers  4",
 		"missing origin":    "max_workers  4",
 		"duplicate key":     "global  max_workers  1\nlocal  max_workers  2",
+		"leading dot key":   "global  .cost.timeout  10s",
+		"trailing dot key":  "global  cost.timeout.  10s",
+		"empty key segment": "global  cost..timeout  10s",
+		"uppercase key":     "global  Cost.timeout  10s",
+		"hyphenated key":    "global  cost-timeout  10s",
 		"control character": "global  max_workers  1\x00",
 		"oversized line":    "global  review_guidelines  " + strings.Repeat("x", 5000),
 	}
@@ -94,6 +116,34 @@ func TestParseConfigListFailsClosed(t *testing.T) {
 	}
 	if _, err := ParseConfigList(strings.Join(tooManyRows, "\n")); err == nil {
 		t.Fatal("expected row-count bound failure")
+	}
+}
+
+const v064CIWorkflowConfigListFixture = `default  default_agent                 codex
+default  cost.timeout                 10s
+default  agent_hook.turn_threshold    5
+global   agent_hook.instruction        Invoke the $roborev-fix skill now.
+local    ci.include_costs              true
+`
+
+func TestConfigListAcceptsV064CIWorkflowDottedFixture(t *testing.T) {
+	client, runner := newRecordingClient(t, []process.Result{{Stdout: v064CIWorkflowConfigListFixture}}, []error{nil})
+	rows, err := client.ConfigList(context.Background(), `E:\repo`)
+	if err != nil {
+		t.Fatalf("v0.64 dotted config list fixture rejected: %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %d, want version probe + config list", len(runner.calls))
+	}
+	want := []ConfigRow{
+		{Origin: "default", Key: "default_agent", Value: "codex"},
+		{Origin: "default", Key: "cost.timeout", Value: "10s"},
+		{Origin: "default", Key: "agent_hook.turn_threshold", Value: "5"},
+		{Origin: "global", Key: "agent_hook.instruction", Value: "Invoke the $roborev-fix skill now."},
+		{Origin: "local", Key: "ci.include_costs", Value: "true"},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("rows mismatch\n got: %#v\nwant: %#v", rows, want)
 	}
 }
 

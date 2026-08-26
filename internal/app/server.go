@@ -19,6 +19,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/agenthookmanagement"
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
 	"github.com/froze/roborev-dashboard/internal/analysis"
+	"github.com/froze/roborev-dashboard/internal/ciworkflowpreview"
 	"github.com/froze/roborev-dashboard/internal/fixoperation"
 	"github.com/froze/roborev-dashboard/internal/fixprompt"
 	"github.com/froze/roborev-dashboard/internal/gitx"
@@ -71,6 +72,7 @@ type Server struct {
 	SkillsManagementHome string
 	SkillsManagementEnv  func() []string
 	skillsPreviews       *skillsPreviewStore
+	CIWorkflowPreview    *ciworkflowpreview.Service
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -163,7 +165,11 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	if _, ok := registry.inspector.(repositoryHookLayoutResolver); ok {
 		management = hookmanagement.New(registry, nil)
 	}
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil), HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore()}
+	var ciWorkflow *ciworkflowpreview.Service
+	if transport, ok := service.(roborev.CIWorkflowPreviewTransport); ok {
+		ciWorkflow = ciworkflowpreview.NewService(transport)
+	}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookstatus.New(versionProbe, registry, nil), HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow}
 	s.routes()
 	return s, nil
 }
@@ -245,6 +251,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/agent-hooks/execute", s.agentHookManagementExecute)
 	s.mux.HandleFunc("POST /api/skills/preview", s.skillsManagementPreview)
 	s.mux.HandleFunc("POST /api/skills/execute", s.skillsManagementExecute)
+	s.mux.HandleFunc("POST /api/ci-workflow/preview", s.ciWorkflowPreview)
 	s.mux.HandleFunc("GET /api/exports/reviews", s.reviewMetadataExport)
 	s.mux.HandleFunc("GET /api/repositories/hooks", s.repositoryHooks)
 	s.mux.HandleFunc("GET /api/repositories/hooks/management", s.repositoryHookManagement)

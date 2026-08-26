@@ -1,5 +1,48 @@
-import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, validateRepositoryRenameName } from './api'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fetchCIWorkflowPreview, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
+
+const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
+const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) } }
+
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+describe('CI workflow preview API contract', () => {
+  it('accepts only the fixed target/version, matching identity, safe UTF-8 content, and lowercase hash', () => {
+    expect(normalizeCIWorkflowPreview(ciPreview, 'repo-1')).toEqual(ciPreview)
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, repositoryIdentity: 'other' }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, target: '.github/workflows/other.yml' }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, version: '0.64.0' }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, sha256: 'A'.repeat(64) } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, sha256: 'a'.repeat(63) } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, targetStatus: 'absent' }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: 'bad\u0000content' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: 'bad\u0001content' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: 'bad\u007fcontent' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: '\ud800' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: '' } }, 'repo-1')).toBeNull()
+  })
+
+  it('rejects extra/private fields and workflows over the UTF-8 byte limit', () => {
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, privatePath: 'C:\\secret' }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, stdout: 'secret' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { content: ciContent, sha256: ciPreview.workflow.sha256, extra: true } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, workflow: { ...ciPreview.workflow, content: 'x'.repeat(256 * 1024 + 1) } }, 'repo-1')).toBeNull()
+  })
+
+  it('POSTs exactly the browser identity and no browser-selected fields', async () => {
+    setCSRF('test-csrf')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(ciPreview), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchCIWorkflowPreview('repo-1')).resolves.toEqual(ciPreview)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/ci-workflow/preview')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ repositoryIdentity: 'repo-1' })
+    expect(Object.keys(JSON.parse(String(init.body)))).toEqual(['repositoryIdentity'])
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('test-csrf')
+  })
+})
 
 const row = { name: 'repo', path: 'E:\\repo', jobCount: 2, dashboardRegistered: true }
 

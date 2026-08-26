@@ -608,6 +608,21 @@ export const en = {
   'setup.gitHooksMalformed': 'The Dashboard could not validate the typed Git hook response.',
   'setup.gitHooksPreviewFailed': 'The Git hook preview could not be prepared.',
   'setup.gitHooksExecuteFailed': 'The Git hook action could not be completed.',
+  'setup.ciWorkflowPreviewEyebrow': 'Repository automation',
+  'setup.ciWorkflowPreviewTitle': 'CI Workflow Preview',
+  'setup.ciWorkflowPreviewDescription': 'Generate a read-only preview for the repository-scoped RoboRev GitHub Actions workflow.',
+  'setup.ciWorkflowPreviewGenerate': 'Generate Preview',
+  'setup.ciWorkflowPreviewGenerating': 'Generating…',
+  'setup.ciWorkflowPreviewIdle': 'No preview requested. Generate it when you want to inspect the workflow.',
+  'setup.ciWorkflowPreviewNoRepository': 'Select a registered repository to generate a preview.',
+  'setup.ciWorkflowPreviewError': 'The CI workflow preview could not be prepared.',
+  'setup.ciWorkflowPreviewTarget': 'Target',
+  'setup.ciWorkflowPreviewVersion': 'RoboRev version',
+  'setup.ciWorkflowPreviewSupplyChainWarning': 'Only RoboRev itself is pinned to v0.64.0; agent CLIs may use @latest packages or external installers. Review the YAML before committing it.',
+  'setup.ciWorkflowPreviewYaml': 'Generated YAML',
+  'setup.ciWorkflowPreviewCopy': 'Copy',
+  'setup.ciWorkflowPreviewCopied': 'Copied',
+  'setup.ciWorkflowPreviewCopyFailed': 'The workflow could not be copied because clipboard access was unavailable.',
   'setup.agentHookReadinessTitle': 'Agent Hook Readiness',
   'setup.agentHookReadinessDescription': 'AI coding agent harness integration configuration status.',
   'setup.agentHookReadinessLoading': 'Checking agent hook readiness…',
@@ -1354,6 +1369,21 @@ ko['setup.skillsManagementError.no-improvement'] = '변경 후 readback에서 �
 ko['setup.skillsManagementMalformed'] = 'Dashboard가 typed Skills Management 응답을 검증하지 못했습니다.'
 ko['setup.skillsManagementPreviewFailed'] = 'Skills Management preview를 준비하지 못했습니다.'
 ko['setup.skillsManagementExecuteFailed'] = 'Skills Management 작업을 완료하거나 확인하지 못했습니다.'
+ko['setup.ciWorkflowPreviewEyebrow'] = '저장소 자동화'
+ko['setup.ciWorkflowPreviewTitle'] = 'CI Workflow 미리보기'
+ko['setup.ciWorkflowPreviewDescription'] = '저장소 범위 RoboRev GitHub Actions workflow를 조회 전용으로 생성합니다.'
+ko['setup.ciWorkflowPreviewGenerate'] = '미리보기 생성'
+ko['setup.ciWorkflowPreviewGenerating'] = '생성 중…'
+ko['setup.ciWorkflowPreviewIdle'] = '아직 미리보기를 요청하지 않았습니다. workflow를 확인할 때 생성하세요.'
+ko['setup.ciWorkflowPreviewNoRepository'] = '미리보기를 생성하려면 등록된 저장소를 선택하세요.'
+ko['setup.ciWorkflowPreviewError'] = 'CI workflow 미리보기를 준비하지 못했습니다.'
+ko['setup.ciWorkflowPreviewTarget'] = '대상'
+ko['setup.ciWorkflowPreviewVersion'] = 'RoboRev 버전'
+ko['setup.ciWorkflowPreviewSupplyChainWarning'] = 'RoboRev 자체만 v0.64.0으로 고정되며, agent CLI는 @latest 패키지나 외부 설치 프로그램을 사용할 수 있습니다. commit 전에 YAML을 검토하세요.'
+ko['setup.ciWorkflowPreviewYaml'] = '생성된 YAML'
+ko['setup.ciWorkflowPreviewCopy'] = '복사'
+ko['setup.ciWorkflowPreviewCopied'] = '복사됨'
+ko['setup.ciWorkflowPreviewCopyFailed'] = '클립보드에 접근할 수 없어 workflow를 복사하지 못했습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

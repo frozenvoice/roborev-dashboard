@@ -244,6 +244,49 @@ export type GitHookStatus = {
   postRewrite: { status: GitHookPostRewriteStatus }
 }
 
+export type CIWorkflowPreview = {
+  version: 'v0.64.0'
+  repositoryIdentity: string
+  target: '.github/workflows/roborev.yml'
+  workflow: {
+    content: string
+    sha256: string
+  }
+}
+
+const ciWorkflowVersion = 'v0.64.0' as const
+const ciWorkflowTarget = '.github/workflows/roborev.yml' as const
+const ciWorkflowMaxBytes = 256 * 1024
+
+function validUtf8WorkflowContent(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false
+  // TextEncoder replaces unpaired surrogates, so reject those explicitly
+  // before applying the byte limit. This keeps the accepted value valid UTF-8
+  // rather than silently changing the generated workflow in the browser.
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) return false
+      index += 1
+      continue
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) return false
+    if ((code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d) || (code >= 0x7f && code <= 0x9f)) return false
+  }
+  return new TextEncoder().encode(value).byteLength <= ciWorkflowMaxBytes
+}
+
+/** Normalize the strict, read-only CI workflow preview DTO. */
+export function normalizeCIWorkflowPreview(value: unknown, expectedRepositoryIdentity?: string): CIWorkflowPreview | null {
+  const root = objectValue(value)
+  if (!root || (Object.getPrototypeOf(root) !== Object.prototype && Object.getPrototypeOf(root) !== null) || Object.keys(root).some(key => !['version', 'repositoryIdentity', 'target', 'workflow'].includes(key)) || !['version', 'repositoryIdentity', 'target', 'workflow'].every(key => Object.prototype.hasOwnProperty.call(root, key))) return null
+  if (!root || root.version !== ciWorkflowVersion || root.target !== ciWorkflowTarget || typeof root.repositoryIdentity !== 'string' || !root.repositoryIdentity.trim() || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  const workflow = exactObject(root.workflow, ['content', 'sha256'])
+  if (!workflow || !validUtf8WorkflowContent(workflow.content) || typeof workflow.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(workflow.sha256)) return null
+  return { version: ciWorkflowVersion, repositoryIdentity: root.repositoryIdentity, target: ciWorkflowTarget, workflow: { content: workflow.content, sha256: workflow.sha256 } }
+}
+
 export type GitHookClassification = 'absent' | 'unmanaged' | 'managed-current' | 'managed-outdated' | 'managed-stale-binary' | 'ambiguous' | 'unreadable'
 export type GitHookManagementStatus = 'not-installed' | 'current' | 'outdated' | 'unknown'
 export type GitHookManagementHook = {
@@ -1595,6 +1638,18 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
     throw new APIError(problem?.error ?? `Request failed (${response.status})`, problem?.phase, problem?.code ?? problem?.error_code ?? problem?.errorCode)
   }
   return payload as T
+}
+
+/** Request one explicitly-triggered repository-scoped CI workflow preview. */
+export async function fetchCIWorkflowPreview(repositoryIdentity: string, signal?: AbortSignal): Promise<CIWorkflowPreview> {
+  const value = await request<unknown>('/api/ci-workflow/preview', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity }),
+    signal,
+  })
+  const normalized = normalizeCIWorkflowPreview(value, repositoryIdentity)
+  if (!normalized) throw new APIError('invalid-ci-workflow-preview')
+  return normalized
 }
 
 export function jobsFromPayload(value: unknown): ReviewJob[] {

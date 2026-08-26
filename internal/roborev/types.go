@@ -235,6 +235,12 @@ const (
 // supply one.
 type SkillsPreLaunchGuard func(context.Context) error
 
+// CIWorkflowPreLaunchGuard is the narrow, CI-only callback used by the
+// read-only workflow preview transport. The server owns the callback and
+// uses it to revalidate its private temporary output binding immediately
+// before the one allowlisted generation process.
+type CIWorkflowPreLaunchGuard func(context.Context) error
+
 // AgentHookManagementTransport is optional so existing RoboRev adapters and
 // fakes remain source-compatible. The server uses this narrow transport for
 // one allowlisted agent at a time; config paths and raw CLI output stay
@@ -254,6 +260,14 @@ type SkillsManagementTransport interface {
 	SkillsReadiness(context.Context) (SkillsReadiness, error)
 	ProbeSkillsBinding(context.Context) (GitHookBinding, error)
 	RunSkillsInstall(context.Context, string, string, GitHookBinding, SkillsPreLaunchGuard) (GitHookExecution, error)
+}
+
+// CIWorkflowPreviewTransport is the optional, read-only CI workflow preview
+// surface. The browser supplies only an authorized repository identity; the
+// server resolves the canonical root and private temporary output path before
+// invoking this narrow adapter.
+type CIWorkflowPreviewTransport interface {
+	GenerateCIWorkflow(context.Context, string, string, CIWorkflowPreLaunchGuard) error
 }
 
 type AgentHookDryRun struct {

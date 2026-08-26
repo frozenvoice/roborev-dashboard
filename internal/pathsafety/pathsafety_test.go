@@ -2,6 +2,8 @@ package pathsafety
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -163,5 +165,51 @@ func TestCaptureRejectsRelativeAndOversizedFiles(t *testing.T) {
 	f.addFile(path, bytes.Repeat([]byte("x"), int(MaxFileBytes)+1), "large")
 	if _, err := CaptureFile(f, path); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("large error=%v", err)
+	}
+}
+
+func TestReadStableFileReturnsExactBytesAndFingerprint(t *testing.T) {
+	f := newTestFS()
+	path := `C:\fake-home\.codex\workflow.yml`
+	content := []byte("name: RoboRev\r\n\t# exact bytes\n")
+	f.addFile(path, content, "workflow")
+	got, snapshot, err := ReadStableFile(f, path, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) || snapshot.Size != int64(len(content)) || snapshot.FileIdentity != "workflow" {
+		t.Fatalf("content=%q snapshot=%#v", got, snapshot)
+	}
+	want := sha256.Sum256(content)
+	if snapshot.Fingerprint != hex.EncodeToString(want[:]) {
+		t.Fatalf("fingerprint=%q", snapshot.Fingerprint)
+	}
+}
+
+func TestReadStableFileRejectsBoundAndPathRaces(t *testing.T) {
+	path := `C:\fake-home\.codex\workflow.yml`
+	for _, test := range []struct {
+		name  string
+		setup func(*testFS)
+		want  error
+	}{
+		{name: "oversized", setup: func(f *testFS) { f.addFile(path, bytes.Repeat([]byte("x"), 5), "large") }, want: ErrTooLarge},
+		{name: "symlink", setup: func(f *testFS) { f.addFile(path, []byte("x"), "link"); f.aliases[path] = `C:\other\workflow.yml` }, want: ErrUnsafePath},
+		{name: "reparse", setup: func(f *testFS) {
+			f.addFile(path, []byte("x"), "reparse")
+			entry := f.entries[path]
+			entry.reparse = true
+			f.entries[path] = entry
+		}, want: ErrUnsafePath},
+		{name: "open identity race", setup: func(f *testFS) { f.addFile(path, []byte("x"), "race"); f.mutateOnOpen = true }, want: ErrChanged},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newTestFS()
+			test.setup(f)
+			_, _, err := ReadStableFile(f, path, 4)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("error=%v want=%v", err, test.want)
+			}
+		})
 	}
 }

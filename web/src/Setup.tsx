@@ -6,6 +6,7 @@ import { RuntimeDiagnostics } from './RuntimeDiagnostics'
 import { GitHookStatus } from './GitHookStatus'
 import { AgentHookReadiness } from './AgentHookReadiness'
 import { SkillsReadiness } from './SkillsReadiness'
+import { CIWorkflowPreview } from './CIWorkflowPreview'
 
 export type SetupAction = () => Promise<void>
 export type AgentCheckAction = (agent: string) => Promise<void>
@@ -344,6 +345,7 @@ export function Setup({ state, repositoryIdentity = '', busy = false, onInstall,
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
     <RuntimeDiagnostics />
     <GitHookStatus repositoryIdentity={repositoryIdentity} />
+    <CIWorkflowPreview repositoryIdentity={repositoryIdentity} />
     <AgentHookReadiness />
     <SkillsReadiness />
     <ConfiguredReviewAgents agents={agents} loading={agentsLoading} error={agentsError} busy={busy || actionBusy} onRefresh={onRefreshAgents} onCheck={onCheckAgent} />

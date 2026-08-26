@@ -47,7 +47,10 @@ type ConfigService interface {
 	ConfigSet(ctx context.Context, repoPath string, key string, value string, scope ConfigScope) error
 }
 
-var configKeyPattern = regexp.MustCompile(`^[a-z0-9_]+$`)
+// v0.64 flattens nested TOML tables into lowercase dot-separated keys (for
+// example, cost.timeout and agent_hook.turn_threshold). Keep each segment
+// strict so malformed separators and shell-like key text fail closed.
+var configKeyPattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`)
 var configOriginPattern = regexp.MustCompile(`^(global|local|default)$`)
 
 func validateConfigKey(key string) error {

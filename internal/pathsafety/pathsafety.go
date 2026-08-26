@@ -1,6 +1,7 @@
 // Package pathsafety contains the race-aware, server-side filesystem
-// primitives used by mutation previews.  It intentionally does not enumerate
-// directories or retain file contents.
+// primitives used by mutation previews. It intentionally does not enumerate
+// directories; its narrow ReadStableFile helper retains bytes only for an
+// immediate, explicitly bounded read-only artifact.
 package pathsafety
 
 import (
@@ -28,6 +29,77 @@ var (
 	ErrUnavailable = errors.New("filesystem is unavailable")
 	ErrMissing     = errors.New("required path is missing")
 )
+
+// ReadStableFile reads one regular file through a single opened handle while
+// proving that the path chain and file identity did not change during the
+// read. It is intentionally narrower than the normal Capture API: callers
+// choose a bounded byte limit and receive the bytes only when they explicitly
+// need a read-only artifact (for example, a server-owned preview). The final
+// node and every parent are rejected when they are symlinks or reparse points.
+// No caller should use this helper for unbounded or user-directed reads.
+func ReadStableFile(fs FileSystem, rawPath string, maxBytes int64) ([]byte, Snapshot, error) {
+	if fs == nil {
+		return nil, Snapshot{}, ErrUnavailable
+	}
+	if maxBytes <= 0 || maxBytes > MaxFileBytes {
+		return nil, Snapshot{}, ErrTooLarge
+	}
+	path, err := CanonicalAbsolutePath(fs, rawPath)
+	if err != nil {
+		return nil, Snapshot{}, err
+	}
+	ancestorPath, ancestorIdentity, finalInfo, exists, err := inspectPathChain(fs, path)
+	if err != nil {
+		return nil, Snapshot{}, err
+	}
+	if !exists {
+		return nil, Snapshot{}, ErrMissing
+	}
+	if fs.IsReparse(path, finalInfo) || finalInfo.Mode()&os.ModeSymlink != 0 || finalInfo.IsDir() || !finalInfo.Mode().IsRegular() {
+		return nil, Snapshot{}, ErrUnsafeFile
+	}
+	if finalInfo.Size() < 0 || finalInfo.Size() > maxBytes {
+		return nil, Snapshot{}, ErrTooLarge
+	}
+	identity, err := fs.Identity(path, finalInfo)
+	if err != nil || strings.TrimSpace(identity) == "" {
+		return nil, Snapshot{}, ErrUnsafeFile
+	}
+	file, err := fs.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, Snapshot{}, ErrChanged
+		}
+		return nil, Snapshot{}, ErrUnavailable
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	openedInfo, statErr := file.Stat()
+	openedIdentity, identityErr := file.Identity()
+	closeErr := file.Close()
+	if readErr != nil || statErr != nil || identityErr != nil || closeErr != nil {
+		return nil, Snapshot{}, ErrUnavailable
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, Snapshot{}, ErrTooLarge
+	}
+	if openedIdentity != identity || openedInfo.Size() != finalInfo.Size() {
+		return nil, Snapshot{}, ErrChanged
+	}
+	latestAncestorPath, latestAncestorIdentity, latest, latestExists, chainErr := inspectPathChain(fs, path)
+	if chainErr != nil {
+		return nil, Snapshot{}, chainErr
+	}
+	if !latestExists || latest == nil || latest.IsDir() || !latest.Mode().IsRegular() || fs.IsReparse(path, latest) || !samePath(latestAncestorPath, ancestorPath) || latestAncestorIdentity != ancestorIdentity {
+		return nil, Snapshot{}, ErrChanged
+	}
+	latestIdentity, identityErr := fs.Identity(path, latest)
+	if identityErr != nil || latestIdentity != identity || latest.Size() != int64(len(data)) {
+		return nil, Snapshot{}, ErrChanged
+	}
+	hash := sha256.Sum256(data)
+	snapshot := Snapshot{Path: path, Exists: true, Kind: RegularFile, Size: int64(len(data)), Fingerprint: hex.EncodeToString(hash[:]), FileIdentity: identity, AncestorPath: ancestorPath, AncestorIdentity: ancestorIdentity}
+	return data, snapshot, nil
+}
 
 // File is an already-open file handle. Identity must describe that handle;
 // implementations must not reopen the path after Open.
