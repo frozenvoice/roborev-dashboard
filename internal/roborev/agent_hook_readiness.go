@@ -160,15 +160,20 @@ func (c *Client) probeAgentHookReadinessBinding(ctx context.Context, env []strin
 }
 
 func parseAgentHookReadinessOutput(output, display string) (AgentHookReadinessStatus, bool) {
+	status, _, ok := parseAgentHookInstallOutput(output, display)
+	return status, ok
+}
+
+func parseAgentHookInstallOutput(output, display string) (AgentHookReadinessStatus, string, bool) {
 	if !utf8.ValidString(output) || !strings.HasSuffix(output, "\n") {
-		return "", false
+		return "", "", false
 	}
 	body := strings.TrimSuffix(output, "\n")
 	if strings.HasSuffix(body, "\r") {
 		body = strings.TrimSuffix(body, "\r")
 	}
 	if body == "" || strings.ContainsAny(body, "\r\n") {
-		return "", false
+		return "", "", false
 	}
 	for _, expected := range []struct {
 		prefix string
@@ -182,11 +187,20 @@ func parseAgentHookReadinessOutput(output, display string) (AgentHookReadinessSt
 		}
 		path := strings.TrimPrefix(body, expected.prefix)
 		if strings.TrimSpace(path) == "" || strings.TrimSpace(path) != path || strings.ContainsAny(path, "\r\n") {
-			return "", false
+			return "", "", false
 		}
-		return expected.status, true
+		return expected.status, path, true
 	}
-	return "", false
+	return "", "", false
+}
+
+func agentHookReadinessSpecFor(agent string) (agentHookReadinessSpec, bool) {
+	for _, spec := range agentHookReadinessSpecs {
+		if spec.agent == agent {
+			return spec, true
+		}
+	}
+	return agentHookReadinessSpec{}, false
 }
 
 // readinessProbeEnv deliberately starts with the process package's platform

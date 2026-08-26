@@ -616,6 +616,26 @@ export const en = {
   'setup.agentHookReadinessRetry': 'Readiness could not be verified. Refresh to try again.',
   'setup.agentHookReadinessCurrent': 'Current',
   'setup.agentHookReadinessNeedsUpdate': 'Needs install/update',
+  'setup.agentHookManagementCta': 'Install / Update',
+  'setup.agentHookManagementTitle': 'Install / Update RoboRev Agent Hook',
+  'setup.agentHookManagementDescription': 'RoboRev-managed agent hook entries will be added or updated in the {agent} user settings. Unrelated JSON values remain, but the upstream writer may normalize JSON formatting.',
+  'setup.agentHookManagementAgent': 'Agent',
+  'setup.agentHookManagementAction': 'Action',
+  'setup.agentHookManagementActionValue': 'Install / Update',
+  'setup.agentHookManagementCommand': 'Semantic command',
+  'setup.agentHookManagementCommandNote': 'The backend supplies the fixed executable and typed arguments; the actual binary path stays server-side.',
+  'setup.agentHookManagementWarning': 'This changes the selected agent user settings only. RoboRev does not promise byte-for-byte JSON formatting preservation.',
+  'setup.agentHookManagementClose': 'Close agent hook confirmation',
+  'setup.agentHookManagementConfirm': 'Install / Update',
+  'setup.agentHookManagementExecuting': 'Installing / Updating…',
+  'setup.agentHookManagementPreparing': 'Preparing the {agent} agent hook preview…',
+  'setup.agentHookManagementVerified': 'Verified success',
+  'setup.agentHookManagementFailed': 'Failed · unverified',
+  'setup.agentHookManagementVerifiedWarning': 'The install command reported an error, but the fresh post-check verified the hook is current.',
+  'setup.agentHookManagementResultDetail': 'The authoritative post-check could not verify the final hook state.',
+  'setup.agentHookManagementMalformed': 'The Dashboard could not validate the typed agent hook response.',
+  'setup.agentHookManagementPreviewFailed': 'The agent hook preview could not be prepared.',
+  'setup.agentHookManagementExecuteFailed': 'The agent hook action could not be completed or verified.',
   'diagnostics.title': 'Runtime Diagnostics',
   'diagnostics.description': 'Read-only daemon, worker, queue, job, and health signals.',
   'diagnostics.open': 'Diagnostics',
@@ -1230,6 +1250,26 @@ ko['setup.agentHookReadinessUnavailable'] = '사용할 수 없음'
 ko['setup.agentHookReadinessRetry'] = '준비 상태를 확인하지 못했습니다. 새로고침하여 다시 시도하세요.'
 ko['setup.agentHookReadinessCurrent'] = '최신'
 ko['setup.agentHookReadinessNeedsUpdate'] = '설치/업데이트 필요'
+ko['setup.agentHookManagementCta'] = '설치 / 업데이트'
+ko['setup.agentHookManagementTitle'] = 'RoboRev Agent Hook 설치 / 업데이트'
+ko['setup.agentHookManagementDescription'] = 'RoboRev가 관리하는 agent hook 항목을 {agent} 사용자 설정에 추가하거나 업데이트합니다. 관련 없는 JSON 값은 유지되지만 upstream writer가 JSON formatting을 정규화할 수 있습니다.'
+ko['setup.agentHookManagementAgent'] = '에이전트'
+ko['setup.agentHookManagementAction'] = '작업'
+ko['setup.agentHookManagementActionValue'] = '설치 / 업데이트'
+ko['setup.agentHookManagementCommand'] = '의미 기반 명령'
+ko['setup.agentHookManagementCommandNote'] = '백엔드가 고정 실행 파일과 typed 인자를 제공하며 실제 바이너리 경로는 서버에만 남습니다.'
+ko['setup.agentHookManagementWarning'] = '선택한 에이전트의 사용자 설정만 변경합니다. RoboRev는 JSON formatting을 byte-for-byte로 보존한다고 보장하지 않습니다.'
+ko['setup.agentHookManagementClose'] = '에이전트 hook 확인 닫기'
+ko['setup.agentHookManagementConfirm'] = '설치 / 업데이트'
+ko['setup.agentHookManagementExecuting'] = '설치 / 업데이트 중…'
+ko['setup.agentHookManagementPreparing'] = '{agent} agent hook preview 준비 중…'
+ko['setup.agentHookManagementVerified'] = '성공 확인됨'
+ko['setup.agentHookManagementFailed'] = '실패 · 확인되지 않음'
+ko['setup.agentHookManagementVerifiedWarning'] = '설치 명령이 오류를 반환했지만 fresh post-check에서 hook이 최신 상태임을 확인했습니다.'
+ko['setup.agentHookManagementResultDetail'] = '최종 hook 상태를 authoritative post-check로 확인하지 못했습니다.'
+ko['setup.agentHookManagementMalformed'] = 'Dashboard가 typed agent hook 응답을 검증하지 못했습니다.'
+ko['setup.agentHookManagementPreviewFailed'] = 'agent hook preview를 준비하지 못했습니다.'
+ko['setup.agentHookManagementExecuteFailed'] = 'agent hook 작업을 완료하거나 확인하지 못했습니다.'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

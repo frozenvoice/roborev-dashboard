@@ -198,6 +198,22 @@ const (
 	AgentHookReadinessUnavailable AgentHookReadinessStatus = "unavailable"
 )
 
+// AgentHookManagementTransport is optional so existing RoboRev adapters and
+// fakes remain source-compatible. The server uses this narrow transport for
+// one allowlisted agent at a time; config paths and raw CLI output stay
+// server-side.
+type AgentHookManagementTransport interface {
+	ProbeAgentHookBinding(context.Context) (GitHookBinding, error)
+	AgentHookDryRun(context.Context, string, GitHookBinding) (AgentHookDryRun, error)
+	RunAgentHookInstall(context.Context, string, GitHookBinding) (GitHookExecution, error)
+}
+
+type AgentHookDryRun struct {
+	Agent      string
+	Status     AgentHookReadinessStatus
+	ConfigPath string
+}
+
 type RuntimeDiagnostics struct {
 	Daemon  RuntimeDiagnosticsDaemon  `json:"daemon"`
 	Workers RuntimeDiagnosticsWorkers `json:"workers"`

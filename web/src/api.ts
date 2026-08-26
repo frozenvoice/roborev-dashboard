@@ -73,6 +73,56 @@ export function normalizeAgentHookReadiness(value: unknown): AgentHookReadiness 
   return { version: agentHookReadinessVersion, agents }
 }
 
+export type AgentHookManagementAction = 'install-update'
+export type AgentHookManagementCommand = {
+  executable: 'roborev'
+  args: string[]
+}
+export type AgentHookManagementPreview = {
+  token: string
+  agent: AgentHookReadinessAgent
+  action: AgentHookManagementAction
+  summary: string
+  command: AgentHookManagementCommand
+  expiresAt: string
+}
+export type AgentHookManagementResultStatus = 'verified-success' | 'failed-unverified'
+export type AgentHookManagementErrorCode = 'cli-failed' | 'cli-not-started' | 'binding-drift' | 'readback-unavailable' | 'readback-not-current'
+export type AgentHookManagementResult = {
+  status: AgentHookManagementResultStatus
+  agent: AgentHookReadinessAgent
+  errorCode?: AgentHookManagementErrorCode
+}
+
+const agentHookManagementActions: readonly AgentHookManagementAction[] = ['install-update']
+const agentHookManagementResultStatuses: readonly AgentHookManagementResultStatus[] = ['verified-success', 'failed-unverified']
+const agentHookManagementErrorCodes: readonly AgentHookManagementErrorCode[] = ['cli-failed', 'cli-not-started', 'binding-drift', 'readback-unavailable', 'readback-not-current']
+const agentHookManagementBinaryPlaceholder = '<current-v0.64.0-binary>'
+const agentHookManagementAgentLabels: Record<AgentHookReadinessAgent, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok Build', droid: 'Factory Droid' }
+
+/** Normalize the sanitized single-agent management preview; actual paths never cross this boundary. */
+export function normalizeAgentHookManagementPreview(value: unknown, expectedAgent?: AgentHookReadinessAgent): AgentHookManagementPreview | null {
+  const root = exactObject(value, ['token', 'agent', 'action', 'summary', 'command', 'expiresAt'])
+  if (!root || typeof root.token !== 'string' || !root.token.trim() || typeof root.agent !== 'string' || !agentHookReadinessAgents.includes(root.agent as AgentHookReadinessAgent) || (expectedAgent !== undefined && root.agent !== expectedAgent) || typeof root.action !== 'string' || !agentHookManagementActions.includes(root.action as AgentHookManagementAction) || typeof root.summary !== 'string' || !rfc3339(root.expiresAt)) return null
+  const agent = root.agent as AgentHookReadinessAgent
+  if (root.summary !== `Install or update RoboRev hooks for ${agentHookManagementAgentLabels[agent]}`) return null
+  const command = exactObject(root.command, ['executable', 'args'])
+  const expectedArgs = ['agent-hook', 'install', '--agent', agent, '--binary', agentHookManagementBinaryPlaceholder]
+  if (!command || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== expectedArgs.length || !command.args.every((item, index) => item === expectedArgs[index])) return null
+  return { token: root.token, agent, action: root.action as AgentHookManagementAction, summary: root.summary, command: { executable: 'roborev', args: [...expectedArgs] }, expiresAt: root.expiresAt }
+}
+
+/** Normalize the typed post-execute receipt without exposing CLI output. */
+export function normalizeAgentHookManagementResult(value: unknown, expectedAgent?: AgentHookReadinessAgent): AgentHookManagementResult | null {
+  const root = exactObject(value, ['status', 'agent']) ?? exactObject(value, ['status', 'agent', 'errorCode'])
+  if (!root || typeof root.status !== 'string' || !agentHookManagementResultStatuses.includes(root.status as AgentHookManagementResultStatus) || typeof root.agent !== 'string' || !agentHookReadinessAgents.includes(root.agent as AgentHookReadinessAgent) || (expectedAgent !== undefined && root.agent !== expectedAgent)) return null
+  const status = root.status as AgentHookManagementResultStatus
+  const errorCode = root.errorCode
+  if (errorCode !== undefined && (typeof errorCode !== 'string' || !agentHookManagementErrorCodes.includes(errorCode as AgentHookManagementErrorCode))) return null
+  if ((status === 'verified-success' && errorCode !== undefined && errorCode !== 'cli-failed') || (status === 'failed-unverified' && errorCode === undefined)) return null
+  return { status, agent: root.agent as AgentHookReadinessAgent, ...(errorCode === undefined ? {} : { errorCode: errorCode as AgentHookManagementErrorCode }) }
+}
+
 export type GitHookOverallStatus = 'ready' | 'needs-attention' | 'not-installed' | 'unknown'
 export type GitHookPostCommitStatus = 'current' | 'outdated' | 'not-installed' | 'unknown'
 export type GitHookPostRewriteStatus = 'current' | 'outdated' | 'missing' | 'not-installed' | 'unknown'

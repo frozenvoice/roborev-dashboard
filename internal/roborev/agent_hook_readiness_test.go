@@ -110,7 +110,7 @@ func containsReadinessArg(args []string, want string) bool {
 	return false
 }
 
-func readinessTestClient(t *testing.T, runner *readinessRunner) (*Client, string) {
+func readinessTestClient(t *testing.T, runner proc.Runner) (*Client, string) {
 	t.Helper()
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "very-secret-roborev.exe")

@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentHookReadiness, resetAgentHookReadinessForTests } from './AgentHookReadiness'
-import { normalizeAgentHookReadiness } from './api'
+import { normalizeAgentHookManagementPreview, normalizeAgentHookManagementResult, normalizeAgentHookReadiness } from './api'
 import { I18nProvider, LanguageSelector } from './i18n'
 
 const ready = {
@@ -15,6 +15,22 @@ const ready = {
     { agent: 'droid', status: 'current' },
   ],
 }
+
+const preview = {
+  token: 'preview-token',
+  agent: 'claude',
+  action: 'install-update',
+  summary: 'Install or update RoboRev hooks for Claude',
+  command: {
+    executable: 'roborev',
+    args: ['agent-hook', 'install', '--agent', 'claude', '--binary', '<current-v0.64.0-binary>'],
+  },
+  expiresAt: '2030-01-01T00:00:00Z',
+}
+
+const verifiedResult = { status: 'verified-success', agent: 'claude' }
+const verifiedWarningResult = { status: 'verified-success', agent: 'claude', errorCode: 'cli-failed' }
+const failedResult = { status: 'failed-unverified', agent: 'claude', errorCode: 'readback-unavailable' }
 
 function jsonResponse(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
@@ -72,6 +88,36 @@ describe('Agent Hook Readiness API normalization', () => {
   })
 })
 
+describe('Agent Hook Management API normalization', () => {
+  it('accepts the exact sanitized preview and terminal result DTOs', () => {
+    expect(normalizeAgentHookManagementPreview(preview, 'claude')).toEqual(preview)
+    expect(normalizeAgentHookManagementResult(verifiedResult, 'claude')).toEqual(verifiedResult)
+    expect(normalizeAgentHookManagementResult(verifiedWarningResult, 'claude')).toEqual(verifiedWarningResult)
+    expect(normalizeAgentHookManagementResult(failedResult, 'claude')).toEqual(failedResult)
+  })
+
+  it('rejects private paths, raw process fields, wrong agents, and extra keys', () => {
+    const privateFields = {
+      path: 'C:\\Users\\private',
+      binary: 'C:\\fake\\very-secret\\roborev.exe',
+      stdout: 'raw stdout',
+      stderr: 'raw stderr',
+      command: 'raw command',
+      argv: ['raw argv'],
+    }
+    expect(normalizeAgentHookManagementPreview({ ...preview, ...privateFields }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementPreview({ ...preview, agent: 'codex' }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementPreview({ ...preview, summary: 'C:\\Users\\private' }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementPreview({ ...preview, command: { ...preview.command, args: [...preview.command.args, 'extra'] } }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementResult({ ...verifiedResult, ...privateFields }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementResult({ status: 'verified-success', agent: 'claude', errorCode: '' }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementResult({ status: 'verified-success', agent: 'claude', errorCode: 'readback-unavailable' }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementResult({ status: 'failed-unverified', agent: 'claude' }, 'claude')).toBeNull()
+    expect(normalizeAgentHookManagementResult({ status: 'failed-unverified', agent: 'claude', errorCode: 'binding-drift' }, 'claude')).toEqual({ status: 'failed-unverified', agent: 'claude', errorCode: 'binding-drift' })
+    expect(normalizeAgentHookManagementResult({ status: 'failed-unverified', agent: 'claude', errorCode: 'private-cli-output' }, 'claude')).toBeNull()
+  })
+})
+
 describe('AgentHookReadiness lifecycle and privacy', () => {
   it('fetches once and renders exact rows, order, and status labels', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(ready))
@@ -85,9 +131,10 @@ describe('AgentHookReadiness lifecycle and privacy', () => {
     expect(within(card).getAllByText('Current')).toHaveLength(2)
     expect(within(card).getByText('Needs install/update')).toBeInTheDocument()
     expect(within(card).getByText('Unavailable')).toBeInTheDocument()
-    expect(within(card).getAllByRole('button')).toHaveLength(1)
+    expect(within(card).getAllByRole('button')).toHaveLength(2)
     expect(within(card).getByRole('button', { name: 'Refresh agent hook readiness' })).toBeInTheDocument()
-    for (const forbidden of [/install/i, /update/i, /reset/i, /start/i, /restart/i, /stop/i, /daemon/i]) {
+    expect(within(card).getByRole('button', { name: 'Install / Update' })).toBeInTheDocument()
+    for (const forbidden of [/install all/i, /update all/i, /remove/i, /uninstall/i, /reset/i, /start/i, /restart/i, /stop/i, /daemon/i]) {
       expect(within(card).queryByRole('button', { name: forbidden })).not.toBeInTheDocument()
     }
   })
@@ -197,5 +244,205 @@ describe('AgentHookReadiness lifecycle and privacy', () => {
     renderReadiness()
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
     for (const marker of privateMarkers) expect(document.body).not.toHaveTextContent(marker)
+  })
+})
+
+function managementFetchMock(result: unknown = verifiedResult) {
+  const counts = { readiness: 0, preview: 0, execute: 0 }
+  const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
+    const path = String(input)
+    if (path.endsWith('/api/agent-hooks/readiness')) {
+      counts.readiness += 1
+      return Promise.resolve(jsonResponse(ready))
+    }
+    if (path.endsWith('/api/agent-hooks/preview')) {
+      counts.preview += 1
+      return Promise.resolve(jsonResponse(preview))
+    }
+    if (path.endsWith('/api/agent-hooks/execute')) {
+      counts.execute += 1
+      return Promise.resolve(jsonResponse(result))
+    }
+    throw new Error(`Unexpected request ${path} ${init?.method ?? 'GET'}`)
+  })
+  return { fetchMock, counts }
+}
+
+describe('Agent Hook Management v2', () => {
+  it.each([
+    ['codex', 0],
+    ['claude', 1],
+    ['grok', 2],
+    ['droid', 3],
+  ] as const)('offers one independent Install / Update CTA for %s', async (agent, index) => {
+    const fixture = { ...ready, agents: ready.agents.map((item, itemIndex) => ({ ...item, status: itemIndex === index ? 'needs-update' : 'current' })) }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(fixture))
+    vi.stubGlobal('fetch', fetchMock)
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    const card = screen.getByRole('region', { name: 'Agent Hook Readiness' })
+    const labels = { codex: 'Codex', claude: 'Claude', grok: 'Grok Build', droid: 'Factory Droid' } as const
+    const targetRow = [...card.querySelectorAll('[role="listitem"]')].find(item => item.textContent?.includes(labels[agent]))
+    expect(targetRow).toBeTruthy()
+    expect(within(targetRow as HTMLElement).getByRole('button', { name: 'Install / Update' })).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: /install all|update all|remove|uninstall|reset|daemon/i })).not.toBeInTheDocument()
+  })
+
+  it('sends exactly one preview request from the scoped CTA and keeps the command semantic', async () => {
+    const { fetchMock, counts } = managementFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    const card = screen.getByRole('region', { name: 'Agent Hook Readiness' })
+    await userEvent.click(within(card).getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    expect(counts.preview).toBe(1)
+    expect(counts.execute).toBe(0)
+    const call = fetchMock.mock.calls.find(call => String(call[0]).endsWith('/api/agent-hooks/preview'))
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({ agent: 'claude' })
+    expect(screen.getByRole('dialog')).toHaveTextContent('["roborev","agent-hook","install","--agent","claude","--binary","<current-v0.64.0-binary>"]')
+    expect(screen.queryByText(/C:\\Users|very-secret|stdout|stderr|argv/i)).not.toBeInTheDocument()
+  })
+
+  it('cancels without execute, traps focus, handles Escape, and restores CTA focus', async () => {
+    const { fetchMock, counts } = managementFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    const cta = screen.getByRole('button', { name: 'Install / Update' })
+    await user.click(cta)
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(screen.getByRole('button', { name: 'Close agent hook confirmation' })).toHaveFocus()
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(counts.execute).toBe(0)
+    expect(cta).toHaveFocus()
+  })
+
+  it('confirms exactly once even when the confirmation control is double-clicked', async () => {
+    const { fetchMock, counts } = managementFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    await user.dblClick(within(screen.getByRole('dialog')).getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByText('Verified success')).toBeInTheDocument())
+    expect(counts.execute).toBe(1)
+    expect(counts.readiness).toBe(2)
+    expect(fetchMock.mock.calls.filter(call => String(call[0]).endsWith('/api/agent-hooks/execute'))).toHaveLength(1)
+  })
+
+  it('renders a safe failed-unverified receipt and reloads readiness once', async () => {
+    const { fetchMock, counts } = managementFetchMock(failedResult)
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByText('Failed · unverified')).toBeInTheDocument())
+    expect(counts.execute).toBe(1)
+    expect(counts.readiness).toBe(2)
+    expect(screen.queryByText('readback-unavailable')).not.toBeInTheDocument()
+  })
+
+  it('distinguishes a verified CLI warning from an unverified post-check', async () => {
+    const { fetchMock, counts } = managementFetchMock(verifiedWarningResult)
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByText('Verified success')).toBeInTheDocument())
+    expect(screen.getByText(/reported an error, but the fresh post-check verified/i)).toBeInTheDocument()
+    expect(screen.queryByText(/could not verify the final hook state/i)).not.toBeInTheDocument()
+    expect(counts).toEqual({ readiness: 2, preview: 1, execute: 1 })
+  })
+
+  it('does not leak private paths, binaries, or raw process fields from malformed preview or result', async () => {
+    const markers = ['C:\\Users\\private', 'C:\\fake\\very-secret\\roborev.exe', 'raw stdout', 'raw stderr', 'raw command', 'raw argv']
+    const malformedPreview = { ...preview, path: markers[0], binary: markers[1], stdout: markers[2], stderr: markers[3], commandText: markers[4], argv: [markers[5]] }
+    const fetchMock = vi.fn((input: unknown) => {
+      const path = String(input)
+      if (path.endsWith('/readiness')) return Promise.resolve(jsonResponse(ready))
+      if (path.endsWith('/preview')) return Promise.resolve(jsonResponse(malformedPreview))
+      return Promise.resolve(jsonResponse({ ...verifiedResult, path: markers[0], stdout: markers[2] }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    for (const marker of markers) expect(document.body).not.toHaveTextContent(marker)
+  })
+
+  it('keeps locale changes and repository-key remounts request-free after the cached readiness load', async () => {
+    const { fetchMock, counts } = managementFetchMock()
+    vi.stubGlobal('fetch', fetchMock)
+    const user = userEvent.setup()
+    const { rerender } = render(<I18nProvider><><KeyedReadiness repositoryKey="repo-a" /><LanguageSelector /></></I18nProvider>)
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Select language' }), 'ko')
+    rerender(<I18nProvider><><KeyedReadiness repositoryKey="repo-b" /><LanguageSelector /></></I18nProvider>)
+    await waitFor(() => expect(screen.getByRole('region', { name: '에이전트 Hook 준비 상태' })).toBeInTheDocument())
+    expect(counts.readiness).toBe(1)
+  })
+
+  it('ignores a late preview completion after the card unmounts', async () => {
+    let resolvePreview!: (value: Response) => void
+    const fetchMock = vi.fn((input: unknown) => {
+      const path = String(input)
+      if (path.endsWith('/readiness')) return Promise.resolve(jsonResponse(ready))
+      return new Promise<Response>(resolve => { resolvePreview = resolve })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Install / Update' }))
+    view.unmount()
+    resolvePreview(jsonResponse(preview))
+    await Promise.resolve()
+    expect(document.body).not.toHaveTextContent('Install / Update RoboRev Agent Hook')
+  })
+
+  it('ignores a late execute completion after unmount without starting a readiness reload', async () => {
+    let resolveExecute!: (value: Response) => void
+    const counts = { readiness: 0, preview: 0, execute: 0 }
+    const fetchMock = vi.fn((input: unknown) => {
+      const path = String(input)
+      if (path.endsWith('/readiness')) {
+        counts.readiness += 1
+        return Promise.resolve(jsonResponse(ready))
+      }
+      if (path.endsWith('/preview')) {
+        counts.preview += 1
+        return Promise.resolve(jsonResponse(preview))
+      }
+      if (path.endsWith('/execute')) {
+        counts.execute += 1
+        return new Promise<Response>(resolve => { resolveExecute = resolve })
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = renderReadiness()
+    await waitFor(() => expect(screen.getByText('Factory Droid')).toBeInTheDocument())
+    await userEvent.click(screen.getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Install / Update' }))
+    await waitFor(() => expect(counts.execute).toBe(1))
+    view.unmount()
+    resolveExecute(jsonResponse(verifiedResult))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(counts).toEqual({ readiness: 1, preview: 1, execute: 1 })
   })
 })
