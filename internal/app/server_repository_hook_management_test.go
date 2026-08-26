@@ -116,7 +116,7 @@ func newHookManagementApp(t *testing.T) (*Server, *hookManagementTransport, stri
 	}
 	fs := newHookStatusMemoryFS(hooks, "", "")
 	fs.entries = make(map[string]hookStatusMemoryEntry)
-	transport := &hookManagementTransport{fakeService: &fakeService{}, binding: roborev.GitHookBinding{Binary: `E:\bin\roborev.exe`, Version: "v0.64.0", Generation: 1, FileID: "1"}, fs: fs}
+	transport := &hookManagementTransport{fakeService: &fakeService{}, binding: roborev.GitHookBinding{Binary: `E:\very-secret\private\roborev.exe`, Version: "v0.64.0", Generation: 1, FileID: "1"}, fs: fs}
 	server, err := NewServer(transport, registry, "")
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +139,24 @@ func hookManagementActionBody(identity, action string) string {
 	return string(value)
 }
 
+func assertHookManagementResponseHasNoSecret(t *testing.T, body, secret string) {
+	t.Helper()
+	escapedSecret, err := json.Marshal(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, secret) || strings.Contains(body, `E:\very-secret`) || strings.Contains(body, string(escapedSecret)) || strings.Contains(body, "raw hook content") {
+		t.Fatalf("browser response leaked server-side hook data: %s", body)
+	}
+}
+
+func assertSanitizedHookPreflight(t *testing.T, preflight hookmanagement.Preflight) {
+	t.Helper()
+	if preflight.PostCommit.Content != nil || preflight.PostRewrite.Content != nil || preflight.Root != "" || preflight.HooksDir != "" || preflight.LayoutDigest != "" {
+		t.Fatalf("unsanitized hook preflight=%+v", preflight)
+	}
+}
+
 func TestHookManagementPreviewBindsExactActionWithoutExecuting(t *testing.T) {
 	server, transport, identity := newHookManagementApp(t)
 	recorder := httptest.NewRecorder()
@@ -151,12 +169,96 @@ func TestHookManagementPreviewBindsExactActionWithoutExecuting(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.Action != hookmanagement.Install || response.Token == "" || len(response.Command.Args) != 3 || response.Command.Args[0] != "install-hook" || response.Command.Args[1] != "--binary" {
+	if response.Action != hookmanagement.Install || response.Token == "" || response.Command.Executable != hookManagementPreviewExecutable || strings.Join(response.Command.Args, "\x00") != strings.Join([]string{"install-hook", "--binary", hookManagementPreviewBinary}, "\x00") {
 		t.Fatalf("response=%+v", response)
 	}
-	if response.Preflight.PostCommit.Content != nil || response.Preflight.Root != "" || response.Preflight.HooksDir != "" {
-		t.Fatalf("sensitive preview DTO=%+v", response.Preflight)
+	assertHookManagementResponseHasNoSecret(t, recorder.Body.String(), transport.binding.Binary)
+	assertSanitizedHookPreflight(t, response.Preflight)
+}
+
+func TestHookManagementPreviewUsesSanitizedCommandShapeForEveryAction(t *testing.T) {
+	for _, test := range []struct {
+		action hookmanagement.Action
+		args   []string
+	}{
+		{action: hookmanagement.Install, args: []string{"install-hook", "--binary", hookManagementPreviewBinary}},
+		{action: hookmanagement.Repair, args: []string{"install-hook", "repair", "--binary", hookManagementPreviewBinary}},
+		{action: hookmanagement.Remove, args: []string{"uninstall-hook"}},
+	} {
+		t.Run(string(test.action), func(t *testing.T) {
+			preview := hookCommandPreview(test.action)
+			if preview.Executable != hookManagementPreviewExecutable || strings.Join(preview.Args, "\x00") != strings.Join(test.args, "\x00") {
+				t.Fatalf("preview=%+v want executable=%q args=%q", preview, hookManagementPreviewExecutable, test.args)
+			}
+		})
 	}
+}
+
+func TestHookManagementBrowserDTOsHideBinaryWhileExecutionKeepsBinding(t *testing.T) {
+	server, transport, identity := newHookManagementApp(t)
+	secret := transport.binding.Binary
+
+	management := httptest.NewRecorder()
+	managementRequest := hookManagementMutationRequest(server, http.MethodGet, "/api/repositories/hooks/management?repositoryIdentity="+url.QueryEscape(identity), "")
+	server.Handler().ServeHTTP(management, managementRequest)
+	if management.Code != http.StatusOK {
+		t.Fatalf("management status=%d body=%s", management.Code, management.Body.String())
+	}
+	assertHookManagementResponseHasNoSecret(t, management.Body.String(), secret)
+	var managementPreflight hookmanagement.Preflight
+	if err := json.Unmarshal(management.Body.Bytes(), &managementPreflight); err != nil {
+		t.Fatal(err)
+	}
+	assertSanitizedHookPreflight(t, managementPreflight)
+
+	preview := httptest.NewRecorder()
+	server.Handler().ServeHTTP(preview, hookManagementMutationRequest(server, http.MethodPost, "/api/repositories/hooks/preview", hookManagementActionBody(identity, "install")))
+	if preview.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
+	}
+	assertHookManagementResponseHasNoSecret(t, preview.Body.String(), secret)
+	var prepared hookManagementPreviewDTO
+	if err := json.Unmarshal(preview.Body.Bytes(), &prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Command.Executable != hookManagementPreviewExecutable || strings.Join(prepared.Command.Args, "\x00") != strings.Join([]string{"install-hook", "--binary", hookManagementPreviewBinary}, "\x00") {
+		t.Fatalf("sanitized command=%+v", prepared.Command)
+	}
+	assertSanitizedHookPreflight(t, prepared.Preflight)
+
+	transport.mutate = true
+	result := httptest.NewRecorder()
+	server.Handler().ServeHTTP(result, hookManagementMutationRequest(server, http.MethodPost, "/api/repositories/hooks/execute", `{"token":"`+prepared.Token+`"}`))
+	if result.Code != http.StatusOK {
+		t.Fatalf("result status=%d body=%s", result.Code, result.Body.String())
+	}
+	assertHookManagementResponseHasNoSecret(t, result.Body.String(), secret)
+	var resultDTO hookManagementResultDTO
+	if err := json.Unmarshal(result.Body.Bytes(), &resultDTO); err != nil {
+		t.Fatal(err)
+	}
+	assertSanitizedHookPreflight(t, resultDTO.Preflight)
+	quotedSecret := strconv.Quote(secret)
+	sawSecretHookContent := false
+	for _, entry := range transport.fs.entries {
+		if strings.Contains(string(entry.content), secret) || strings.Contains(string(entry.content), quotedSecret) {
+			sawSecretHookContent = true
+			break
+		}
+	}
+	if !sawSecretHookContent {
+		t.Fatal("fake execution did not create secret-bearing hook content")
+	}
+	if len(transport.commands) != 1 || len(transport.commands[0].args) != 1 || transport.commands[0].args[0] != secret {
+		t.Fatalf("execute lost server-side binding: %#v", transport.commands)
+	}
+
+	error := httptest.NewRecorder()
+	server.Handler().ServeHTTP(error, hookManagementMutationRequest(server, http.MethodPost, "/api/repositories/hooks/execute", `{"token":"missing"}`))
+	if error.Code != http.StatusConflict {
+		t.Fatalf("error status=%d body=%s", error.Code, error.Body.String())
+	}
+	assertHookManagementResponseHasNoSecret(t, error.Body.String(), secret)
 }
 
 func TestHookManagementExecutePartialReadbackAndSingleUseToken(t *testing.T) {

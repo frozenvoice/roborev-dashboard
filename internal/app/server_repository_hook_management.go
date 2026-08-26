@@ -23,6 +23,12 @@ import (
 const (
 	hookManagementPreviewTTL = 3 * time.Minute
 	hookManagementPreviewMax = 128
+
+	// Browser previews describe the allowlisted command shape only. The actual
+	// Dashboard-owned executable remains server-side in the binding/token and is
+	// resolved again immediately before RunGitHook.
+	hookManagementPreviewExecutable = "roborev"
+	hookManagementPreviewBinary     = "<current-v0.64.0-binary>"
 )
 
 type hookManagementPreviewBody struct {
@@ -105,6 +111,8 @@ func (s *hookManagementPreviewStore) expireLocked(now time.Time) {
 	}
 }
 
+// hookManagementCommandDTO is a browser-facing semantic preview, not an
+// execution command. Its values are restricted to the constants below.
 type hookManagementCommandDTO struct {
 	Executable string   `json:"executable"`
 	Args       []string `json:"args"`
@@ -193,7 +201,7 @@ func (s *Server) repositoryHookManagementPreview(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "prepare hook action", "hook-management")
 		return
 	}
-	writeJSON(w, http.StatusOK, hookManagementPreviewDTO{Token: token, Action: action, Repository: repo.Name, Preflight: sanitizedPreflight(preflight), Summary: actionSummary(action), WarningCodes: preflight.WarningCodes, Command: hookCommandPreview(binding, repo.Path, action), ExpiresAt: record.ExpiresAt})
+	writeJSON(w, http.StatusOK, hookManagementPreviewDTO{Token: token, Action: action, Repository: repo.Name, Preflight: sanitizedPreflight(preflight), Summary: actionSummary(action), WarningCodes: preflight.WarningCodes, Command: hookCommandPreview(action), ExpiresAt: record.ExpiresAt})
 }
 
 func (s *Server) repositoryHookManagementExecute(w http.ResponseWriter, r *http.Request) {
@@ -424,17 +432,17 @@ func actionSummary(action hookmanagement.Action) string {
 	}
 }
 
-func hookCommandPreview(binding hookManagementBinding, root string, action hookmanagement.Action) hookManagementCommandDTO {
+func hookCommandPreview(action hookmanagement.Action) hookManagementCommandDTO {
 	var args []string
 	switch action {
 	case hookmanagement.Install:
-		args = []string{"install-hook", "--binary", binding.Binary}
+		args = []string{"install-hook", "--binary", hookManagementPreviewBinary}
 	case hookmanagement.Repair:
-		args = []string{"install-hook", "repair", "--binary", binding.Binary}
+		args = []string{"install-hook", "repair", "--binary", hookManagementPreviewBinary}
 	case hookmanagement.Remove:
 		args = []string{"uninstall-hook"}
 	}
-	return hookManagementCommandDTO{Executable: binding.Binary, Args: args}
+	return hookManagementCommandDTO{Executable: hookManagementPreviewExecutable, Args: args}
 }
 
 func sameHookBinding(binding roborev.GitHookBinding, expected hookManagementBinding) bool {

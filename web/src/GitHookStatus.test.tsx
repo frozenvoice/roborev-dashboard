@@ -31,9 +31,8 @@ function managementPayload(repositoryIdentity: string, overrides: Record<string,
 }
 
 function hookPreview(repositoryIdentity: string, action: 'install' | 'repair' | 'remove', preflight = managementPayload(repositoryIdentity)) {
-  const executable = 'C:\\Program Files\\RoboRev\\roborev.exe'
-  const args = action === 'install' ? ['install-hook', '--binary', executable] : action === 'repair' ? ['install-hook', 'repair', '--binary', executable] : ['uninstall-hook']
-  return { token: 'preview-token', action, repository: 'repo-one', preflight, summary: action, warningCodes: [], command: { executable, args }, expiresAt: '2030-01-01T00:00:00Z' }
+  const args = action === 'install' ? ['install-hook', '--binary', '<current-v0.64.0-binary>'] : action === 'repair' ? ['install-hook', 'repair', '--binary', '<current-v0.64.0-binary>'] : ['uninstall-hook']
+  return { token: 'preview-token', action, repository: 'repo-one', preflight, summary: action, warningCodes: [], command: { executable: 'roborev', args }, expiresAt: '2030-01-01T00:00:00Z' }
 }
 
 function managementResult(repositoryIdentity: string, status: 'verified-success' | 'partial' | 'failed-unverified', action: 'install' | 'repair' | 'remove' = 'install') {
@@ -78,6 +77,16 @@ describe('GitHookStatus', () => {
     expect(normalizeGitHookManagementPreview({ ...preview, action: 'remove' }, 'repo-1', 'install')).toBeNull()
     expect(normalizeGitHookManagementPreview({ ...preview, warningCodes: ['unsafe-hooks-directory'] }, 'repo-1', 'install')).toBeNull()
     expect(normalizeGitHookManagementResult({ ...managementResult('repo-1', 'partial'), errorCode: 'not-a-backend-code' }, 'repo-1', 'install')).toBeNull()
+  })
+
+  it('accepts only the exact sanitized command preview allowlist', () => {
+    const preview = hookPreview('repo-1', 'install')
+    expect(normalizeGitHookManagementPreview(preview, 'repo-1', 'install')).not.toBeNull()
+    expect(normalizeGitHookManagementPreview({ ...preview, command: { ...preview.command, executable: 'E:\\very-secret\\private\\roborev.exe' } }, 'repo-1', 'install')).toBeNull()
+    expect(normalizeGitHookManagementPreview({ ...preview, command: { ...preview.command, args: ['install-hook', '--binary', 'C:\\Program Files\\roborev.exe'] } }, 'repo-1', 'install')).toBeNull()
+    expect(normalizeGitHookManagementPreview({ ...preview, command: { ...preview.command, args: [...preview.command.args, '--extra'] } }, 'repo-1', 'install')).toBeNull()
+    expect(normalizeGitHookManagementPreview({ ...preview, command: { ...preview.command, args: ['install-hook', 'unknown', '--binary', '<current-v0.64.0-binary>'] } }, 'repo-1', 'install')).toBeNull()
+    expect(normalizeGitHookManagementPreview({ ...preview, command: { ...preview.command, args: ['install-hook', '--force', '--binary', '<current-v0.64.0-binary>'] } }, 'repo-1', 'install')).toBeNull()
   })
 
   it('accepts backend managed-outdated and managed unreadable variants', () => {
@@ -298,6 +307,8 @@ describe('GitHookStatus', () => {
     expect(await screen.findByRole('dialog')).toBeInTheDocument()
     expect(screen.getByText('repo-one')).toBeInTheDocument()
     expect(screen.getByText(/install-hook/)).toBeInTheDocument()
+    expect(screen.getByText(/<current-v0\.64\.0-binary>/)).toBeInTheDocument()
+    expect(screen.queryByText(/E:\\very-secret|private\\roborev\.exe/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/agent-hook|--force|--registered/i)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()

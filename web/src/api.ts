@@ -148,6 +148,8 @@ export function normalizeGitHookStatus(value: unknown, expectedRepositoryIdentit
 const gitHookManagementClassifications: GitHookClassification[] = ['absent', 'unmanaged', 'managed-current', 'managed-outdated', 'managed-stale-binary', 'ambiguous', 'unreadable']
 const gitHookManagementStatuses: GitHookManagementStatus[] = ['not-installed', 'current', 'outdated', 'unknown']
 const gitHookManagementActions: GitHookAction[] = ['install', 'repair', 'remove']
+const gitHookManagementPreviewExecutable = 'roborev'
+const gitHookManagementPreviewBinary = '<current-v0.64.0-binary>'
 const gitHookWarningCodes = ['relative-hooks-path-normalization', 'non-shell-hook', 'ambiguous-roborev-content', 'unsafe-hooks-directory']
 const gitHookSummaryCodes = ['blocked', 'repair-recommended', 'managed-current', 'not-installed', 'attention']
 
@@ -249,11 +251,11 @@ export function normalizeGitHookManagement(value: unknown, expectedRepositoryIde
 
 function normalizeGitHookManagementCommand(value: unknown, action: GitHookAction): GitHookManagementCommand | null {
   const object = objectValue(value)
-  if (!object || !hasExactKeys(object, ['executable', 'args']) || typeof object.executable !== 'string' || !object.executable.trim() || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
+  if (!object || !hasExactKeys(object, ['executable', 'args']) || object.executable !== gitHookManagementPreviewExecutable || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
   const args = object.args as string[]
-  const expected = action === 'install' ? ['install-hook', '--binary', object.executable] : action === 'repair' ? ['install-hook', 'repair', '--binary', object.executable] : ['uninstall-hook']
+  const expected = action === 'install' ? ['install-hook', '--binary', gitHookManagementPreviewBinary] : action === 'repair' ? ['install-hook', 'repair', '--binary', gitHookManagementPreviewBinary] : ['uninstall-hook']
   if (args.length !== expected.length || args.some((arg, index) => arg !== expected[index]) || args.some(arg => ['--force', '--registered', 'agent-hook', 'init', 'status'].includes(arg))) return null
-  return { executable: object.executable, args }
+  return { executable: gitHookManagementPreviewExecutable, args }
 }
 
 /** Normalize a preview while enforcing the narrow Dashboard-owned CLI allowlist. */
