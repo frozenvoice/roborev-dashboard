@@ -44,6 +44,35 @@ export type RuntimeDiagnostics = {
   }
 }
 
+export type AgentHookReadinessAgent = 'codex' | 'claude' | 'grok' | 'droid'
+export type AgentHookReadinessStatus = 'current' | 'needs-update' | 'unavailable'
+export type AgentHookReadinessAgentState = {
+  agent: AgentHookReadinessAgent
+  status: AgentHookReadinessStatus
+}
+export type AgentHookReadiness = {
+  version: 'v0.64.0'
+  agents: AgentHookReadinessAgentState[]
+}
+
+const agentHookReadinessVersion = 'v0.64.0' as const
+const agentHookReadinessAgents: readonly AgentHookReadinessAgent[] = ['codex', 'claude', 'grok', 'droid']
+const agentHookReadinessStatuses: readonly AgentHookReadinessStatus[] = ['current', 'needs-update', 'unavailable']
+
+/** Normalize the content-free, fixed-order Agent Hook Readiness DTO. */
+export function normalizeAgentHookReadiness(value: unknown): AgentHookReadiness | null {
+  const root = exactObject(value, ['version', 'agents'])
+  if (!root || root.version !== agentHookReadinessVersion || !Array.isArray(root.agents) || root.agents.length !== agentHookReadinessAgents.length) return null
+  const agents: AgentHookReadinessAgentState[] = []
+  for (let index = 0; index < agentHookReadinessAgents.length; index += 1) {
+    const item = exactObject(root.agents[index], ['agent', 'status'])
+    const expectedAgent = agentHookReadinessAgents[index]
+    if (!item || item.agent !== expectedAgent || typeof item.status !== 'string' || !agentHookReadinessStatuses.includes(item.status as AgentHookReadinessStatus)) return null
+    agents.push({ agent: expectedAgent, status: item.status as AgentHookReadinessStatus })
+  }
+  return { version: agentHookReadinessVersion, agents }
+}
+
 export type GitHookOverallStatus = 'ready' | 'needs-attention' | 'not-installed' | 'unknown'
 export type GitHookPostCommitStatus = 'current' | 'outdated' | 'not-installed' | 'unknown'
 export type GitHookPostRewriteStatus = 'current' | 'outdated' | 'missing' | 'not-installed' | 'unknown'

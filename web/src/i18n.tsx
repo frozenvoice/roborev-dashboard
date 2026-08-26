@@ -608,6 +608,14 @@ export const en = {
   'setup.gitHooksMalformed': 'The Dashboard could not validate the typed Git hook response.',
   'setup.gitHooksPreviewFailed': 'The Git hook preview could not be prepared.',
   'setup.gitHooksExecuteFailed': 'The Git hook action could not be completed.',
+  'setup.agentHookReadinessTitle': 'Agent Hook Readiness',
+  'setup.agentHookReadinessDescription': 'AI coding agent harness integration configuration status.',
+  'setup.agentHookReadinessLoading': 'Checking agent hook readiness…',
+  'setup.agentHookReadinessRefresh': 'Refresh agent hook readiness',
+  'setup.agentHookReadinessUnavailable': 'Unavailable',
+  'setup.agentHookReadinessRetry': 'Readiness could not be verified. Refresh to try again.',
+  'setup.agentHookReadinessCurrent': 'Current',
+  'setup.agentHookReadinessNeedsUpdate': 'Needs install/update',
   'diagnostics.title': 'Runtime Diagnostics',
   'diagnostics.description': 'Read-only daemon, worker, queue, job, and health signals.',
   'diagnostics.open': 'Diagnostics',
@@ -1214,6 +1222,14 @@ ko['diagnostics.errors24h'] = '오류 (24시간)'
 ko['diagnostics.components'] = '구성 요소'
 ko['diagnostics.componentHealthy'] = '정상'
 ko['diagnostics.componentUnhealthy'] = '비정상'
+ko['setup.agentHookReadinessTitle'] = '에이전트 Hook 준비 상태'
+ko['setup.agentHookReadinessDescription'] = 'AI 코딩 에이전트 harness 연동 구성 상태입니다.'
+ko['setup.agentHookReadinessLoading'] = '에이전트 hook 준비 상태 확인 중…'
+ko['setup.agentHookReadinessRefresh'] = '에이전트 hook 준비 상태 새로고침'
+ko['setup.agentHookReadinessUnavailable'] = '사용할 수 없음'
+ko['setup.agentHookReadinessRetry'] = '준비 상태를 확인하지 못했습니다. 새로고침하여 다시 시도하세요.'
+ko['setup.agentHookReadinessCurrent'] = '최신'
+ko['setup.agentHookReadinessNeedsUpdate'] = '설치/업데이트 필요'
 
 const catalogs: Record<Locale, Record<MessageKey, string>> = { en, ko }
 

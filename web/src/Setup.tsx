@@ -4,6 +4,7 @@ import { BACKEND_COMMAND_SENTINEL, type AgentsResponse, type AgentHealth, type C
 import { LanguageSelector, useI18n, type Locale, type MessageKey } from './i18n'
 import { RuntimeDiagnostics } from './RuntimeDiagnostics'
 import { GitHookStatus } from './GitHookStatus'
+import { AgentHookReadiness } from './AgentHookReadiness'
 
 export type SetupAction = () => Promise<void>
 export type AgentCheckAction = (agent: string) => Promise<void>
@@ -342,6 +343,7 @@ export function Setup({ state, repositoryIdentity = '', busy = false, onInstall,
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
     <RuntimeDiagnostics />
     <GitHookStatus repositoryIdentity={repositoryIdentity} />
+    <AgentHookReadiness />
     <ConfiguredReviewAgents agents={agents} loading={agentsLoading} error={agentsError} busy={busy || actionBusy} onRefresh={onRefreshAgents} onCheck={onCheckAgent} />
     {state && <section className="setup-facts" aria-label={t('setup.verifiedInstallation')}><h2>{t('setup.verifiedInstallation')}</h2><dl>
       <div><dt>{t('setup.requestedVersion')}</dt><dd>{recommended}</dd></div>

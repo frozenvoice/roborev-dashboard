@@ -171,6 +171,33 @@ type RuntimeDiagnosticsService interface {
 	RuntimeDiagnostics(context.Context) (RuntimeDiagnostics, error)
 }
 
+// AgentHookReadinessService is deliberately optional so the long-lived
+// Service interface remains source-compatible with existing adapters and
+// fakes. It exposes only the fixed, read-only v0.64.0 hook-readiness DTO;
+// upstream config, paths, process output, and daemon lifecycle state never
+// cross this boundary.
+type AgentHookReadinessService interface {
+	AgentHookReadiness(context.Context) (AgentHookReadiness, error)
+}
+
+type AgentHookReadiness struct {
+	Version string                    `json:"version"`
+	Agents  []AgentHookReadinessAgent `json:"agents"`
+}
+
+type AgentHookReadinessAgent struct {
+	Agent  string `json:"agent"`
+	Status string `json:"status"`
+}
+
+type AgentHookReadinessStatus string
+
+const (
+	AgentHookReadinessCurrent     AgentHookReadinessStatus = "current"
+	AgentHookReadinessNeedsUpdate AgentHookReadinessStatus = "needs-update"
+	AgentHookReadinessUnavailable AgentHookReadinessStatus = "unavailable"
+)
+
 type RuntimeDiagnostics struct {
 	Daemon  RuntimeDiagnosticsDaemon  `json:"daemon"`
 	Workers RuntimeDiagnosticsWorkers `json:"workers"`
