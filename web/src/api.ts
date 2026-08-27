@@ -273,6 +273,100 @@ function validRepositoryIdentityAlias(value: unknown): value is RepositoryIdenti
   return typeof value === 'string' && repositoryIdentityAliasPattern.test(value)
 }
 
+export type RepositoryAgent = 'codex' | 'claude-code' | 'gemini' | 'copilot' | 'opencode' | 'cursor' | 'kiro' | 'kilo' | 'droid' | 'pi' | 'grok'
+export type RepositoryAgentConfigurationScope = 'global' | 'repository'
+export type RepositoryAgentConfigurationStatus = 'unset' | 'canonical' | 'custom'
+export type RepositoryAgentConfigurationRow =
+  | { status: 'unset' | 'custom' }
+  | { status: 'canonical'; agent: RepositoryAgent }
+export type RepositoryAgentConfigurationStatusResponse = {
+  version: 'v0.64.0'
+  repositoryIdentity: RepositoryIdentityAlias
+  global: RepositoryAgentConfigurationRow
+  repository: RepositoryAgentConfigurationRow
+}
+export type RepositoryAgentConfigurationCommand = { executable: 'roborev'; args: string[] }
+export type RepositoryAgentConfigurationPreview = {
+  version: 'v0.64.0'
+  repositoryIdentity: RepositoryIdentityAlias
+  scope: RepositoryAgentConfigurationScope
+  agent: RepositoryAgent
+  currentStatus: RepositoryAgentConfigurationStatus
+  currentAgent?: RepositoryAgent
+  action: 'set-agent' | 'already-configured'
+  target: string
+  summary: string
+  token?: string
+  expiresAt?: string
+  command?: RepositoryAgentConfigurationCommand
+}
+
+export type RepositoryAgentConfigurationExecuteResult = { status: 'verified-success' | 'failed-unverified' }
+
+export const repositoryAgents: readonly RepositoryAgent[] = ['codex', 'claude-code', 'gemini', 'copilot', 'opencode', 'cursor', 'kiro', 'kilo', 'droid', 'pi', 'grok']
+const repositoryAgentScopes: readonly RepositoryAgentConfigurationScope[] = ['global', 'repository']
+const repositoryAgentStatuses: readonly RepositoryAgentConfigurationStatus[] = ['unset', 'canonical', 'custom']
+const repositoryAgentVersion = 'v0.64.0' as const
+const repositoryAgentPreviewActions = ['set-agent', 'already-configured'] as const
+const repositoryAgentMaxTokenLength = 64
+const repositoryAgentTargets: Record<RepositoryAgentConfigurationScope, string> = { global: 'Global default agent', repository: 'Repository agent' }
+const repositoryAgentSummaries: Record<RepositoryAgentConfigurationScope, string> = { global: 'Set the global default RoboRev agent.', repository: 'Set the selected repository RoboRev agent.' }
+
+function normalizeRepositoryAgentRow(value: unknown): RepositoryAgentConfigurationRow | null {
+  const object = exactObject(value, ['status']) ?? exactObject(value, ['status', 'agent'])
+  if (!object || typeof object.status !== 'string' || !repositoryAgentStatuses.includes(object.status as RepositoryAgentConfigurationStatus)) return null
+  const status = object.status as RepositoryAgentConfigurationStatus
+  if (status === 'canonical') {
+    if (typeof object.agent !== 'string' || !repositoryAgents.includes(object.agent as RepositoryAgent)) return null
+    return { status, agent: object.agent as RepositoryAgent }
+  }
+  if (object.agent !== undefined) return null
+  return { status: status as 'unset' | 'custom' }
+}
+
+/** Normalize the exact, privacy-preserving agent configuration status DTO. */
+export function normalizeRepositoryAgentConfigurationStatus(value: unknown): RepositoryAgentConfigurationStatusResponse | null {
+  const root = exactObject(value, ['version', 'repositoryIdentity', 'global', 'repository'])
+  if (!root || root.version !== repositoryAgentVersion || !validRepositoryIdentityAlias(root.repositoryIdentity)) return null
+  const global = normalizeRepositoryAgentRow(root.global)
+  const repository = normalizeRepositoryAgentRow(root.repository)
+  if (!global || !repository) return null
+  return { version: repositoryAgentVersion, repositoryIdentity: root.repositoryIdentity, global, repository }
+}
+
+/** Normalize the exact, content-free agent configuration preview DTO. */
+export function normalizeRepositoryAgentConfigurationPreview(value: unknown, expectedRepositoryIdentity?: string, expectedScope?: RepositoryAgentConfigurationScope, expectedAgent?: RepositoryAgent): RepositoryAgentConfigurationPreview | null {
+  const setKeys = ['version', 'repositoryIdentity', 'scope', 'agent', 'currentStatus', 'action', 'target', 'summary', 'token', 'expiresAt', 'command'] as const
+  const setCanonicalKeys = [...setKeys.slice(0, 5), 'currentAgent', ...setKeys.slice(5)] as const
+  const noOpKeys = ['version', 'repositoryIdentity', 'scope', 'agent', 'currentStatus', 'currentAgent', 'action', 'target', 'summary'] as const
+  const setRoot = exactObject(value, setKeys) ?? exactObject(value, setCanonicalKeys)
+  const noOpRoot = exactObject(value, noOpKeys)
+  const root = setRoot ?? noOpRoot
+  if (!root || root.version !== repositoryAgentVersion || !validRepositoryIdentityAlias(root.repositoryIdentity) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity) || typeof root.scope !== 'string' || !repositoryAgentScopes.includes(root.scope as RepositoryAgentConfigurationScope) || (expectedScope !== undefined && root.scope !== expectedScope) || typeof root.agent !== 'string' || !repositoryAgents.includes(root.agent as RepositoryAgent) || (expectedAgent !== undefined && root.agent !== expectedAgent) || typeof root.currentStatus !== 'string' || !repositoryAgentStatuses.includes(root.currentStatus as RepositoryAgentConfigurationStatus) || typeof root.target !== 'string' || root.target !== repositoryAgentTargets[root.scope as RepositoryAgentConfigurationScope] || typeof root.summary !== 'string' || root.summary !== repositoryAgentSummaries[root.scope as RepositoryAgentConfigurationScope] || typeof root.action !== 'string' || !repositoryAgentPreviewActions.includes(root.action as typeof repositoryAgentPreviewActions[number])) return null
+  const scope = root.scope as RepositoryAgentConfigurationScope
+  const agent = root.agent as RepositoryAgent
+  const currentStatus = root.currentStatus as RepositoryAgentConfigurationStatus
+  if (currentStatus === 'canonical') {
+    if (typeof root.currentAgent !== 'string' || !repositoryAgents.includes(root.currentAgent as RepositoryAgent)) return null
+  } else if (root.currentAgent !== undefined) return null
+  if (root.action === 'already-configured') {
+    if (!noOpRoot || root.currentStatus !== 'canonical' || root.currentAgent !== agent) return null
+    return { version: repositoryAgentVersion, repositoryIdentity: root.repositoryIdentity, scope, agent, currentStatus, currentAgent: agent, action: 'already-configured', target: root.target, summary: root.summary }
+  }
+  if (!setRoot || typeof root.token !== 'string' || !/^[A-Za-z0-9_-]+$/.test(root.token) || root.token.length > repositoryAgentMaxTokenLength || !strictRfc3339(root.expiresAt)) return null
+  const command = exactObject(root.command, ['executable', 'args'])
+  const expectedArgs = scope === 'global' ? ['config', 'set', 'default_agent', agent, '--global'] : ['config', 'set', 'agent', agent, '--local']
+  if (!command || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== expectedArgs.length || !command.args.every((item, index) => item === expectedArgs[index])) return null
+  return { version: repositoryAgentVersion, repositoryIdentity: root.repositoryIdentity, scope, agent, currentStatus, ...(currentStatus === 'canonical' ? { currentAgent: root.currentAgent as RepositoryAgent } : {}), action: 'set-agent', target: root.target, summary: root.summary, token: root.token, expiresAt: root.expiresAt as string, command: { executable: 'roborev', args: [...expectedArgs] } }
+}
+
+/** Normalize the content-free post-execute receipt. */
+export function normalizeRepositoryAgentConfigurationExecuteResult(value: unknown): RepositoryAgentConfigurationExecuteResult | null {
+  const root = exactObject(value, ['status'])
+  if (!root || (root.status !== 'verified-success' && root.status !== 'failed-unverified')) return null
+  return { status: root.status }
+}
+
 const setupReadinessVersion = 'v0.64.0' as const
 const setupReadinessOverall = ['ready', 'needs-attention', 'unavailable'] as const
 const setupReadinessConfiguration = ['ready', 'unavailable'] as const
@@ -1826,6 +1920,41 @@ export async function fetchRepositorySetupReadiness(repositoryIdentity: string, 
   })
   const normalized = normalizeRepositorySetupReadiness(value)
   if (!normalized) throw new APIError('invalid-repository-setup-readiness')
+  return normalized
+}
+
+/** Request agent configuration status only after an explicit user action. */
+export async function fetchRepositoryAgentConfigurationStatus(repositoryIdentity: string, signal?: AbortSignal): Promise<RepositoryAgentConfigurationStatusResponse> {
+  const value = await request<unknown>('/api/repository-agent-configuration/status', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity }),
+    signal,
+  })
+  const normalized = normalizeRepositoryAgentConfigurationStatus(value)
+  if (!normalized) throw new APIError('invalid-repository-agent-configuration-status')
+  return normalized
+}
+
+/** Request one explicit agent configuration preview. */
+export async function fetchRepositoryAgentConfigurationPreview(repositoryIdentity: RepositoryIdentityAlias, scope: RepositoryAgentConfigurationScope, agent: RepositoryAgent, signal?: AbortSignal): Promise<RepositoryAgentConfigurationPreview> {
+  const value = await request<unknown>('/api/repository-agent-configuration/preview', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity, scope, agent }),
+    signal,
+  })
+  const normalized = normalizeRepositoryAgentConfigurationPreview(value, repositoryIdentity, scope, agent)
+  if (!normalized) throw new APIError('invalid-repository-agent-configuration-preview')
+  return normalized
+}
+
+/** Execute one server-bound, single-use agent configuration token. */
+export async function executeRepositoryAgentConfiguration(token: string): Promise<RepositoryAgentConfigurationExecuteResult> {
+  const value = await request<unknown>('/api/repository-agent-configuration/execute', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+  const normalized = normalizeRepositoryAgentConfigurationExecuteResult(value)
+  if (!normalized) throw new APIError('invalid-repository-agent-configuration-execute-result')
   return normalized
 }
 

@@ -479,6 +479,44 @@ export const en = {
   'setup.repositoryReadinessTrackingTracked': 'This repository is tracked by RoboRev.',
   'setup.repositoryReadinessTrackingNotTracked': 'This repository is not tracked by RoboRev.',
   'setup.repositoryReadinessTrackingUnavailable': 'RoboRev tracking could not be verified.',
+  'setup.agentConfigurationEyebrow': 'Agent selection',
+  'setup.agentConfigurationTitle': 'Repository Agent Configuration',
+  'setup.agentConfigurationDescription': 'Inspect and explicitly update the two supported RoboRev agent settings. This works even when the daemon is offline.',
+  'setup.agentConfigurationCheck': 'Check Agent Selection',
+  'setup.agentConfigurationRefresh': 'Refresh',
+  'setup.agentConfigurationNotChecked': 'Agent selection has not been checked.',
+  'setup.agentConfigurationChecking': 'Checking agent selection…',
+  'setup.agentConfigurationUnavailable': 'Agent selection could not be safely verified.',
+  'setup.agentConfigurationGlobal': 'Global default agent',
+  'setup.agentConfigurationRepository': 'Repository agent',
+  'setup.agentConfigurationGlobalDescription': 'Applies to repositories without a repository-specific override.',
+  'setup.agentConfigurationRepositoryDescription': 'Applies to the selected repository and may modify its .roborev.toml.',
+  'setup.agentConfigurationChoose': 'Agent',
+  'setup.agentConfigurationUnset': 'Not configured',
+  'setup.agentConfigurationCanonical': 'Configured',
+  'setup.agentConfigurationCustom': 'Custom value',
+  'setup.agentConfigurationPreview': 'Preview change',
+  'setup.agentConfigurationPreviewing': 'Preparing agent configuration preview…',
+  'setup.agentConfigurationPreviewFailed': 'Agent configuration preview could not be prepared. Check Agent Selection again before trying again.',
+  'setup.agentConfigurationAlreadyConfigured': 'Already configured.',
+  'setup.agentConfigurationExplicitConfirmation': 'Explicit confirmation',
+  'setup.agentConfigurationConfirmTitle': 'Confirm agent configuration',
+  'setup.agentConfigurationConfirmDescription': 'Set the {scope} to {agent} using the exact typed RoboRev command.',
+  'setup.agentConfigurationClose': 'Close agent configuration confirmation',
+  'setup.agentConfigurationScope': 'Scope',
+  'setup.agentConfigurationAgent': 'Agent',
+  'setup.agentConfigurationAction': 'Action',
+  'setup.agentConfigurationCommand': 'Exact executable and argument array',
+  'setup.agentConfigurationGlobalWarning': 'The global setting can affect every repository that does not have a repository-specific override.',
+  'setup.agentConfigurationRepositoryWarning': 'The official CLI may modify or materialize the selected checkout’s .roborev.toml and may leave the repository dirty. The Dashboard does not Git add, commit, or push.',
+  'setup.agentConfigurationReplaceNotice': 'The existing scoped agent setting will be replaced.',
+  'setup.agentConfigurationConfirmCheck': 'I understand this explicit configuration change and its scope.',
+  'setup.agentConfigurationConfirm': 'Confirm and set agent',
+  'setup.agentConfigurationApplying': 'Applying agent configuration…',
+  'setup.agentConfigurationSuccess': 'Agent configuration was verified successfully.',
+  'setup.agentConfigurationFailed': 'Agent configuration could not be verified.',
+  'setup.agentConfigurationCheckAgain': 'Click Check Agent Selection again to read the authoritative current value.',
+  'setup.agentConfigurationMakeNewPreview': 'Make a new preview after checking the current configuration. This token cannot be retried.',
   'setup.snapshotIgnoreAdd': 'Add Ignore Rule',
   'setup.snapshotIgnoreTitle': 'Add Snapshot Ignore Rule',
   'setup.snapshotIgnoreDescription': 'Review this safe, append-only change before confirming it.',
@@ -1265,6 +1303,44 @@ ko['setup.repositoryReadinessDaemonUnavailable'] = 'RoboRev 데몬을 확인하�
 ko['setup.repositoryReadinessTrackingTracked'] = '이 저장소는 RoboRev에서 추적합니다.'
 ko['setup.repositoryReadinessTrackingNotTracked'] = '이 저장소는 RoboRev에서 추적하지 않습니다.'
 ko['setup.repositoryReadinessTrackingUnavailable'] = 'RoboRev 추적을 확인하지 못했습니다.'
+ko['setup.agentConfigurationEyebrow'] = '에이전트 선택'
+ko['setup.agentConfigurationTitle'] = '저장소 에이전트 구성'
+ko['setup.agentConfigurationDescription'] = '지원되는 두 RoboRev 에이전트 설정을 확인하고 명시적으로 변경합니다. 데몬이 오프라인이어도 사용할 수 있습니다.'
+ko['setup.agentConfigurationCheck'] = '에이전트 선택 확인'
+ko['setup.agentConfigurationRefresh'] = '새로고침'
+ko['setup.agentConfigurationNotChecked'] = '에이전트 선택을 아직 확인하지 않았습니다.'
+ko['setup.agentConfigurationChecking'] = '에이전트 선택 확인 중…'
+ko['setup.agentConfigurationUnavailable'] = '에이전트 선택을 안전하게 확인하지 못했습니다.'
+ko['setup.agentConfigurationGlobal'] = '전역 기본 에이전트'
+ko['setup.agentConfigurationRepository'] = '저장소 에이전트'
+ko['setup.agentConfigurationGlobalDescription'] = '저장소별 재정의가 없는 저장소에 적용됩니다.'
+ko['setup.agentConfigurationRepositoryDescription'] = '선택한 저장소에 적용되며 .roborev.toml을 변경할 수 있습니다.'
+ko['setup.agentConfigurationChoose'] = '에이전트'
+ko['setup.agentConfigurationUnset'] = '구성되지 않음'
+ko['setup.agentConfigurationCanonical'] = '구성됨'
+ko['setup.agentConfigurationCustom'] = '사용자 지정 값'
+ko['setup.agentConfigurationPreview'] = '변경 미리보기'
+ko['setup.agentConfigurationPreviewing'] = '에이전트 구성 미리보기 준비 중…'
+ko['setup.agentConfigurationPreviewFailed'] = '에이전트 구성 미리보기를 준비하지 못했습니다. 다시 에이전트 선택을 확인한 뒤 시도하세요.'
+ko['setup.agentConfigurationAlreadyConfigured'] = '이미 구성되어 있습니다.'
+ko['setup.agentConfigurationExplicitConfirmation'] = '명시적 확인'
+ko['setup.agentConfigurationConfirmTitle'] = '에이전트 구성 확인'
+ko['setup.agentConfigurationConfirmDescription'] = '{scope}을(를) 정확한 typed RoboRev 명령으로 {agent}(으)로 설정합니다.'
+ko['setup.agentConfigurationClose'] = '에이전트 구성 확인 닫기'
+ko['setup.agentConfigurationScope'] = '범위'
+ko['setup.agentConfigurationAgent'] = '에이전트'
+ko['setup.agentConfigurationAction'] = '동작'
+ko['setup.agentConfigurationCommand'] = '정확한 실행 파일과 인자 배열'
+ko['setup.agentConfigurationGlobalWarning'] = '전역 설정은 저장소별 재정의가 없는 모든 저장소에 영향을 줄 수 있습니다.'
+ko['setup.agentConfigurationRepositoryWarning'] = '공식 CLI가 선택한 checkout의 .roborev.toml을 변경하거나 생성할 수 있으며 저장소를 dirty 상태로 남길 수 있습니다. Dashboard는 Git add, commit, push를 실행하지 않습니다.'
+ko['setup.agentConfigurationReplaceNotice'] = '기존 범위 에이전트 설정이 교체됩니다.'
+ko['setup.agentConfigurationConfirmCheck'] = '이 명시적 구성 변경과 범위를 이해했습니다.'
+ko['setup.agentConfigurationConfirm'] = '확인하고 에이전트 설정'
+ko['setup.agentConfigurationApplying'] = '에이전트 구성 적용 중…'
+ko['setup.agentConfigurationSuccess'] = '에이전트 구성을 성공적으로 확인했습니다.'
+ko['setup.agentConfigurationFailed'] = '에이전트 구성을 확인하지 못했습니다.'
+ko['setup.agentConfigurationCheckAgain'] = '권위 있는 현재 값을 읽으려면 에이전트 선택 확인을 다시 클릭하세요.'
+ko['setup.agentConfigurationMakeNewPreview'] = '현재 구성을 확인한 뒤 새 미리보기를 만드세요. 이 토큰은 재시도할 수 없습니다.'
 ko['setup.snapshotIgnoreAdd'] = 'Ignore 규칙 추가'
 ko['setup.snapshotIgnoreTitle'] = '스냅샷 Ignore 규칙 추가'
 ko['setup.snapshotIgnoreDescription'] = '확인하기 전에 이 안전한 append-only 변경을 검토하세요.'

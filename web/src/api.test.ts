@@ -1,8 +1,63 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeCIWorkflow, executeRepositoryTracking, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRepositoryTrackingExecuteResult, normalizeRepositoryTrackingPreview, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
+import { executeCIWorkflow, executeRepositoryAgentConfiguration, executeRepositoryTracking, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositoryAgentConfigurationPreview, fetchRepositoryAgentConfigurationStatus, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryAgentConfigurationExecuteResult, normalizeRepositoryAgentConfigurationPreview, normalizeRepositoryAgentConfigurationStatus, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRepositoryTrackingExecuteResult, normalizeRepositoryTrackingPreview, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
 const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
+
+const agentAlias = 'A'.repeat(43)
+const agentStatus = { version: 'v0.64.0', repositoryIdentity: agentAlias, global: { status: 'canonical', agent: 'codex' }, repository: { status: 'custom' } }
+const agentSetPreview = { version: 'v0.64.0', repositoryIdentity: agentAlias, scope: 'repository', agent: 'claude-code', currentStatus: 'custom', action: 'set-agent', target: 'Repository agent', summary: 'Set the selected repository RoboRev agent.', token: 'agent-token', expiresAt: '2099-01-01T00:00:00.000Z', command: { executable: 'roborev', args: ['config', 'set', 'agent', 'claude-code', '--local'] } }
+
+describe('repository agent configuration API contract', () => {
+  it('accepts exact status rows and privacy-preserving custom values', () => {
+    expect(normalizeRepositoryAgentConfigurationStatus(agentStatus)).toEqual(agentStatus)
+    expect(normalizeRepositoryAgentConfigurationStatus({ ...agentStatus, repository: { status: 'custom', rawValue: 'private' } })).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationStatus({ ...agentStatus, global: { status: 'canonical', agent: 'Claude' } })).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationStatus({ ...agentStatus, repository: { status: 'unset', agent: 'codex' } })).toBeNull()
+  })
+
+  it('accepts set previews for unset/custom and canonical states with exact typed argv', () => {
+    expect(normalizeRepositoryAgentConfigurationPreview(agentSetPreview, agentAlias, 'repository', 'claude-code')).toEqual(agentSetPreview)
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, currentStatus: 'unset' }, agentAlias, 'repository', 'claude-code')).toEqual({ ...agentSetPreview, currentStatus: 'unset' })
+    const canonical = { ...agentSetPreview, currentStatus: 'canonical', currentAgent: 'codex' }
+    expect(normalizeRepositoryAgentConfigurationPreview(canonical, agentAlias, 'repository', 'claude-code')).toEqual(canonical)
+    const noop = { version: 'v0.64.0', repositoryIdentity: agentAlias, scope: 'global', agent: 'codex', currentStatus: 'canonical', currentAgent: 'codex', action: 'already-configured', target: 'Global default agent', summary: 'Set the global default RoboRev agent.' }
+    expect(normalizeRepositoryAgentConfigurationPreview(noop, agentAlias, 'global', 'codex')).toEqual(noop)
+  })
+
+  it('rejects aliases, private fields, wrong target/summary, and command drift', () => {
+    for (const agent of ['Claude', ' claude-code', 'claude', 'agent', 'grok-build', 'acp', 'test', 'acp.foo']) {
+      expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, agent }, agentAlias)).toBeNull()
+    }
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, privatePath: 'C:\\private' }, agentAlias)).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, rawValue: 'PRIVATE_CONFIG_CONTENT' }, agentAlias)).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, target: 'C:\\secret' }, agentAlias)).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, summary: 'PRIVATE_STDERR' }, agentAlias)).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, command: { ...agentSetPreview.command, executable: 'C:\\fake\\roborev.exe' } }, agentAlias)).toBeNull()
+    expect(normalizeRepositoryAgentConfigurationPreview({ ...agentSetPreview, command: { ...agentSetPreview.command, args: ['config', 'set', 'agent', 'claude-code', '--global'] } }, agentAlias)).toBeNull()
+  })
+
+  it('POSTs exact bodies and exposes only the content-free execute receipt', async () => {
+    setCSRF('agent-csrf')
+    const fetchMock = vi.fn().mockImplementation((path: string) => {
+      const payload = path.endsWith('/status') ? agentStatus : path.endsWith('/preview') ? agentSetPreview : { status: 'verified-success' }
+      return Promise.resolve(new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await fetchRepositoryAgentConfigurationStatus('legacy-selected')
+    await fetchRepositoryAgentConfigurationPreview(agentAlias, 'repository', 'claude-code')
+    await executeRepositoryAgentConfiguration('agent-token')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const calls = fetchMock.mock.calls as Array<[string, RequestInit]>
+    expect(calls[0][0]).toBe('/api/repository-agent-configuration/status')
+    expect(JSON.parse(String(calls[0][1].body))).toEqual({ repositoryIdentity: 'legacy-selected' })
+    expect(calls[1][0]).toBe('/api/repository-agent-configuration/preview')
+    expect(JSON.parse(String(calls[1][1].body))).toEqual({ repositoryIdentity: agentAlias, scope: 'repository', agent: 'claude-code' })
+    expect(calls[2][0]).toBe('/api/repository-agent-configuration/execute')
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({ token: 'agent-token' })
+    expect(normalizeRepositoryAgentConfigurationExecuteResult({ status: 'verified-success', stderr: 'PRIVATE_STDERR' })).toBeNull()
+  })
+})
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 

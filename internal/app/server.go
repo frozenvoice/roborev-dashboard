@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/froze/roborev-dashboard/internal/agentconfiguration"
 	"github.com/froze/roborev-dashboard/internal/agenthookmanagement"
 	"github.com/froze/roborev-dashboard/internal/agentstatus"
 	"github.com/froze/roborev-dashboard/internal/analysis"
@@ -65,30 +66,36 @@ type Server struct {
 	mergePreviews  *repositoryMergePreviewStore
 	// repositoryMoveFS is nil in production and exists only to make the
 	// read-only stale-source boundary deterministic in app tests.
-	repositoryMoveFS     repomove.FileSystem
-	Insights             *insights.Manager
-	HookStatus           *hookstatus.Service
-	HookManagement       *hookmanagement.Service
-	hookPreviews         *hookManagementPreviewStore
-	AgentHookConfigFS    agenthookmanagement.FileSystem
-	agentHookPreviews    *agentHookPreviewStore
-	SkillsManagementFS   pathsafety.FileSystem
-	SkillsManagementHome string
-	SkillsManagementEnv  func() []string
-	skillsPreviews       *skillsPreviewStore
-	CIWorkflowPreview    *ciworkflowpreview.Service
-	CIWorkflowManagement *ciworkflowmanagement.Service
-	ciWorkflowWrites     *ciWorkflowWriteStore
-	SetupReadiness       *setupreadiness.Checker
-	SnapshotIgnore       *snapshotignoremanagement.Service
-	RepositoryTracking   roborev.RepositoryTrackingTransport
+	repositoryMoveFS             repomove.FileSystem
+	Insights                     *insights.Manager
+	HookStatus                   *hookstatus.Service
+	HookManagement               *hookmanagement.Service
+	hookPreviews                 *hookManagementPreviewStore
+	AgentHookConfigFS            agenthookmanagement.FileSystem
+	agentHookPreviews            *agentHookPreviewStore
+	SkillsManagementFS           pathsafety.FileSystem
+	SkillsManagementHome         string
+	SkillsManagementEnv          func() []string
+	skillsPreviews               *skillsPreviewStore
+	CIWorkflowPreview            *ciworkflowpreview.Service
+	CIWorkflowManagement         *ciworkflowmanagement.Service
+	ciWorkflowWrites             *ciWorkflowWriteStore
+	SetupReadiness               *setupreadiness.Checker
+	SnapshotIgnore               *snapshotignoremanagement.Service
+	RepositoryTracking           roborev.RepositoryTrackingTransport
+	RepositoryAgentConfiguration roborev.RepositoryAgentConfigurationTransport
 	// RepositoryTrackingFS is injectable only for deterministic root-race
 	// tests. Production uses pathsafety.OSFileSystem and never accepts a
 	// filesystem implementation from the browser.
 	RepositoryTrackingFS pathsafety.FileSystem
-	snapshotIgnoreKey    [32]byte
-	snapshotIgnoreWrites *snapshotIgnoreWriteStore
-	repositoryTracking   *repositorytracking.Store
+	// RepositoryAgentConfigurationFS is injectable only for deterministic
+	// agent-setting root-race tests. It is deliberately separate from the
+	// repository tracking filesystem seam.
+	RepositoryAgentConfigurationFS pathsafety.FileSystem
+	snapshotIgnoreKey              [32]byte
+	snapshotIgnoreWrites           *snapshotIgnoreWriteStore
+	repositoryTracking             *repositorytracking.Store
+	agentConfiguration             *agentconfiguration.Store
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -190,10 +197,13 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 		ciWorkflow = ciworkflowpreview.NewService(transport)
 	}
 	hookStatus := hookstatus.New(versionProbe, registry, nil)
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), snapshotIgnoreKey: snapshotIgnoreKey, snapshotIgnoreWrites: newSnapshotIgnoreWriteStore(), repositoryTracking: repositorytracking.NewStore(), RepositoryTrackingFS: pathsafety.OSFileSystem{}, SnapshotIgnore: snapshotignoremanagement.New(snapshotignoremanagement.OSFileSystem{}), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), snapshotIgnoreKey: snapshotIgnoreKey, snapshotIgnoreWrites: newSnapshotIgnoreWriteStore(), repositoryTracking: repositorytracking.NewStore(), agentConfiguration: agentconfiguration.NewStore(), RepositoryTrackingFS: pathsafety.OSFileSystem{}, RepositoryAgentConfigurationFS: pathsafety.OSFileSystem{}, SnapshotIgnore: snapshotignoremanagement.New(snapshotignoremanagement.OSFileSystem{}), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
 	s.SetupReadiness = newSetupReadinessChecker(service, registry, hookStatus)
 	if tracking, ok := service.(roborev.RepositoryTrackingTransport); ok {
 		s.RepositoryTracking = tracking
+	}
+	if agentConfig, ok := service.(roborev.RepositoryAgentConfigurationTransport); ok {
+		s.RepositoryAgentConfiguration = agentConfig
 	}
 	s.routes()
 	return s, nil
@@ -305,6 +315,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repositories/setup-readiness", s.repositorySetupReadiness)
 	s.mux.HandleFunc("POST /api/repository-tracking/preview", s.repositoryTrackingPreview)
 	s.mux.HandleFunc("POST /api/repository-tracking/execute", s.repositoryTrackingExecute)
+	s.mux.HandleFunc("POST /api/repository-agent-configuration/status", s.repositoryAgentConfigurationStatus)
+	s.mux.HandleFunc("POST /api/repository-agent-configuration/preview", s.repositoryAgentConfigurationPreview)
+	s.mux.HandleFunc("POST /api/repository-agent-configuration/execute", s.repositoryAgentConfigurationExecute)
 	s.mux.HandleFunc("POST /api/snapshot-ignore/preview", s.snapshotIgnorePreview)
 	s.mux.HandleFunc("POST /api/snapshot-ignore/execute", s.snapshotIgnoreExecute)
 	s.mux.HandleFunc("GET /api/insights/{id}/result", s.insightsResult)

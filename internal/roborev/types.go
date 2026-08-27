@@ -3,12 +3,14 @@ package roborev
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/froze/roborev-dashboard/internal/insights"
 	"github.com/froze/roborev-dashboard/internal/repoinventory"
 	"github.com/froze/roborev-dashboard/internal/repomerge"
 	"github.com/froze/roborev-dashboard/internal/repomove"
 	"github.com/froze/roborev-dashboard/internal/reporename"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
 // GitHookAction is the intentionally tiny mutation transport vocabulary.
@@ -173,6 +175,67 @@ type RepositoryTrackingPreflight struct {
 type RepositoryTrackingResult struct {
 	Attempted  bool
 	StatusCode int
+}
+
+// RepositoryAgentConfigurationBinding identifies the exact validated
+// executable generation used for a configuration mutation. It is server-side
+// only and never appears in a browser DTO.
+type RepositoryAgentConfigurationBinding struct {
+	Binary     string
+	Version    string
+	Generation uint64
+	FileID     string
+}
+
+func (b RepositoryAgentConfigurationBinding) Valid() bool {
+	return roborevcompat.IsSupportedVersion(b.Version) && b.Generation != 0 && strings.TrimSpace(b.Binary) != "" && strings.TrimSpace(b.FileID) != ""
+}
+
+func (b RepositoryAgentConfigurationBinding) Equal(other RepositoryAgentConfigurationBinding) bool {
+	return b.Binary == other.Binary && b.Version == other.Version && b.Generation == other.Generation && b.FileID == other.FileID
+}
+
+// RepositoryAgentConfigurationResult reports only process-boundary evidence.
+// A started process can still have an ambiguous outcome and must be verified
+// by the app layer through a detached authoritative readback.
+type RepositoryAgentConfigurationResult struct {
+	Started  bool
+	ExitCode int
+}
+
+type RepositoryAgentConfigurationScopedValue struct {
+	Set   bool
+	Value string
+}
+
+type RepositoryAgentConfigurationPreflight struct {
+	Binding RepositoryAgentConfigurationBinding
+	Rows    []ConfigRow
+	Value   RepositoryAgentConfigurationScopedValue
+}
+
+// RepositoryAgentConfigurationStatusSnapshot is one coherent, bounded read
+// of both dedicated agent settings. Rows and the executable binding are
+// shared so a status response cannot combine independently sampled config
+// lists from the two scopes.
+type RepositoryAgentConfigurationStatusSnapshot struct {
+	Binding    RepositoryAgentConfigurationBinding
+	Rows       []ConfigRow
+	Global     RepositoryAgentConfigurationScopedValue
+	Repository RepositoryAgentConfigurationScopedValue
+}
+
+type RepositoryAgentConfigurationPreLaunchGuard func(context.Context) error
+
+// RepositoryAgentConfigurationTransport is an optional, dedicated transport
+// for the two server-authorized agent settings. It is deliberately separate
+// from ConfigService so the generic eight-setting surface cannot accidentally
+// grow an agent key or weaker mutation semantics.
+type RepositoryAgentConfigurationTransport interface {
+	RepositoryAgentConfigurationStatus(context.Context, string) (RepositoryAgentConfigurationStatusSnapshot, error)
+	RepositoryAgentConfigurationPreflight(context.Context, string, ConfigScope) (RepositoryAgentConfigurationPreflight, error)
+	RepositoryAgentConfigurationSet(context.Context, string, ConfigScope, string, RepositoryAgentConfigurationBinding, RepositoryAgentConfigurationPreLaunchGuard) (RepositoryAgentConfigurationResult, error)
+	RepositoryAgentConfigurationReadback(context.Context, string, ConfigScope, string, RepositoryAgentConfigurationBinding) error
 }
 
 // RepositoryRenameService is optional so existing Service fakes and legacy
