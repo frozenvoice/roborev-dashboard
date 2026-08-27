@@ -444,6 +444,41 @@ export const en = {
   'panel.configurationUnavailable': 'Panel configuration unavailable',
   'panel.retryDiscovery': 'Retry panel discovery',
   'setup.runtimeHealth': 'Runtime health',
+  'setup.repositoryReadinessTitle': 'Repository setup readiness',
+  'setup.repositoryReadinessDescription': 'Check the selected repository’s read-only setup prerequisites.',
+  'setup.repositoryReadinessNotChecked': 'Repository setup has not been checked.',
+  'setup.repositoryReadinessCheck': 'Check Setup',
+  'setup.repositoryReadinessRefresh': 'Refresh',
+  'setup.repositoryReadinessLoading': 'Checking repository setup…',
+  'setup.repositoryReadinessError': 'Repository setup readiness could not be verified.',
+  'setup.repositoryReadinessReady': 'Ready',
+  'setup.repositoryReadinessNeedsAttention': 'Needs attention',
+  'setup.repositoryReadinessUnavailable': 'Unavailable',
+  'setup.repositoryReadinessConfiguration': 'Configuration',
+  'setup.repositoryReadinessSnapshot': 'Snapshot protection',
+  'setup.repositoryReadinessHooks': 'Git Hooks',
+  'setup.repositoryReadinessDaemon': 'Daemon',
+  'setup.repositoryReadinessTracking': 'RoboRev tracking',
+  'setup.repositoryReadinessReadyBody': 'All repository setup checks passed.',
+  'setup.repositoryReadinessNeedsAttentionBody': 'One or more setup checks need attention.',
+  'setup.repositoryReadinessUnavailableBody': 'Some setup checks could not be verified safely.',
+  'setup.repositoryReadinessConfigurationReady': 'Configuration was safely resolved.',
+  'setup.repositoryReadinessConfigurationUnavailable': 'Configuration could not be safely resolved.',
+  'setup.repositoryReadinessSnapshotReady': 'Snapshot directory is ignored by Git.',
+  'setup.repositoryReadinessSnapshotNotIgnored': 'Snapshot directory is not ignored by Git.',
+  'setup.repositoryReadinessSnapshotTracked': 'Snapshot directory contains tracked files.',
+  'setup.repositoryReadinessSnapshotUnsafe': 'Snapshot directory failed the safety check.',
+  'setup.repositoryReadinessSnapshotUnavailable': 'Snapshot protection could not be verified.',
+  'setup.repositoryReadinessHooksReady': 'Git hooks are ready.',
+  'setup.repositoryReadinessHooksNotInstalled': 'RoboRev Git hooks are not installed.',
+  'setup.repositoryReadinessHooksNeedsAttention': 'Git hooks need attention.',
+  'setup.repositoryReadinessHooksUnknown': 'Git hooks could not be verified.',
+  'setup.repositoryReadinessDaemonOnline': 'RoboRev daemon is online.',
+  'setup.repositoryReadinessDaemonOffline': 'RoboRev daemon is offline.',
+  'setup.repositoryReadinessDaemonUnavailable': 'RoboRev daemon could not be verified.',
+  'setup.repositoryReadinessTrackingTracked': 'This repository is tracked by RoboRev.',
+  'setup.repositoryReadinessTrackingNotTracked': 'This repository is not tracked by RoboRev.',
+  'setup.repositoryReadinessTrackingUnavailable': 'RoboRev tracking could not be verified.',
   'setup.runtime': 'RoboRev Runtime',
   'setup.daemon': 'Daemon',
   'setup.model': 'Model',
@@ -1161,6 +1196,41 @@ export const ko: Record<MessageKey, string> = { ...en,
 }
 
 ko['stats.costIncomplete'] = '일부 적격 작업에 비용이 보고되지 않아 실제 사용액은 이 하한선보다 높을 수 있습니다.'
+ko['setup.repositoryReadinessTitle'] = '저장소 설정 준비 상태'
+ko['setup.repositoryReadinessDescription'] = '선택한 저장소의 읽기 전용 설정 전제 조건을 확인합니다.'
+ko['setup.repositoryReadinessNotChecked'] = '저장소 설정을 아직 확인하지 않았습니다.'
+ko['setup.repositoryReadinessCheck'] = '설정 확인'
+ko['setup.repositoryReadinessRefresh'] = '새로고침'
+ko['setup.repositoryReadinessLoading'] = '저장소 설정 확인 중…'
+ko['setup.repositoryReadinessError'] = '저장소 설정 준비 상태를 확인하지 못했습니다.'
+ko['setup.repositoryReadinessReady'] = '준비됨'
+ko['setup.repositoryReadinessNeedsAttention'] = '주의 필요'
+ko['setup.repositoryReadinessUnavailable'] = '사용할 수 없음'
+ko['setup.repositoryReadinessConfiguration'] = '구성'
+ko['setup.repositoryReadinessSnapshot'] = '스냅샷 보호'
+ko['setup.repositoryReadinessHooks'] = 'Git 훅'
+ko['setup.repositoryReadinessDaemon'] = '데몬'
+ko['setup.repositoryReadinessTracking'] = 'RoboRev 추적'
+ko['setup.repositoryReadinessReadyBody'] = '모든 저장소 설정 확인을 통과했습니다.'
+ko['setup.repositoryReadinessNeedsAttentionBody'] = '하나 이상의 설정 확인에 주의가 필요합니다.'
+ko['setup.repositoryReadinessUnavailableBody'] = '일부 설정 확인을 안전하게 검증하지 못했습니다.'
+ko['setup.repositoryReadinessConfigurationReady'] = '구성을 안전하게 확인했습니다.'
+ko['setup.repositoryReadinessConfigurationUnavailable'] = '구성을 안전하게 확인하지 못했습니다.'
+ko['setup.repositoryReadinessSnapshotReady'] = '스냅샷 디렉터리가 Git에서 ignore됩니다.'
+ko['setup.repositoryReadinessSnapshotNotIgnored'] = '스냅샷 디렉터리가 Git에서 ignore되지 않습니다.'
+ko['setup.repositoryReadinessSnapshotTracked'] = '스냅샷 디렉터리에 tracked 파일이 있습니다.'
+ko['setup.repositoryReadinessSnapshotUnsafe'] = '스냅샷 디렉터리 안전성 확인에 실패했습니다.'
+ko['setup.repositoryReadinessSnapshotUnavailable'] = '스냅샷 보호를 확인하지 못했습니다.'
+ko['setup.repositoryReadinessHooksReady'] = 'Git 훅이 준비되었습니다.'
+ko['setup.repositoryReadinessHooksNotInstalled'] = 'RoboRev Git 훅이 설치되지 않았습니다.'
+ko['setup.repositoryReadinessHooksNeedsAttention'] = 'Git 훅에 주의가 필요합니다.'
+ko['setup.repositoryReadinessHooksUnknown'] = 'Git 훅을 확인하지 못했습니다.'
+ko['setup.repositoryReadinessDaemonOnline'] = 'RoboRev 데몬이 온라인입니다.'
+ko['setup.repositoryReadinessDaemonOffline'] = 'RoboRev 데몬이 오프라인입니다.'
+ko['setup.repositoryReadinessDaemonUnavailable'] = 'RoboRev 데몬을 확인하지 못했습니다.'
+ko['setup.repositoryReadinessTrackingTracked'] = '이 저장소는 RoboRev에서 추적합니다.'
+ko['setup.repositoryReadinessTrackingNotTracked'] = '이 저장소는 RoboRev에서 추적하지 않습니다.'
+ko['setup.repositoryReadinessTrackingUnavailable'] = 'RoboRev 추적을 확인하지 못했습니다.'
 ko['stats.costEmpty'] = '이 범위에 비용을 보고할 수 있는 적격 작업이 아직 없습니다.'
 ko['stats.insightsDisabled'] = '이 체크포인트에서는 Guideline Insights가 활성화되지 않았습니다.'
 ko['stats.guidelineTitle'] = 'Guideline Insights'

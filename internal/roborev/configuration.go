@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
 )
@@ -17,6 +18,11 @@ type ConfigScope string
 const (
 	ConfigScopeGlobal ConfigScope = "global"
 	ConfigScopeLocal  ConfigScope = "local"
+)
+
+var (
+	errNoLocalConfig     = errors.New("no local config (.roborev.toml) found")
+	errSnapshotDirNotSet = errors.New(`key "snapshot_dir" is not set in local config`)
 )
 
 const (
@@ -214,6 +220,9 @@ func (c *Client) ConfigGet(ctx context.Context, repoPath string, key string, sco
 		return "", err
 	}
 	result, err := c.runInDir(ctx, repoPath, args, configGetTimeout, configValueLimit)
+	if result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return "", fmt.Errorf("config get %s: response exceeded bounded output or was not valid UTF-8", key)
+	}
 	if err != nil {
 		// Upstream fails with `key "<key>" is not set in global|local config`
 		// when the requested scope file does not carry an explicit value.
@@ -222,12 +231,53 @@ func (c *Client) ConfigGet(ctx context.Context, repoPath string, key string, sco
 		}
 		return "", fmt.Errorf("config get %s: %w", key, err)
 	}
-	if result.StdoutTruncated {
-		return "", fmt.Errorf("config get %s: response exceeded bounded output", key)
-	}
 	value := strings.TrimRight(result.Stdout, "\r\n")
 	if len(strings.Fields(value)) > 1 {
 		return "", fmt.Errorf("config get %s: unexpected multi-token response", key)
+	}
+	return value, nil
+}
+
+// SnapshotDirectory resolves the repository-local snapshot_dir used by the
+// Setup Readiness read seam. It deliberately does not reuse ConfigGet's
+// single-token normalization: spaces are valid in a configured directory.
+// ConfigList remains the effective-configuration gate, so malformed global or
+// local TOML fails closed even though only the local value is consumed.
+func (c *Client) SnapshotDirectory(ctx context.Context, repoPath string) (string, error) {
+	if err := c.requireConfigCapability(ctx); err != nil {
+		return "", err
+	}
+	listResult, listErr := c.runInDir(ctx, repoPath, ConfigListArgs(), configListTimeout, configListOutputLimit)
+	if listErr != nil {
+		return "", errors.New("effective configuration is unavailable")
+	}
+	if listResult.StdoutTruncated || listResult.StderrTruncated || !utf8.ValidString(listResult.Stdout) || !utf8.ValidString(listResult.Stderr) {
+		return "", errors.New("effective configuration is unavailable")
+	}
+	args, err := ConfigGetArgs("snapshot_dir", ConfigScopeLocal)
+	if err != nil {
+		return "", err
+	}
+	result, runErr := c.runInDir(ctx, repoPath, args, configGetTimeout, configValueLimit)
+	if result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return "", errors.New("snapshot_dir response exceeded bounded output or was not valid UTF-8")
+	}
+	if runErr != nil {
+		message := strings.TrimSpace(result.Stderr)
+		message = strings.TrimSpace(strings.TrimPrefix(message, "Error:"))
+		if message == errNoLocalConfig.Error() || message == errSnapshotDirNotSet.Error() {
+			return ".roborev", nil
+		}
+		return "", errors.New("snapshot_dir could not be resolved")
+	}
+	// Remove exactly one terminal EOL while preserving every other space.
+	value := result.Stdout
+	if strings.HasSuffix(value, "\r\n") {
+		value = strings.TrimSuffix(value, "\r\n")
+	} else if strings.HasSuffix(value, "\n") {
+		value = strings.TrimSuffix(value, "\n")
+	} else if strings.HasSuffix(value, "\r") {
+		value = strings.TrimSuffix(value, "\r")
 	}
 	return value, nil
 }

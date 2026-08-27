@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeCIWorkflow, fetchCIWorkflowPreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
+import { executeCIWorkflow, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
 const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
@@ -143,6 +143,70 @@ describe('repository inventory API normalization', () => {
   it('preserves upstream string values without browser path normalization', () => {
     const value = { repositories: [{ ...row, name: '', path: '  E:\\repo\\  ' }], repositoryCount: 1, totalJobCount: 2 }
     expect(normalizeRepositoryInventoryResponse(value)?.repositories[0]).toEqual(value.repositories[0])
+  })
+})
+
+describe('repository setup readiness API normalization', () => {
+  const valid = {
+    version: 'v0.64.0', repositoryIdentity: 'opaque-repository', overall: 'ready' as const,
+    configuration: { status: 'ready' as const }, snapshot: { status: 'ready' as const },
+    gitHooks: { status: 'ready' as const }, daemon: { status: 'online' as const }, tracking: { status: 'tracked' as const },
+  }
+
+  it('accepts every enum through a consistent derived state', () => {
+    expect(normalizeRepositorySetupReadiness(valid, valid.repositoryIdentity)).toEqual(valid)
+    for (const status of ['not-ignored', 'tracked-files'] as const) {
+      expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'needs-attention', snapshot: { status } })).not.toBeNull()
+    }
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', snapshot: { status: 'unsafe' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', snapshot: { status: 'unavailable' } })).not.toBeNull()
+    for (const status of ['needs-attention', 'not-installed'] as const) {
+      expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'needs-attention', gitHooks: { status } })).not.toBeNull()
+    }
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', gitHooks: { status: 'unknown' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'needs-attention', daemon: { status: 'offline' }, tracking: { status: 'unavailable' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', daemon: { status: 'unavailable' }, tracking: { status: 'unavailable' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'needs-attention', tracking: { status: 'not-tracked' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', tracking: { status: 'unavailable' } })).not.toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, overall: 'unavailable', configuration: { status: 'unavailable' }, snapshot: { status: 'unavailable' } })).not.toBeNull()
+  })
+
+  it('POSTs exactly the opaque repository identity', async () => {
+    setCSRF('test-csrf')
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(valid), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchRepositorySetupReadiness(valid.repositoryIdentity)).resolves.toEqual(valid)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/repositories/setup-readiness')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ repositoryIdentity: valid.repositoryIdentity })
+    expect(Object.keys(JSON.parse(String(init.body)))).toEqual(['repositoryIdentity'])
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('test-csrf')
+  })
+
+  it('rejects exact-object drift, private fields, identities and inconsistent cross-field states', () => {
+    const invalid: unknown[] = [
+      { ...valid, extra: true },
+      { ...valid, version: '0.64.0' },
+      { ...valid, repositoryIdentity: '' },
+      { ...valid, repositoryIdentity: ' opaque-repository' },
+      { ...valid, repositoryIdentity: 'bad\u0000identity' },
+      { ...valid, configuration: { status: 'ready', path: 'C:\\private' } },
+      { ...valid, snapshot: { status: 'ready', content: 'private' } },
+      { ...valid, gitHooks: { status: 'ready', command: ['git'] } },
+      { ...valid, daemon: { status: 'online', rawOutput: 'secret' } },
+      { ...valid, tracking: { status: 'tracked', path: 'C:\\private' } },
+      { ...valid, configuration: { status: 'unknown' } },
+      { ...valid, snapshot: { status: 'not-ignored' }, overall: 'ready' },
+      { ...valid, configuration: { status: 'unavailable' }, snapshot: { status: 'ready' }, overall: 'unavailable' },
+      { ...valid, daemon: { status: 'offline' }, tracking: { status: 'tracked' }, overall: 'needs-attention' },
+      { ...valid, daemon: { status: 'online' }, tracking: { status: 'unavailable' }, overall: 'needs-attention' },
+      { ...valid, daemon: { status: 'unavailable' }, tracking: { status: 'unavailable' }, overall: 'needs-attention' },
+      Object.assign(Object.create({ extra: true }), valid),
+    ]
+    for (const value of invalid) expect(normalizeRepositorySetupReadiness(value, valid.repositoryIdentity)).toBeNull()
+    expect(normalizeRepositorySetupReadiness(valid, 'other-repository')).toBeNull()
   })
 })
 

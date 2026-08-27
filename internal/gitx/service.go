@@ -78,6 +78,69 @@ type CIWorkflowRepositoryState struct {
 	Ignored  bool
 }
 
+// SnapshotProtection reports only the two facts needed by Repository Setup
+// Readiness. Relative is server-validated; this method never accepts an
+// arbitrary browser path.
+type SnapshotProtection struct {
+	Tracked bool
+	Ignored bool
+}
+
+// SnapshotProbe performs the fixed, read-only Git probes for a validated
+// repository-local snapshot directory. The tracked check intentionally wins
+// over ignore rules because Git can report a tracked path as ignored by a
+// broader rule.
+func (s *Service) SnapshotProbe(ctx context.Context, root, relative string) (SnapshotProtection, error) {
+	if s == nil || s.Runner == nil || strings.TrimSpace(root) == "" || strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) || !filepath.IsLocal(relative) {
+		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+	}
+	root = filepath.Clean(root)
+	env := s.snapshotGitEnv()
+	rootResult, rootErr := s.runSnapshotGit(ctx, root, env, "rev-parse", "--show-toplevel")
+	if rootErr != nil || rootResult.ExitCode != 0 {
+		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+	}
+	resolvedRoot, err := filepath.Abs(filepath.Clean(strings.TrimSpace(rootResult.Stdout)))
+	if err != nil || !SameRepositoryPath(resolvedRoot, root) {
+		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+	}
+	trackedResult, trackedErr := s.runSnapshotGit(ctx, root, env, "ls-files", "--", filepath.ToSlash(relative))
+	if trackedErr != nil || trackedResult.ExitCode != 0 {
+		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+	}
+	if strings.TrimSpace(trackedResult.Stdout) != "" {
+		return SnapshotProtection{Tracked: true}, nil
+	}
+	probePath := filepath.ToSlash(filepath.Join(relative, ".roborev-ignore-check"))
+	ignoreResult, ignoreErr := s.runSnapshotGit(ctx, root, env, "check-ignore", "--quiet", "--no-index", "--", probePath)
+	if ignoreResult.ExitCode == 0 {
+		if ignoreErr != nil || strings.TrimSpace(ignoreResult.Stdout) != "" || strings.TrimSpace(ignoreResult.Stderr) != "" {
+			return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+		}
+		return SnapshotProtection{Ignored: true}, nil
+	}
+	if ignoreResult.ExitCode == 1 && ignoreErr != nil && strings.TrimSpace(ignoreResult.Stdout) == "" && strings.TrimSpace(ignoreResult.Stderr) == "" {
+		return SnapshotProtection{}, nil
+	}
+	return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+}
+
+func (s *Service) runSnapshotGit(ctx context.Context, root string, env []string, args ...string) (proc.Result, error) {
+	commandArgs := append([]string{"-C", root}, args...)
+	result, runErr := s.Runner.Run(ctx, proc.Command{Executable: s.Git, Args: commandArgs, Env: env, Timeout: 10 * time.Second, OutputLimit: 64 << 10})
+	if result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return result, errors.New("snapshot probe unavailable")
+	}
+	return result, runErr
+}
+
+// snapshotGitEnv removes all inherited GIT_* routing/configuration variables
+// while retaining HOME so persistent global/system ignore rules remain active.
+func (s *Service) snapshotGitEnv() []string {
+	env := minimalHookGitEnv(os.Environ())
+	return append(env, "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+}
+
 func New(runner proc.Runner) *Service { return &Service{Git: "git", Runner: runner} }
 
 func (s *Service) command(ctx context.Context, path string, args ...string) (string, error) {

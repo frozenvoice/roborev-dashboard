@@ -254,6 +254,51 @@ type CIWorkflowPreviewBase = {
   }
 }
 
+export type RepositorySetupReadiness = {
+  version: 'v0.64.0'
+  repositoryIdentity: string
+  overall: 'ready' | 'needs-attention' | 'unavailable'
+  configuration: { status: 'ready' | 'unavailable' }
+  snapshot: { status: 'ready' | 'not-ignored' | 'tracked-files' | 'unsafe' | 'unavailable' }
+  gitHooks: { status: 'ready' | 'needs-attention' | 'not-installed' | 'unknown' }
+  daemon: { status: 'online' | 'offline' | 'unavailable' }
+  tracking: { status: 'tracked' | 'not-tracked' | 'unavailable' }
+}
+
+const setupReadinessVersion = 'v0.64.0' as const
+const setupReadinessOverall = ['ready', 'needs-attention', 'unavailable'] as const
+const setupReadinessConfiguration = ['ready', 'unavailable'] as const
+const setupReadinessSnapshot = ['ready', 'not-ignored', 'tracked-files', 'unsafe', 'unavailable'] as const
+const setupReadinessHooks = ['ready', 'needs-attention', 'not-installed', 'unknown'] as const
+const setupReadinessDaemon = ['online', 'offline', 'unavailable'] as const
+const setupReadinessTracking = ['tracked', 'not-tracked', 'unavailable'] as const
+
+/** Normalize the exact status-only Repository Setup Readiness DTO. */
+export function normalizeRepositorySetupReadiness(value: unknown, expectedRepositoryIdentity?: string): RepositorySetupReadiness | null {
+  const root = exactObject(value, ['version', 'repositoryIdentity', 'overall', 'configuration', 'snapshot', 'gitHooks', 'daemon', 'tracking'])
+  if (!root || root.version !== setupReadinessVersion || typeof root.repositoryIdentity !== 'string' || !root.repositoryIdentity || root.repositoryIdentity.trim() !== root.repositoryIdentity || [...root.repositoryIdentity].some(char => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  const configuration = exactStatus(root.configuration, setupReadinessConfiguration)
+  const snapshot = exactStatus(root.snapshot, setupReadinessSnapshot)
+  const gitHooks = exactStatus(root.gitHooks, setupReadinessHooks)
+  const daemon = exactStatus(root.daemon, setupReadinessDaemon)
+  const tracking = exactStatus(root.tracking, setupReadinessTracking)
+  if (!configuration || !snapshot || !gitHooks || !daemon || !tracking || !setupReadinessOverall.includes(root.overall as typeof setupReadinessOverall[number])) return null
+  const overall = root.overall as RepositorySetupReadiness['overall']
+  if (configuration.status === 'unavailable' && snapshot.status !== 'unavailable') return null
+  if (daemon.status !== 'online' && tracking.status !== 'unavailable') return null
+  const ready = configuration.status === 'ready' && snapshot.status === 'ready' && gitHooks.status === 'ready' && daemon.status === 'online' && tracking.status === 'tracked'
+  const unavailable = snapshot.status === 'unsafe' || gitHooks.status === 'unknown' || daemon.status === 'unavailable' || configuration.status === 'unavailable' || snapshot.status === 'unavailable' || (daemon.status === 'online' && tracking.status === 'unavailable')
+  const derived = ready ? 'ready' : unavailable ? 'unavailable' : 'needs-attention'
+  if (overall !== derived) return null
+  return { version: setupReadinessVersion, repositoryIdentity: root.repositoryIdentity, overall, configuration, snapshot, gitHooks, daemon, tracking } as RepositorySetupReadiness
+}
+
+function exactStatus<T extends readonly string[]>(value: unknown, allowed: T): { status: T[number] } | null {
+  const object = exactObject(value, ['status'])
+  if (!object || typeof object.status !== 'string' || !allowed.includes(object.status as T[number])) return null
+  return { status: object.status as T[number] }
+}
+
 export type CIWorkflowExistingComparison = 'exact-match' | 'different' | 'unavailable'
 export type CIWorkflowExisting = { comparison: CIWorkflowExistingComparison }
 
@@ -1687,6 +1732,17 @@ export async function fetchCIWorkflowPreview(repositoryIdentity: string, signal?
   })
   const normalized = normalizeCIWorkflowPreview(value, repositoryIdentity)
   if (!normalized) throw new APIError('invalid-ci-workflow-preview')
+  return normalized
+}
+
+export async function fetchRepositorySetupReadiness(repositoryIdentity: string, signal?: AbortSignal): Promise<RepositorySetupReadiness> {
+  const value = await request<unknown>('/api/repositories/setup-readiness', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity }),
+    signal,
+  })
+  const normalized = normalizeRepositorySetupReadiness(value, repositoryIdentity)
+  if (!normalized) throw new APIError('invalid-repository-setup-readiness')
   return normalized
 }
 

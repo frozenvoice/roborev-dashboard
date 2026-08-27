@@ -7,6 +7,7 @@ import { GitHookStatus } from './GitHookStatus'
 import { AgentHookReadiness } from './AgentHookReadiness'
 import { SkillsReadiness } from './SkillsReadiness'
 import { CIWorkflowPreview } from './CIWorkflowPreview'
+import { RepositorySetupReadiness } from './RepositorySetupReadiness'
 
 export type SetupAction = () => Promise<void>
 export type AgentCheckAction = (agent: string) => Promise<void>
@@ -343,6 +344,7 @@ export function Setup({ state, repositoryIdentity = '', busy = false, onInstall,
     {!state && <section className="setup-card"><Server /><div><h3>{t('setup.setupUnavailable')}</h3><p>{t('setup.setupResponseInvalid')}</p></div></section>}
     {state && <article className="setup-card setup-detail-card"><Server /><div><h3>RoboRev {state.version || t('setup.versionNotDetected')}</h3><code>{state.binaryPath || t('setup.pathUnavailable')}</code><p>{healthyReady ? t('setup.daemonRunningDetail') : state.daemonRunning ? t('setup.daemonNeedsAttentionDetail') : state.installed ? t('setup.daemonStoppedDetail') : t('setup.daemonNotInstalledDetail')}</p></div><span className={`status ${healthyReady ? 'status-pass' : state.daemonRunning ? 'status-failed' : state.installed ? 'status-queued' : 'status-failed'}`}><span className="status-dot" />{healthyReady ? t('status.ready') : state.daemonRunning ? t('status.error') : state.installed ? t('status.stopped') : t('status.setupRequired')}</span></article>}
     <RuntimeControls state={state} runtimeControl={runtimeControl} runtimeLoading={runtimeLoading} runtimeError={runtimeError} busy={busy || actionBusy} panelRefineActive={panelRefineActive} onRefreshRuntime={onRefreshRuntime} onDaemonAction={onDaemonAction} onStartDaemon={onStartDaemon} onQueueAction={onQueueAction} />
+    <RepositorySetupReadiness repositoryIdentity={repositoryIdentity} />
     <RuntimeDiagnostics />
     <GitHookStatus repositoryIdentity={repositoryIdentity} />
     <CIWorkflowPreview repositoryIdentity={repositoryIdentity} />

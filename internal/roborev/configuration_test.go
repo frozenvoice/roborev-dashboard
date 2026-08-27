@@ -2,6 +2,7 @@ package roborev
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"sync"
@@ -238,6 +239,27 @@ func TestConfigGetTreatsExplicitNotSetAsEmpty(t *testing.T) {
 	}
 }
 
+func TestConfigGetFailsClosedOnTruncatedOrInvalidOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		result process.Result
+		err    error
+	}{
+		{name: "stdout truncated", result: process.Result{StdoutTruncated: true}},
+		{name: "stderr truncated missing-key", result: process.Result{Stderr: `Error: key "review_reasoning" is not set in local config`, StderrTruncated: true}, err: &processExitError{}},
+		{name: "stdout invalid utf8", result: process.Result{Stdout: string([]byte{0xff})}},
+		{name: "stderr invalid utf8", result: process.Result{Stderr: string([]byte{0xff})}, err: &processExitError{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newRecordingClient(t, []process.Result{test.result}, []error{test.err})
+			if value, err := client.ConfigGet(context.Background(), `E:\repo`, "review_reasoning", ConfigScopeLocal); err == nil {
+				t.Fatalf("value=%q unexpectedly accepted", value)
+			}
+		})
+	}
+}
+
 func TestCapabilitiesGateConfigurationByVersion(t *testing.T) {
 	if capabilities("v0.63.9").ConfigIntrospection || capabilities("v0.63.9").ConfigMutation {
 		t.Fatal("pre-v0.64 must not expose configuration contracts")
@@ -247,5 +269,68 @@ func TestCapabilitiesGateConfigurationByVersion(t *testing.T) {
 	}
 	if capabilities("v0.65.0").ConfigIntrospection || capabilities("v0.65.0").ConfigMutation {
 		t.Fatal("configuration contracts must be gated to exact v0.64.0")
+	}
+}
+
+func TestSnapshotDirectoryUsesExactReadinessConfigSeam(t *testing.T) {
+	const list = "default  snapshot_dir  .roborev\n"
+	tests := []struct {
+		name    string
+		list    process.Result
+		listErr error
+		get     process.Result
+		getErr  error
+		want    string
+		wantErr bool
+	}{
+		{name: "missing local config defaults", list: process.Result{Stdout: list}, get: process.Result{Stderr: `Error: no local config (.roborev.toml) found`}, getErr: &processExitError{}, want: ".roborev"},
+		{name: "unset local key defaults", list: process.Result{Stdout: list}, get: process.Result{Stderr: `Error: key "snapshot_dir" is not set in local config`}, getErr: &processExitError{}, want: ".roborev"},
+		{name: "spaces preserve one EOL", list: process.Result{Stdout: list}, get: process.Result{Stdout: "cache/my snapshots\r\n"}, want: "cache/my snapshots"},
+		{name: "control value reaches path validator", list: process.Result{Stdout: list}, get: process.Result{Stdout: "cache\x00snap\n"}, want: "cache\x00snap"},
+		{name: "future list row is only a success gate", list: process.Result{Stdout: "future origin\x00with arbitrary output"}, get: process.Result{Stdout: "cache"}, want: "cache"},
+		{name: "malformed list process error", listErr: errors.New("malformed TOML"), wantErr: true},
+		{name: "list output bound", list: process.Result{StdoutTruncated: true}, wantErr: true},
+		{name: "list stderr invalid utf8", list: process.Result{Stdout: list, Stderr: string([]byte{0xff})}, wantErr: true},
+		{name: "generic get error not default", list: process.Result{Stdout: list}, get: process.Result{Stderr: `Error: permission denied`}, getErr: &processExitError{}, wantErr: true},
+		{name: "get output bound", list: process.Result{Stdout: list}, get: process.Result{StdoutTruncated: true}, wantErr: true},
+		{name: "get invalid utf8", list: process.Result{Stdout: list}, get: process.Result{Stdout: string([]byte{0xff})}, wantErr: true},
+		{name: "truncated missing error does not default", list: process.Result{Stdout: list}, get: process.Result{Stderr: `Error: no local config (.roborev.toml) found`, StderrTruncated: true}, getErr: &processExitError{}, wantErr: true},
+		{name: "invalid utf8 error does not default", list: process.Result{Stdout: list}, get: process.Result{Stderr: string([]byte{0xff})}, getErr: &processExitError{}, wantErr: true},
+		{name: "near match does not default", list: process.Result{Stdout: list}, get: process.Result{Stderr: `Error: no local config (.roborev.toml) found PRIVATE_STDERR_MARKER`}, getErr: &processExitError{}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			results := []process.Result{}
+			errs := []error{}
+			if test.listErr != nil {
+				results = append(results, test.list)
+				errs = append(errs, test.listErr)
+			} else {
+				results = append(results, test.list, test.get)
+				errs = append(errs, nil, test.getErr)
+			}
+			client, runner := newRecordingClient(t, results, errs)
+			got, err := client.SnapshotDirectory(context.Background(), `E:\repo`)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q", got)
+				}
+			} else if err != nil || got != test.want {
+				t.Fatalf("got=%q err=%v want=%q", got, err, test.want)
+			}
+			if test.listErr != nil || test.wantErr && test.get == (process.Result{}) && test.getErr == nil {
+				if len(runner.calls) != 2 {
+					t.Fatalf("calls=%d want version+list", len(runner.calls))
+				}
+			} else if len(runner.calls) != 3 {
+				t.Fatalf("calls=%d want version+list+get: %#v", len(runner.calls), runner.calls)
+			}
+			if len(runner.calls) >= 2 && !reflect.DeepEqual(runner.calls[1].Args, []string{"config", "list", "--show-origin"}) {
+				t.Fatalf("list args=%#v", runner.calls[1].Args)
+			}
+			if len(runner.calls) == 3 && !reflect.DeepEqual(runner.calls[2].Args, []string{"config", "get", "snapshot_dir", "--local"}) {
+				t.Fatalf("get args=%#v", runner.calls[2].Args)
+			}
+		})
 	}
 }

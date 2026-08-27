@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
 )
@@ -723,5 +724,182 @@ func TestInspectDistinguishesActualDetachedFromLiteralDetachedBranch(t *testing.
 				t.Fatalf("commands=%d, want 5", len(runner.commands))
 			}
 		})
+	}
+}
+
+type snapshotProbeResponse struct {
+	result proc.Result
+	err    error
+}
+
+type snapshotProbeRunner struct {
+	root      string
+	responses map[string]snapshotProbeResponse
+	commands  []proc.Command
+}
+
+func (r *snapshotProbeRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
+	r.commands = append(r.commands, command)
+	stage := ""
+	if len(command.Args) >= 3 {
+		stage = command.Args[2]
+	}
+	if response, ok := r.responses[stage]; ok {
+		return response.result, response.err
+	}
+	switch stage {
+	case "rev-parse":
+		return proc.Result{Stdout: r.root}, nil
+	case "ls-files":
+		return proc.Result{}, nil
+	case "check-ignore":
+		return proc.Result{}, nil
+	default:
+		return proc.Result{ExitCode: 2}, errors.New("unexpected Git snapshot command")
+	}
+}
+
+func TestSnapshotProbeUsesExactTypedArgsAndSanitizedEnvironment(t *testing.T) {
+	root := t.TempDir()
+	relative := filepath.Join("cache", "snap shots")
+	t.Setenv("HOME", `C:\Users\snapshot-home`)
+	t.Setenv("GIT_DIR", `C:\Users\private\source\secret-project\.git`)
+	t.Setenv("GIT_WORK_TREE", `C:\Users\private\source\secret-project`)
+	t.Setenv("GIT_INDEX_FILE", `C:\Users\private\source\secret-project\index`)
+	t.Setenv("GIT_CONFIG_GLOBAL", `C:\Users\private\.gitconfig`)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", `C:\Users\private\hooks`)
+	runner := &snapshotProbeRunner{root: root, responses: map[string]snapshotProbeResponse{}}
+	service := New(runner)
+	got, err := service.SnapshotProbe(context.Background(), root, relative)
+	if err != nil || got != (SnapshotProtection{Ignored: true}) {
+		t.Fatalf("protection=%#v err=%v", got, err)
+	}
+	wantArgs := [][]string{
+		{"-C", root, "rev-parse", "--show-toplevel"},
+		{"-C", root, "ls-files", "--", filepath.ToSlash(relative)},
+		{"-C", root, "check-ignore", "--quiet", "--no-index", "--", filepath.ToSlash(filepath.Join(relative, ".roborev-ignore-check"))},
+	}
+	if len(runner.commands) != len(wantArgs) {
+		t.Fatalf("commands=%#v", runner.commands)
+	}
+	for index, command := range runner.commands {
+		if command.Executable != service.Git || !reflect.DeepEqual(command.Args, wantArgs[index]) {
+			t.Fatalf("command[%d]=%#v want args=%#v", index, command, wantArgs[index])
+		}
+		if command.Timeout != 10*time.Second || command.OutputLimit != 64<<10 {
+			t.Fatalf("command bounds=%#v", command)
+		}
+		if !containsEnv(command.Env, "HOME=C:\\Users\\snapshot-home") ||
+			!containsEnv(command.Env, "GIT_TERMINAL_PROMPT=0") ||
+			!containsEnv(command.Env, "GIT_OPTIONAL_LOCKS=0") {
+			t.Fatalf("required snapshot environment missing: %#v", command.Env)
+		}
+		for _, entry := range command.Env {
+			name, _, _ := strings.Cut(entry, "=")
+			upper := strings.ToUpper(name)
+			if strings.HasPrefix(upper, "GIT_") && upper != "GIT_TERMINAL_PROMPT" && upper != "GIT_OPTIONAL_LOCKS" {
+				t.Fatalf("inherited Git routing/config leaked: %q", entry)
+			}
+		}
+	}
+}
+
+func TestSnapshotProbeTrackedFilesTakePrecedenceOverIgnore(t *testing.T) {
+	root := t.TempDir()
+	runner := &snapshotProbeRunner{root: root, responses: map[string]snapshotProbeResponse{
+		"ls-files":     {result: proc.Result{Stdout: ".roborev/tracked.json\n"}},
+		"check-ignore": {result: proc.Result{ExitCode: 2}, err: errors.New("must not run")},
+	}}
+	got, err := New(runner).SnapshotProbe(context.Background(), root, ".roborev")
+	if err != nil || got != (SnapshotProtection{Tracked: true}) {
+		t.Fatalf("protection=%#v err=%v", got, err)
+	}
+	if len(runner.commands) != 2 {
+		t.Fatalf("tracked probe continued to ignore stage: %#v", runner.commands)
+	}
+}
+
+func TestSnapshotProbeDistinguishesIgnoredAndNotIgnored(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name     string
+		response snapshotProbeResponse
+		want     SnapshotProtection
+	}{
+		{name: "ignored", response: snapshotProbeResponse{result: proc.Result{ExitCode: 0}}, want: SnapshotProtection{Ignored: true}},
+		{name: "not ignored", response: snapshotProbeResponse{result: proc.Result{ExitCode: 1}, err: errors.New("process exited with code 1")}, want: SnapshotProtection{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &snapshotProbeRunner{root: root, responses: map[string]snapshotProbeResponse{"check-ignore": test.response}}
+			got, err := New(runner).SnapshotProbe(context.Background(), root, filepath.Join("parent", ".roborev"))
+			if err != nil || got != test.want {
+				t.Fatalf("protection=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestSnapshotProbeFailsClosedOnCommandAndExitAmbiguity(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name     string
+		stage    string
+		response snapshotProbeResponse
+	}{
+		{name: "root command error", stage: "rev-parse", response: snapshotProbeResponse{result: proc.Result{ExitCode: 2, Stderr: "PRIVATE_STDERR_MARKER"}, err: errors.New("private root failure")}},
+		{name: "tracked command error", stage: "ls-files", response: snapshotProbeResponse{result: proc.Result{ExitCode: 2, Stderr: "PRIVATE_STDERR_MARKER"}, err: errors.New("private tracked failure")}},
+		{name: "ignore unexpected exit", stage: "check-ignore", response: snapshotProbeResponse{result: proc.Result{ExitCode: 2, Stderr: "PRIVATE_STDERR_MARKER"}, err: errors.New("private ignore failure")}},
+		{name: "ignore exit one without process error", stage: "check-ignore", response: snapshotProbeResponse{result: proc.Result{ExitCode: 1}}},
+		{name: "ignore success with output", stage: "check-ignore", response: snapshotProbeResponse{result: proc.Result{Stdout: "PRIVATE_STDERR_MARKER"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &snapshotProbeRunner{root: root, responses: map[string]snapshotProbeResponse{test.stage: test.response}}
+			if got, err := New(runner).SnapshotProbe(context.Background(), root, ".roborev"); err == nil || got != (SnapshotProtection{}) {
+				t.Fatalf("protection=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestSnapshotProbeRejectsTruncatedAndInvalidUTF8AtEveryStage(t *testing.T) {
+	root := t.TempDir()
+	for _, stage := range []string{"rev-parse", "ls-files", "check-ignore"} {
+		for _, kind := range []string{"stdout truncated", "stderr truncated", "stdout utf8", "stderr utf8"} {
+			t.Run(stage+"/"+kind, func(t *testing.T) {
+				result := proc.Result{}
+				if stage == "rev-parse" {
+					result.Stdout = root
+				}
+				switch kind {
+				case "stdout truncated":
+					result.StdoutTruncated = true
+				case "stderr truncated":
+					result.StderrTruncated = true
+				case "stdout utf8":
+					result.Stdout = string([]byte{0xff})
+				case "stderr utf8":
+					result.Stderr = string([]byte{0xff})
+				}
+				runner := &snapshotProbeRunner{root: root, responses: map[string]snapshotProbeResponse{stage: {result: result}}}
+				if got, err := New(runner).SnapshotProbe(context.Background(), root, ".roborev"); err == nil || got != (SnapshotProtection{}) {
+					t.Fatalf("protection=%#v err=%v", got, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSnapshotProbeRejectsUnsafeRelativeInputWithoutGit(t *testing.T) {
+	for _, relative := range []string{"", "..", filepath.Join("..", "escape"), filepath.Join(t.TempDir(), "absolute")} {
+		runner := &snapshotProbeRunner{root: t.TempDir(), responses: map[string]snapshotProbeResponse{}}
+		if _, err := New(runner).SnapshotProbe(context.Background(), runner.root, relative); err == nil {
+			t.Fatalf("relative %q was accepted", relative)
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("relative %q invoked Git: %#v", relative, runner.commands)
+		}
 	}
 }

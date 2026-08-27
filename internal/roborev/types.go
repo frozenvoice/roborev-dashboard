@@ -116,6 +116,20 @@ type RepositoryInventoryService interface {
 	RepositoryInventory(context.Context) (repoinventory.Inventory, error)
 }
 
+// RepositorySetupReadinessService is the optional, read-only combined seam
+// used by Setup Readiness. It keeps the health and complete inventory probes
+// together so callers cannot accidentally fall back to /api/status or a
+// daemon lifecycle operation.
+type RepositorySetupReadinessService interface {
+	RepositorySetupReadiness(context.Context) (RepositorySetupReadiness, error)
+}
+
+type RepositorySetupReadiness struct {
+	DaemonState        string
+	InventoryAvailable bool
+	Inventory          repoinventory.Inventory
+}
+
 // RepositoryRenameService is optional so existing Service fakes and legacy
 // adapters remain source-compatible. Implementations must preflight again at
 // the process boundary and must not infer success from human CLI output.

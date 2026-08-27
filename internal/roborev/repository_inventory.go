@@ -20,6 +20,65 @@ var (
 	ErrRepositoryInventoryUnhealthy   = errors.New("RoboRev daemon is unhealthy; repository inventory is unavailable")
 )
 
+const (
+	setupReadinessDaemonOnline      = "online"
+	setupReadinessDaemonOffline     = "offline"
+	setupReadinessDaemonUnavailable = "unavailable"
+)
+
+// RepositorySetupReadiness performs exactly one CLI version probe, one
+// already-running health request, and (when healthy and matching) one typed
+// /api/repos request. A valid health response with an invalid inventory keeps
+// the daemon online while making inventory unavailable to the caller.
+func (c *Client) RepositorySetupReadiness(ctx context.Context) (RepositorySetupReadiness, error) {
+	result := RepositorySetupReadiness{DaemonState: setupReadinessDaemonUnavailable}
+	if c == nil || c.Runner == nil {
+		return result, ErrUnsupportedRepositoryInventory
+	}
+	binary, daemonURL, generation := c.snapshot()
+	if strings.TrimSpace(binary) == "" || strings.TrimSpace(daemonURL) == "" {
+		return result, ErrUnsupportedRepositoryInventory
+	}
+	cliVersion, err := c.detectVersion(ctx)
+	if err != nil || !roborevcompat.IsSupportedVersion(cliVersion) || !capabilities(cliVersion).RepositoryInventory {
+		return result, ErrUnsupportedRepositoryInventory
+	}
+	if !c.generationCurrent(generation) {
+		return result, ErrBindingChanged
+	}
+	health, err := c.healthStatus(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		if isUnreachableHealthError(err) {
+			result.DaemonState = setupReadinessDaemonOffline
+			return result, nil
+		}
+		return result, err
+	}
+	if !health.Healthy || !roborevcompat.IsMatchingSupportedVersion(cliVersion, health.Version) {
+		return result, errors.New("RoboRev daemon health is unavailable")
+	}
+	result.DaemonState = setupReadinessDaemonOnline
+	if !c.generationCurrent(generation) {
+		return RepositorySetupReadiness{DaemonState: setupReadinessDaemonUnavailable}, ErrBindingChanged
+	}
+	inventory, err := c.repositoryInventoryRead(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, nil
+	}
+	result.Inventory = inventory
+	result.InventoryAvailable = true
+	if !c.generationCurrent(generation) {
+		return RepositorySetupReadiness{DaemonState: setupReadinessDaemonUnavailable}, ErrBindingChanged
+	}
+	return result, nil
+}
+
 // RepositoryInventory performs a fresh CLI/version and daemon/health
 // preflight before making the one typed inventory request. It never starts a
 // daemon and never falls back to the human-oriented `repo list` command.

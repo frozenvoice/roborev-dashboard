@@ -33,6 +33,10 @@ type repositoryHookLayoutResolver interface {
 	ResolveHookLayout(context.Context, string) (gitx.HookLayout, error)
 }
 
+type repositorySnapshotProbe interface {
+	SnapshotProbe(context.Context, string, string) (gitx.SnapshotProtection, error)
+}
+
 // repositoryCIWorkflowInspector is an optional capability. Keeping it
 // separate from RepositoryInspector prevents the general registry contract
 // from acquiring a fixed CI target or other management-only fields.
@@ -609,6 +613,20 @@ func (r *Registry) ResolveHookLayout(ctx context.Context, path string) (gitx.Hoo
 		return gitx.HookLayout{}, errors.New("Git hook layout inspection is unavailable")
 	}
 	return resolver.ResolveHookLayout(ctx, path)
+}
+
+// SnapshotProbe delegates the fixed repository-local snapshot check to the
+// canonical Git adapter. The relative target is generated and validated by
+// the readiness checker, never accepted from the browser.
+func (r *Registry) SnapshotProbe(ctx context.Context, path, relative string) (gitx.SnapshotProtection, error) {
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	resolver, ok := inspector.(repositorySnapshotProbe)
+	if !ok {
+		return gitx.SnapshotProtection{}, errors.New("Git snapshot inspection is unavailable")
+	}
+	return resolver.SnapshotProbe(ctx, path, relative)
 }
 
 // Identity returns a stable, platform-aware correlation key for a registered
