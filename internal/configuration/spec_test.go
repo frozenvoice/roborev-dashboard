@@ -38,7 +38,7 @@ func TestDangerousKeysAreNotEditable(t *testing.T) {
 		"allow_unsafe_agents", "disable_codex_sandbox", "server_addr",
 		"opencode_cmd", "grok_cmd", "codex_cmd", "claude_code_cmd",
 		"anthropic_api_key", "database_url", "sync.password",
-		"agent", "model", "review.panels", "review.subagents",
+		"agent", "default_agent", "model", "review.panels", "review.subagents",
 		"hooks", "acp", "auto_design", "exclude_patterns", "snapshot_dir",
 	}
 	for _, key := range banned {
