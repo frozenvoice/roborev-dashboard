@@ -626,6 +626,9 @@ export const en = {
   'setup.ciWorkflowCreate': 'Create Workflow',
   'setup.ciWorkflowCreateAvailable': 'The exact preview is available to create in this clean repository.',
   'setup.ciWorkflowAlreadyExists': 'Workflow already exists. Overwrite is not supported.',
+  'setup.ciWorkflowExistingExactMatch': 'Existing workflow exactly matches this generated preview.',
+  'setup.ciWorkflowExistingDifferent': 'Existing workflow differs byte-for-byte from this generated preview.',
+  'setup.ciWorkflowExistingUnavailable': 'The existing workflow could not be compared safely.',
   'setup.ciWorkflowIgnored': 'Workflow path is ignored by Git.',
   'setup.ciWorkflowDirty': 'Repository must be clean before creating workflow.',
   'setup.ciWorkflowUnsafe': 'Workflow target is unavailable.',
@@ -1406,6 +1409,9 @@ ko['setup.ciWorkflowPreviewCopyFailed'] = '클립보드에 접근할 수 없어 
 ko['setup.ciWorkflowCreate'] = 'Workflow 생성'
 ko['setup.ciWorkflowCreateAvailable'] = '현재 깨끗한 저장소에 exact 미리보기를 생성할 수 있습니다.'
 ko['setup.ciWorkflowAlreadyExists'] = 'Workflow가 이미 존재합니다. 덮어쓰기는 지원하지 않습니다.'
+ko['setup.ciWorkflowExistingExactMatch'] = '기존 워크플로가 이번에 생성된 프리뷰와 바이트 단위로 정확히 일치합니다.'
+ko['setup.ciWorkflowExistingDifferent'] = '기존 워크플로가 이번에 생성된 프리뷰와 바이트 단위로 다릅니다.'
+ko['setup.ciWorkflowExistingUnavailable'] = '기존 워크플로를 안전하게 비교할 수 없습니다.'
 ko['setup.ciWorkflowIgnored'] = 'Workflow 경로가 Git에서 ignore되어 있습니다.'
 ko['setup.ciWorkflowDirty'] = 'Workflow를 생성하려면 저장소가 clean 상태여야 합니다.'
 ko['setup.ciWorkflowUnsafe'] = 'Workflow 대상을 사용할 수 없습니다.'

@@ -123,27 +123,30 @@ describe('CIWorkflowPreview', () => {
     rerender(<I18nProvider><CIWorkflowPreview repositoryIdentity="repo-2" /></I18nProvider>)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('code')).not.toBeInTheDocument()
-    resolve(new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    resolve(new Response(JSON.stringify({ ...response, write: { status: 'exists' }, existing: { comparison: 'different' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     await waitFor(() => expect(screen.queryByRole('code')).not.toBeInTheDocument())
+    expect(screen.queryByText('Existing workflow differs byte-for-byte from this generated preview.')).not.toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps preview through locale changes without another request', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse(response)))
+  it('switches the localized comparison from EN to KO without another request', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status: 'exists' }, existing: { comparison: 'different' } })))
     render(<I18nProvider><LanguageSelector /><CIWorkflowPreview repositoryIdentity="repo-1" /></I18nProvider>)
     await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
-    await waitFor(() => expect(document.querySelector('.ci-workflow-preview-yaml code')).toBeInTheDocument())
+    expect(await screen.findByText('Existing workflow differs byte-for-byte from this generated preview.')).toBeInTheDocument()
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Select language' }), 'ko')
+    expect(await screen.findByText('기존 워크플로가 이번에 생성된 프리뷰와 바이트 단위로 다릅니다.')).toBeInTheDocument()
     expect(document.querySelector('.ci-workflow-preview-yaml code')?.textContent).toBe(content)
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('shows only a generic localized error when the server response is malformed', async () => {
-    const payload = { ...response, privatePath: 'C:\\secret', stdout: 'binary path', stderr: 'secret-value', workflow: { ...response.workflow, secretValue: 'OPENAI_REAL_SECRET' } }
+    const payload = { ...response, write: { status: 'exists' }, existing: { comparison: 'different', content: 'EXISTING_PRIVATE_WORKFLOW_MARKER_DO_NOT_EXPOSE' }, privatePath: 'C:\\secret', stdout: 'binary path', stderr: 'secret-value', workflow: { ...response.workflow, secretValue: 'OPENAI_REAL_SECRET' } }
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse(payload)))
     renderPreview()
     await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('The CI workflow preview could not be prepared.')
+    expect(document.body.textContent).not.toContain('EXISTING_PRIVATE_WORKFLOW_MARKER_DO_NOT_EXPOSE')
     expect(document.body.textContent).not.toContain('C:\\secret')
     expect(document.body.textContent).not.toContain('binary path')
     expect(document.body.textContent).not.toContain('secret-value')
@@ -164,7 +167,7 @@ describe('CIWorkflowPreview', () => {
 
   it('shows create-only eligibility messages and no create CTA for blocked states', async () => {
     for (const status of ['exists', 'unsafe', 'ignored', 'dirty'] as const) {
-      vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status } })))
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status }, ...(status === 'exists' ? { existing: { comparison: 'exact-match' } } : {}) })))
       renderPreview()
       await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
       await screen.findByText('.github/workflows/roborev.yml')
@@ -173,6 +176,37 @@ describe('CIWorkflowPreview', () => {
       cleanup()
       vi.restoreAllMocks()
     }
+  })
+
+  it('renders each neutral existing-workflow byte comparison without mutation CTAs', async () => {
+    const cases = [
+      ['exact-match', 'Existing workflow exactly matches this generated preview.'],
+      ['different', 'Existing workflow differs byte-for-byte from this generated preview.'],
+      ['unavailable', 'The existing workflow could not be compared safely.'],
+    ] as const
+    for (const [comparison, message] of cases) {
+      const clipboard = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+      vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status: 'exists' }, existing: { comparison } })))
+      renderPreview()
+      await userEvent.click(screen.getByRole('button', { name: 'Generate Preview' }))
+      expect(await screen.findByText(message)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /Create Workflow|Overwrite|Update|Replace|Show Diff|View existing|Sync|Reset/i })).not.toBeInTheDocument()
+      expect(document.querySelector('.ci-workflow-preview-yaml code')?.textContent).toBe(content)
+      await userEvent.click(screen.getByRole('button', { name: 'Copy' }))
+      expect(clipboard).toHaveBeenCalledWith(content)
+      expect(screen.getByRole('button', { name: /Copied/ })).toBeInTheDocument()
+      cleanup()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('keeps the comparison localized without another request', async () => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'ko')
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => jsonResponse({ ...response, write: { status: 'exists' }, existing: { comparison: 'different' } })))
+    renderPreview()
+    await userEvent.click(screen.getByRole('button', { name: '미리보기 생성' }))
+    expect(await screen.findByText('기존 워크플로가 이번에 생성된 프리뷰와 바이트 단위로 다릅니다.')).toBeInTheDocument()
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('opens confirmation without network, cancels without execute, and posts only the token once', async () => {

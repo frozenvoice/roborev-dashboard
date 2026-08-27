@@ -29,6 +29,11 @@ type ciWorkflowPreviewDTO struct {
 	Target             string                       `json:"target"`
 	Workflow           ciWorkflowPreviewWorkflowDTO `json:"workflow"`
 	Write              ciWorkflowWriteDTO           `json:"write"`
+	Existing           *ciWorkflowExistingDTO       `json:"existing,omitempty"`
+}
+
+type ciWorkflowExistingDTO struct {
+	Comparison string `json:"comparison"`
 }
 
 // ciWorkflowWriteDTO is an allowlisted wire shape. Available is the only
@@ -97,11 +102,16 @@ func (s *Server) ciWorkflowPreview(w http.ResponseWriter, r *http.Request) {
 	workflow.SHA256 = hex.EncodeToString(digest[:])
 
 	write := ciWorkflowWriteDTO{Status: "unsafe"}
+	var existing *ciWorkflowExistingDTO
 	if s.CIWorkflowManagement != nil && s.ciWorkflowWrites != nil {
 		state, stateErr := s.Registry.InspectCIWorkflow(r.Context(), identity)
 		plan, planErr := s.CIWorkflowManagement.Plan(r.Context(), repo.Path)
 		status := ciWorkflowWriteStatus(state, stateErr, plan, planErr, repo.Path)
 		write.Status = status
+		if status == "exists" {
+			comparison := s.CIWorkflowManagement.CompareExisting(r.Context(), plan, []byte(workflow.Content))
+			existing = &ciWorkflowExistingDTO{Comparison: string(comparison)}
+		}
 		if status == "available" {
 			expires := s.ciWorkflowWrites.expiresAt()
 			record := ciWorkflowWriteRecord{
@@ -128,6 +138,7 @@ func (s *Server) ciWorkflowPreview(w http.ResponseWriter, r *http.Request) {
 		Target:             ciworkflowpreview.WorkflowTarget,
 		Workflow:           ciWorkflowPreviewWorkflowDTO{Content: workflow.Content, SHA256: workflow.SHA256},
 		Write:              write,
+		Existing:           existing,
 	})
 }
 

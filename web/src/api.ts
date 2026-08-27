@@ -244,7 +244,7 @@ export type GitHookStatus = {
   postRewrite: { status: GitHookPostRewriteStatus }
 }
 
-export type CIWorkflowPreview = {
+type CIWorkflowPreviewBase = {
   version: 'v0.64.0'
   repositoryIdentity: string
   target: '.github/workflows/roborev.yml'
@@ -252,18 +252,26 @@ export type CIWorkflowPreview = {
     content: string
     sha256: string
   }
-  write: CIWorkflowWrite
 }
+
+export type CIWorkflowExistingComparison = 'exact-match' | 'different' | 'unavailable'
+export type CIWorkflowExisting = { comparison: CIWorkflowExistingComparison }
+
+export type CIWorkflowPreview =
+  | (CIWorkflowPreviewBase & { write: { status: 'exists' }; existing: CIWorkflowExisting })
+  | (CIWorkflowPreviewBase & { write: Exclude<CIWorkflowWrite, { status: 'exists' }>; existing?: never })
 
 export type CIWorkflowWrite =
   | { status: 'available'; token: string; expiresAt: string }
-  | { status: 'exists' | 'unsafe' | 'ignored' | 'dirty' }
+  | { status: 'exists' }
+  | { status: 'unsafe' | 'ignored' | 'dirty' }
 
 export type CIWorkflowExecuteResult = { status: 'verified-created' | 'failed-unverified' }
 
 const ciWorkflowVersion = 'v0.64.0' as const
 const ciWorkflowTarget = '.github/workflows/roborev.yml' as const
 const ciWorkflowMaxBytes = 256 * 1024
+const ciWorkflowExistingComparisons: readonly CIWorkflowExistingComparison[] = ['exact-match', 'different', 'unavailable']
 
 function validUtf8WorkflowContent(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0) return false
@@ -287,12 +295,18 @@ function validUtf8WorkflowContent(value: unknown): value is string {
 /** Normalize the strict, read-only CI workflow preview DTO. */
 export function normalizeCIWorkflowPreview(value: unknown, expectedRepositoryIdentity?: string): CIWorkflowPreview | null {
   const root = objectValue(value)
-  if (!root || (Object.getPrototypeOf(root) !== Object.prototype && Object.getPrototypeOf(root) !== null) || Object.keys(root).some(key => !['version', 'repositoryIdentity', 'target', 'workflow', 'write'].includes(key)) || !['version', 'repositoryIdentity', 'target', 'workflow', 'write'].every(key => Object.prototype.hasOwnProperty.call(root, key))) return null
+  if (!root || (Object.getPrototypeOf(root) !== Object.prototype && Object.getPrototypeOf(root) !== null) || Object.keys(root).some(key => !['version', 'repositoryIdentity', 'target', 'workflow', 'write', 'existing'].includes(key)) || !['version', 'repositoryIdentity', 'target', 'workflow', 'write'].every(key => Object.prototype.hasOwnProperty.call(root, key))) return null
   if (!root || root.version !== ciWorkflowVersion || root.target !== ciWorkflowTarget || typeof root.repositoryIdentity !== 'string' || !root.repositoryIdentity.trim() || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity)) return null
   const workflow = exactObject(root.workflow, ['content', 'sha256'])
   if (!workflow || !validUtf8WorkflowContent(workflow.content) || typeof workflow.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(workflow.sha256)) return null
   const write = normalizeCIWorkflowWrite(root.write)
   if (!write) return null
+  if (write.status === 'exists') {
+    const existing = exactObject(root.existing, ['comparison'])
+    if (!existing || typeof existing.comparison !== 'string' || !ciWorkflowExistingComparisons.includes(existing.comparison as CIWorkflowExistingComparison)) return null
+    return { version: ciWorkflowVersion, repositoryIdentity: root.repositoryIdentity, target: ciWorkflowTarget, workflow: { content: workflow.content, sha256: workflow.sha256 }, write, existing: { comparison: existing.comparison as CIWorkflowExistingComparison } }
+  }
+  if (Object.prototype.hasOwnProperty.call(root, 'existing')) return null
   return { version: ciWorkflowVersion, repositoryIdentity: root.repositoryIdentity, target: ciWorkflowTarget, workflow: { content: workflow.content, sha256: workflow.sha256 }, write }
 }
 

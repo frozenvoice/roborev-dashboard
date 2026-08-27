@@ -113,7 +113,10 @@ export function CIWorkflowPreview({ repositoryIdentity = '' }: CIWorkflowPreview
     // from the retained display model as well; the server remains responsible
     // for single-use enforcement.
     setWriteConsumed(true)
-    setPreview(current => current && current.write.status === 'available' ? { ...current, write: { status: 'unsafe' } } : current)
+    setPreview(current => {
+      if (!current || current.write.status !== 'available') return current
+      return { version: current.version, repositoryIdentity: current.repositoryIdentity, target: current.target, workflow: current.workflow, write: { status: 'unsafe' } }
+    })
     setDialogOpen(false)
     setExecuteResult(null)
     setExecutePhase('executing')
@@ -146,7 +149,12 @@ export function CIWorkflowPreview({ repositoryIdentity = '' }: CIWorkflowPreview
       <dl className="ci-workflow-preview-facts"><div><dt>{t('setup.ciWorkflowPreviewTarget')}</dt><dd><code>{visiblePreview.target}</code></dd></div><div><dt>{t('setup.ciWorkflowPreviewVersion')}</dt><dd><code>{visiblePreview.version}</code></dd></div></dl>
       <p className="ci-workflow-preview-warning" role="note"><AlertTriangle size={15} aria-hidden="true" /><span>{t('setup.ciWorkflowPreviewSupplyChainWarning')}</span></p>
       {writeStatus === 'available' && <div className="ci-workflow-preview-write available"><p>{t('setup.ciWorkflowCreateAvailable')}</p><button type="button" className="button primary" onClick={openCreateDialog}><Check size={14} />{t('setup.ciWorkflowCreate')}</button></div>}
-      {writeStatus === 'exists' && <p className="ci-workflow-preview-write blocked" role="status">{t('setup.ciWorkflowAlreadyExists')}</p>}
+      {writeStatus === 'exists' && <>
+        <p className="ci-workflow-preview-write blocked" role="status">{t('setup.ciWorkflowAlreadyExists')}</p>
+        {visiblePreview.existing?.comparison === 'exact-match' && <p className="ci-workflow-preview-comparison" role="status">{t('setup.ciWorkflowExistingExactMatch')}</p>}
+        {visiblePreview.existing?.comparison === 'different' && <p className="ci-workflow-preview-comparison" role="status">{t('setup.ciWorkflowExistingDifferent')}</p>}
+        {visiblePreview.existing?.comparison === 'unavailable' && <p className="ci-workflow-preview-comparison" role="status">{t('setup.ciWorkflowExistingUnavailable')}</p>}
+      </>}
       {writeStatus === 'ignored' && <p className="ci-workflow-preview-write blocked" role="status">{t('setup.ciWorkflowIgnored')}</p>}
       {writeStatus === 'dirty' && <p className="ci-workflow-preview-write blocked" role="status">{t('setup.ciWorkflowDirty')}</p>}
       {writeStatus === 'unsafe' && <p className="ci-workflow-preview-write blocked" role="status">{t('setup.ciWorkflowUnsafe')}</p>}

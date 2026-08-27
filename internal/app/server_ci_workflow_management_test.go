@@ -254,6 +254,68 @@ func TestCIWorkflowManagementPreviewStatusAndTokenShapes(t *testing.T) {
 	}
 }
 
+func TestCIWorkflowManagementExistingComparisonIsSanitizedAndTokenFree(t *testing.T) {
+	content := []byte("name: RoboRev\n")
+	for _, test := range []struct {
+		name     string
+		existing []byte
+		want     string
+	}{
+		{name: "exact", existing: content, want: "exact-match"},
+		{name: "different", existing: []byte("name: Other\n"), want: "different"},
+		{name: "private marker", existing: []byte("name: RoboRev\nEXISTING_PRIVATE_WORKFLOW_MARKER_DO_NOT_EXPOSE\n"), want: "different"},
+		{name: "over bound", existing: append([]byte("name: RoboRev\n"), bytes.Repeat([]byte("x"), int(ciworkflowmanagement.MaxBytes+1))...), want: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, inspector, identity, transport := newCIManagementHTTPServerWithTransport(t, content)
+			target := filepath.Join(inspector.root, ".github", "workflows", "roborev.yml")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, test.existing, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			quoted, _ := json.Marshal(identity)
+			recorder := managementPost(server, "/api/ci-workflow/preview", `{"repositoryIdentity":`+string(quoted)+`}`)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if transport.calls.Load() != 1 {
+				t.Fatalf("generation calls=%d", transport.calls.Load())
+			}
+			var dto struct {
+				Workflow struct {
+					Content string `json:"content"`
+				} `json:"workflow"`
+				Write struct {
+					Status string `json:"status"`
+					Token  string `json:"token"`
+				} `json:"write"`
+				Existing *struct {
+					Comparison string `json:"comparison"`
+				} `json:"existing"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &dto); err != nil {
+				t.Fatal(err)
+			}
+			if dto.Write.Status != "exists" || dto.Write.Token != "" || dto.Existing == nil || dto.Existing.Comparison != test.want {
+				t.Fatalf("dto=%#v", dto)
+			}
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(recorder.Body.Bytes(), &raw); err != nil {
+				t.Fatal(err)
+			}
+			var existingRaw map[string]json.RawMessage
+			if err := json.Unmarshal(raw["existing"], &existingRaw); err != nil || len(existingRaw) != 1 {
+				t.Fatalf("existing shape=%s err=%v", raw["existing"], err)
+			}
+			if dto.Workflow.Content != string(content) || strings.Contains(recorder.Body.String(), "EXISTING_PRIVATE_WORKFLOW_MARKER_DO_NOT_EXPOSE") || strings.Contains(recorder.Body.String(), inspector.root) {
+				t.Fatalf("private content/path leaked: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func previewBody(recorder *httptest.ResponseRecorder) []byte { return recorder.Body.Bytes() }
 
 func TestCIWorkflowManagementRejectsReplayAndDoesNotUseRoboRev(t *testing.T) {

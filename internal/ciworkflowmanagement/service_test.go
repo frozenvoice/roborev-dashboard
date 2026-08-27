@@ -38,6 +38,9 @@ type fakeFS struct {
 	entries      map[string]fakeEntry
 	aliases      map[string]string
 	lstatCalls   map[string]int
+	openCalls    map[string]int
+	openErr      error
+	openHook     func(string)
 	mkdirCalls   []string
 	createCalls  int
 	createMode   os.FileMode
@@ -58,7 +61,7 @@ type writeStep struct {
 }
 
 func newFakeFS() *fakeFS {
-	f := &fakeFS{entries: map[string]fakeEntry{}, aliases: map[string]string{}, lstatCalls: map[string]int{}}
+	f := &fakeFS{entries: map[string]fakeEntry{}, aliases: map[string]string{}, lstatCalls: map[string]int{}, openCalls: map[string]int{}}
 	f.addDir(`C:\`, "volume")
 	f.addDir(`C:\repo`, "repo")
 	return f
@@ -90,6 +93,13 @@ func (f *fakeFS) Lstat(path string) (os.FileInfo, error) {
 
 func (f *fakeFS) Open(path string) (pathsafety.File, error) {
 	path = filepath.Clean(path)
+	f.openCalls[path]++
+	if f.openHook != nil {
+		f.openHook(path)
+	}
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
 	e, ok := f.entries[path]
 	if !ok || e.info.IsDir() {
 		return nil, os.ErrNotExist
@@ -271,6 +281,161 @@ func TestPlanClassifiesAbsentExistingAndUnsafeTargets(t *testing.T) {
 			p, _ := planFor(t, f)
 			if p.Status() != test.status || p.Target() != WorkflowTarget {
 				t.Fatalf("status=%q target=%q", p.Status(), p.Target())
+			}
+		})
+	}
+}
+
+func existingPlanFor(t *testing.T, content []byte) (Plan, *Service, *fakeFS) {
+	t.Helper()
+	f := newFakeFS()
+	f.addDir(`C:\repo\.github`, "gh")
+	f.addDir(`C:\repo\.github\workflows`, "wf")
+	f.addFile(`C:\repo\.github\workflows\roborev.yml`, content, "workflow")
+	p, s := planFor(t, f)
+	return p, s, f
+}
+
+func TestCompareExistingUsesExactBytesAndAllowlistedResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing []byte
+		preview  []byte
+		want     ExistingComparison
+	}{
+		{name: "exact", existing: []byte("name: roborev\n"), preview: []byte("name: roborev\n"), want: ExistingExactMatch},
+		{name: "one character", existing: []byte("name: roborev\n"), preview: []byte("name: RoboRev\n"), want: ExistingDifferent},
+		{name: "trailing newline", existing: []byte("name: roborev"), preview: []byte("name: roborev\n"), want: ExistingDifferent},
+		{name: "LF CRLF", existing: []byte("name: roborev\r\n"), preview: []byte("name: roborev\n"), want: ExistingDifferent},
+		{name: "comment only", existing: []byte("name: roborev\n# existing\n"), preview: []byte("name: roborev\n# generated\n"), want: ExistingDifferent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			plan, service, f := existingPlanFor(t, test.existing)
+			beforeOpen := f.openCalls[plan.target.path]
+			if got := service.CompareExisting(context.Background(), plan, test.preview); got != test.want {
+				t.Fatalf("comparison=%q want=%q", got, test.want)
+			}
+			if got := f.openCalls[plan.target.path] - beforeOpen; got != 1 {
+				t.Fatalf("target opened %d times beyond Plan", got)
+			}
+		})
+	}
+}
+
+func TestCompareExistingFailsClosedForBoundedReadErrorsAndRaces(t *testing.T) {
+	content := []byte("name: roborev\n")
+	for _, test := range []struct {
+		name  string
+		setup func(*fakeFS)
+	}{
+		{name: "oversized", setup: func(f *fakeFS) {
+			f.entries[`C:\repo\.github\workflows\roborev.yml`] = fakeEntry{info: fakeInfo{name: "roborev.yml", size: MaxBytes + 1, mode: 0o644}, data: bytes.Repeat([]byte("x"), int(MaxBytes)+1), id: "workflow"}
+		}},
+		{name: "read error", setup: func(f *fakeFS) { f.openErr = errors.New("read failed") }},
+		{name: "target identity replacement", setup: func(f *fakeFS) {
+			f.openHook = func(path string) { e := f.entries[path]; e.id = "replacement"; f.entries[path] = e; f.openHook = nil }
+		}},
+		{name: "content fingerprint drift", setup: func(f *fakeFS) {
+			f.openHook = func(path string) {
+				e := f.entries[path]
+				e.data = []byte("name: changed\n")
+				e.info.size = int64(len(e.data))
+				f.entries[path] = e
+				f.openHook = nil
+			}
+		}},
+		{name: "workflows identity drift", setup: func(f *fakeFS) {
+			f.openHook = func(string) {
+				e := f.entries[`C:\repo\.github\workflows`]
+				e.id = "wf-replaced"
+				f.entries[`C:\repo\.github\workflows`] = e
+				f.openHook = nil
+			}
+		}},
+		{name: "root identity drift", setup: func(f *fakeFS) {
+			f.openHook = func(string) {
+				e := f.entries[`C:\repo`]
+				e.id = "root-replaced"
+				f.entries[`C:\repo`] = e
+				f.openHook = nil
+			}
+		}},
+		{name: "github identity drift", setup: func(f *fakeFS) {
+			f.openHook = func(string) {
+				e := f.entries[`C:\repo\.github`]
+				e.id = "github-replaced"
+				f.entries[`C:\repo\.github`] = e
+				f.openHook = nil
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, service, f := existingPlanFor(t, content)
+			test.setup(f)
+			if got := service.CompareExisting(context.Background(), plan, content); got != ExistingUnavailable {
+				t.Fatalf("comparison=%q", got)
+			}
+		})
+	}
+}
+
+func TestCompareExistingDoesNotReadAbsentUnsafeOrCanceledTargets(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		setup  func(*fakeFS)
+		cancel bool
+	}{
+		{name: "absent", setup: func(*fakeFS) {}},
+		{name: "unsafe target", setup: func(f *fakeFS) {
+			f.addDir(`C:\repo\.github`, "gh")
+			f.addDir(`C:\repo\.github\workflows`, "wf")
+			f.addFile(`C:\repo\.github\workflows\roborev.yml`, []byte("x"), "link")
+			f.aliases[`C:\repo\.github\workflows\roborev.yml`] = `C:\elsewhere\workflow.yml`
+		}},
+		{name: "target directory", setup: func(f *fakeFS) {
+			f.addDir(`C:\repo\.github`, "gh")
+			f.addDir(`C:\repo\.github\workflows`, "wf")
+			f.addDir(`C:\repo\.github\workflows\roborev.yml`, "target-dir")
+		}},
+		{name: "target reparse", setup: func(f *fakeFS) {
+			f.addDir(`C:\repo\.github`, "gh")
+			f.addDir(`C:\repo\.github\workflows`, "wf")
+			f.addFile(`C:\repo\.github\workflows\roborev.yml`, []byte("x"), "target-reparse")
+			e := f.entries[`C:\repo\.github\workflows\roborev.yml`]
+			e.reparse = true
+			f.entries[`C:\repo\.github\workflows\roborev.yml`] = e
+		}},
+		{name: "unsafe workflows ancestor", setup: func(f *fakeFS) {
+			f.addDir(`C:\repo\.github`, "gh")
+			f.addDir(`C:\repo\.github\workflows`, "wf")
+			e := f.entries[`C:\repo\.github\workflows`]
+			e.reparse = true
+			f.entries[`C:\repo\.github\workflows`] = e
+			f.addFile(`C:\repo\.github\workflows\roborev.yml`, []byte("x"), "workflow")
+		}},
+		{name: "unsafe ancestor", setup: func(f *fakeFS) { f.addFile(`C:\repo\.github`, nil, "not-dir") }},
+		{name: "canceled", setup: func(f *fakeFS) {
+			f.addDir(`C:\repo\.github`, "gh")
+			f.addDir(`C:\repo\.github\workflows`, "wf")
+			f.addFile(`C:\repo\.github\workflows\roborev.yml`, []byte("x"), "workflow")
+		}, cancel: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFakeFS()
+			test.setup(f)
+			plan, service := planFor(t, f)
+			ctx := context.Background()
+			if test.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			if got := service.CompareExisting(ctx, plan, []byte("x")); got != ExistingUnavailable {
+				t.Fatalf("comparison=%q", got)
+			}
+			if !test.cancel && f.openCalls[`C:\repo\.github\workflows\roborev.yml`] != 0 {
+				t.Fatalf("target opened %d times", f.openCalls[`C:\repo\.github\workflows\roborev.yml`])
 			}
 		})
 	}

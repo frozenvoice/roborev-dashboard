@@ -44,7 +44,21 @@ describe('CI workflow preview API contract', () => {
   })
 
   it('requires exact write availability unions and rejects private fields', () => {
-    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' } }, 'repo-1')?.write).toEqual({ status: 'exists' })
+    for (const comparison of ['exact-match', 'different', 'unavailable'] as const) {
+      const value = normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison } }, 'repo-1')
+      expect(value?.write).toEqual({ status: 'exists' })
+      expect(value?.existing).toEqual({ comparison })
+    }
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison: 'unknown' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison: 'different', content: 'private' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison: 'different', path: 'C:\\secret' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison: 'different', sha256: 'a'.repeat(64) } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'exists' }, existing: { comparison: 'different', diff: 'private' } }, 'repo-1')).toBeNull()
+    expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status: 'available' }, existing: { comparison: 'exact-match' } }, 'repo-1')).toBeNull()
+    for (const status of ['dirty', 'ignored', 'unsafe'] as const) {
+      expect(normalizeCIWorkflowPreview({ ...ciPreview, write: { status }, existing: { comparison: 'unavailable' } }, 'repo-1')).toBeNull()
+    }
     for (const write of [
       { status: 'available', token: 'x', expiresAt: '2099-01-01T00:00:00.000Z', extra: true },
       { status: 'available', token: '', expiresAt: '2099-01-01T00:00:00.000Z' },
