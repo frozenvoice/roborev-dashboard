@@ -116,6 +116,10 @@ func TestRepositorySetupReadinessReturnsExactNestedPathFreeDTO(t *testing.T) {
 			t.Fatalf("component %q missing status", key)
 		}
 	}
+	pathFreeAlias, ok := body["repositoryIdentity"].(string)
+	if !ok || !snapshotIgnoreAliasPattern.MatchString(pathFreeAlias) || pathFreeAlias == identity || strings.Contains(pathFreeAlias, root) {
+		t.Fatalf("readiness identity is not a path-free snapshot alias: %q legacy=%q root=%q", pathFreeAlias, identity, root)
+	}
 	privateMarkers := []string{root, `C:\Users\private\source\secret-project`, `C:\Users\private\.roborev`, `C:\fake\very-secret\roborev.exe`, "PRIVATE_SNAPSHOT_DIR_MARKER", "PRIVATE_GITIGNORE_MARKER", "PRIVATE_STDERR_MARKER", "stderr", "command"}
 	for _, marker := range privateMarkers {
 		if strings.Contains(response.Body.String(), marker) {

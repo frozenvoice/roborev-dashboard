@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeCIWorkflow, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRuntimeDiagnostics, setCSRF, validateRepositoryRenameName } from './api'
+import { executeCIWorkflow, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
 const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
@@ -147,8 +147,10 @@ describe('repository inventory API normalization', () => {
 })
 
 describe('repository setup readiness API normalization', () => {
+  const alias = 'A'.repeat(43)
+  const otherAlias = 'B'.repeat(43)
   const valid = {
-    version: 'v0.64.0', repositoryIdentity: 'opaque-repository', overall: 'ready' as const,
+    version: 'v0.64.0', repositoryIdentity: alias, overall: 'ready' as const,
     configuration: { status: 'ready' as const }, snapshot: { status: 'ready' as const },
     gitHooks: { status: 'ready' as const }, daemon: { status: 'online' as const }, tracking: { status: 'tracked' as const },
   }
@@ -175,12 +177,12 @@ describe('repository setup readiness API normalization', () => {
     setCSRF('test-csrf')
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(valid), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
-    await expect(fetchRepositorySetupReadiness(valid.repositoryIdentity)).resolves.toEqual(valid)
+    await expect(fetchRepositorySetupReadiness('legacy-selected-repository')).resolves.toEqual(valid)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(path).toBe('/api/repositories/setup-readiness')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(String(init.body))).toEqual({ repositoryIdentity: valid.repositoryIdentity })
+    expect(JSON.parse(String(init.body))).toEqual({ repositoryIdentity: 'legacy-selected-repository' })
     expect(Object.keys(JSON.parse(String(init.body)))).toEqual(['repositoryIdentity'])
     expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('test-csrf')
   })
@@ -206,7 +208,63 @@ describe('repository setup readiness API normalization', () => {
       Object.assign(Object.create({ extra: true }), valid),
     ]
     for (const value of invalid) expect(normalizeRepositorySetupReadiness(value, valid.repositoryIdentity)).toBeNull()
-    expect(normalizeRepositorySetupReadiness(valid, 'other-repository')).toBeNull()
+    expect(normalizeRepositorySetupReadiness({ ...valid, repositoryIdentity: otherAlias }, 'legacy-selected-repository')).toEqual({ ...valid, repositoryIdentity: otherAlias })
+  })
+})
+
+describe('snapshot ignore management API contract', () => {
+  const alias = 'A'.repeat(43)
+  const preview = {
+    version: 'v0.64.0', repositoryIdentity: alias, action: 'append-snapshot-ignore', target: '.gitignore',
+    summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z',
+  } as const
+
+  it('accepts only the exact content-free preview DTO and server-issued alias', () => {
+    expect(normalizeSnapshotIgnorePreview(preview, alias)).toEqual(preview)
+    for (const value of [
+      { ...preview, repositoryIdentity: 'repo-a' },
+      { ...preview, repositoryIdentity: 'A'.repeat(42) },
+      { ...preview, action: 'replace-snapshot-ignore' },
+      { ...preview, target: 'C:\\secret\\.gitignore' },
+      { ...preview, summary: 'private' },
+      { ...preview, token: '' },
+      { ...preview, token: 'secret\u0000token' },
+      { ...preview, expiresAt: 'not-a-date' },
+      { ...preview, pattern: 'PRIVATE_SNAPSHOT_PATH' },
+      { ...preview, content: 'PRIVATE_GITIGNORE_MARKER_DO_NOT_EXPOSE' },
+      { ...preview, diff: 'private' },
+      { ...preview, command: 'private' },
+    ]) expect(normalizeSnapshotIgnorePreview(value, alias)).toBeNull()
+    expect(normalizeSnapshotIgnorePreview({ ...preview, repositoryIdentity: 'B'.repeat(43) }, alias)).toBeNull()
+  })
+
+  it('POSTs exactly the opaque alias for preview and exactly the token for execute', async () => {
+    setCSRF('test-csrf')
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'verified-success' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchSnapshotIgnorePreview(alias)).resolves.toEqual(preview)
+    await expect(executeSnapshotIgnore(preview.token)).resolves.toEqual({ status: 'verified-success' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [previewPath, previewInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(previewPath).toBe('/api/snapshot-ignore/preview')
+    expect(previewInit.method).toBe('POST')
+    expect(JSON.parse(String(previewInit.body))).toEqual({ repositoryIdentity: alias })
+    expect(Object.keys(JSON.parse(String(previewInit.body)))).toEqual(['repositoryIdentity'])
+    const [executePath, executeInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(executePath).toBe('/api/snapshot-ignore/execute')
+    expect(executeInit.method).toBe('POST')
+    expect(JSON.parse(String(executeInit.body))).toEqual({ token: preview.token })
+    expect(Object.keys(JSON.parse(String(executeInit.body)))).toEqual(['token'])
+    expect(new Headers(executeInit.headers).get('X-CSRF-Token')).toBe('test-csrf')
+  })
+
+  it('strictly normalizes execute results and rejects private fields', () => {
+    expect(normalizeSnapshotIgnoreExecuteResult({ status: 'verified-success' })).toEqual({ status: 'verified-success' })
+    expect(normalizeSnapshotIgnoreExecuteResult({ status: 'failed-unverified' })).toEqual({ status: 'failed-unverified' })
+    expect(normalizeSnapshotIgnoreExecuteResult({ status: 'verified-success', token: 'secret' })).toBeNull()
+    expect(normalizeSnapshotIgnoreExecuteResult({ status: 'error' })).toBeNull()
   })
 })
 

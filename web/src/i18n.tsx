@@ -479,6 +479,24 @@ export const en = {
   'setup.repositoryReadinessTrackingTracked': 'This repository is tracked by RoboRev.',
   'setup.repositoryReadinessTrackingNotTracked': 'This repository is not tracked by RoboRev.',
   'setup.repositoryReadinessTrackingUnavailable': 'RoboRev tracking could not be verified.',
+  'setup.snapshotIgnoreAdd': 'Add Ignore Rule',
+  'setup.snapshotIgnoreTitle': 'Add Snapshot Ignore Rule',
+  'setup.snapshotIgnoreDescription': 'Review this safe, append-only change before confirming it.',
+  'setup.snapshotIgnoreTarget': 'Target',
+  'setup.snapshotIgnoreWillDo': 'Will do',
+  'setup.snapshotIgnoreAction': 'Append the RoboRev snapshot ignore rule.',
+  'setup.snapshotIgnoreWillNotDo': 'Will not do',
+  'setup.snapshotIgnoreNoMutation': 'Modify existing lines, overwrite the file, stage, commit, or push.',
+  'setup.snapshotIgnoreConfirmationNote': 'Only the repository’s .gitignore file is eligible for this append-only update.',
+  'setup.snapshotIgnoreConfirm': 'Confirm and append',
+  'setup.snapshotIgnoreClose': 'Close Add Snapshot Ignore Rule dialog',
+  'setup.snapshotIgnorePreviewing': 'Preparing Snapshot Ignore preview…',
+  'setup.snapshotIgnorePreviewFailed': 'Snapshot Ignore preview could not be prepared. Check Setup again before trying again.',
+  'setup.snapshotIgnoreApplying': 'Applying Snapshot Ignore update…',
+  'setup.snapshotIgnoreSuccess': 'Snapshot ignore rule added.',
+  'setup.snapshotIgnoreSuccessNext': 'Review and commit .gitignore with Git.',
+  'setup.snapshotIgnoreSuccessCheck': 'Check Setup again to verify all repository setup.',
+  'setup.snapshotIgnoreFailure': 'Snapshot ignore update could not be verified. Inspect .gitignore before retrying.',
   'setup.runtime': 'RoboRev Runtime',
   'setup.daemon': 'Daemon',
   'setup.model': 'Model',
@@ -1231,6 +1249,24 @@ ko['setup.repositoryReadinessDaemonUnavailable'] = 'RoboRev 데몬을 확인하�
 ko['setup.repositoryReadinessTrackingTracked'] = '이 저장소는 RoboRev에서 추적합니다.'
 ko['setup.repositoryReadinessTrackingNotTracked'] = '이 저장소는 RoboRev에서 추적하지 않습니다.'
 ko['setup.repositoryReadinessTrackingUnavailable'] = 'RoboRev 추적을 확인하지 못했습니다.'
+ko['setup.snapshotIgnoreAdd'] = 'Ignore 규칙 추가'
+ko['setup.snapshotIgnoreTitle'] = '스냅샷 Ignore 규칙 추가'
+ko['setup.snapshotIgnoreDescription'] = '확인하기 전에 이 안전한 append-only 변경을 검토하세요.'
+ko['setup.snapshotIgnoreTarget'] = '대상'
+ko['setup.snapshotIgnoreWillDo'] = '수행하는 작업'
+ko['setup.snapshotIgnoreAction'] = 'RoboRev 스냅샷 Ignore 규칙을 추가합니다.'
+ko['setup.snapshotIgnoreWillNotDo'] = '수행하지 않는 작업'
+ko['setup.snapshotIgnoreNoMutation'] = '기존 줄을 수정하거나 파일을 덮어쓰거나 stage, commit, push하지 않습니다.'
+ko['setup.snapshotIgnoreConfirmationNote'] = '이 append-only 업데이트에서는 저장소의 .gitignore 파일만 대상으로 합니다.'
+ko['setup.snapshotIgnoreConfirm'] = '확인하고 추가'
+ko['setup.snapshotIgnoreClose'] = '스냅샷 Ignore 규칙 추가 대화상자 닫기'
+ko['setup.snapshotIgnorePreviewing'] = '스냅샷 Ignore 미리보기 준비 중…'
+ko['setup.snapshotIgnorePreviewFailed'] = '스냅샷 Ignore 미리보기를 준비하지 못했습니다. 설정을 다시 확인한 후 시도하세요.'
+ko['setup.snapshotIgnoreApplying'] = '스냅샷 Ignore 업데이트 적용 중…'
+ko['setup.snapshotIgnoreSuccess'] = '스냅샷 Ignore 규칙을 추가했습니다.'
+ko['setup.snapshotIgnoreSuccessNext'] = 'Git에서 .gitignore를 검토하고 commit하세요.'
+ko['setup.snapshotIgnoreSuccessCheck'] = '모든 저장소 설정을 확인하려면 설정을 다시 확인하세요.'
+ko['setup.snapshotIgnoreFailure'] = '스냅샷 Ignore 업데이트를 검증하지 못했습니다. 다시 시도하기 전에 .gitignore를 확인하세요.'
 ko['stats.costEmpty'] = '이 범위에 비용을 보고할 수 있는 적격 작업이 아직 없습니다.'
 ko['stats.insightsDisabled'] = '이 체크포인트에서는 Guideline Insights가 활성화되지 않았습니다.'
 ko['stats.guidelineTitle'] = 'Guideline Insights'

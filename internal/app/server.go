@@ -35,6 +35,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/runtimecontrol"
 	"github.com/froze/roborev-dashboard/internal/setup"
 	"github.com/froze/roborev-dashboard/internal/setupreadiness"
+	"github.com/froze/roborev-dashboard/internal/snapshotignoremanagement"
 	"github.com/froze/roborev-dashboard/internal/streamrelay"
 	"github.com/froze/roborev-dashboard/internal/webui"
 )
@@ -78,6 +79,9 @@ type Server struct {
 	CIWorkflowManagement *ciworkflowmanagement.Service
 	ciWorkflowWrites     *ciWorkflowWriteStore
 	SetupReadiness       *setupreadiness.Checker
+	SnapshotIgnore       *snapshotignoremanagement.Service
+	snapshotIgnoreKey    [32]byte
+	snapshotIgnoreWrites *snapshotIgnoreWriteStore
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -114,6 +118,10 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 	}
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, err
+	}
+	var snapshotIgnoreKey [32]byte
+	if _, err := rand.Read(snapshotIgnoreKey[:]); err != nil {
 		return nil, err
 	}
 	panels := roborev.NewPanelResolver(registry)
@@ -175,7 +183,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 		ciWorkflow = ciworkflowpreview.NewService(transport)
 	}
 	hookStatus := hookstatus.New(versionProbe, registry, nil)
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), snapshotIgnoreKey: snapshotIgnoreKey, snapshotIgnoreWrites: newSnapshotIgnoreWriteStore(), SnapshotIgnore: snapshotignoremanagement.New(snapshotignoremanagement.OSFileSystem{}), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
 	s.SetupReadiness = newSetupReadinessChecker(service, registry, hookStatus)
 	s.routes()
 	return s, nil
@@ -285,6 +293,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/stats/cost", s.statsCost)
 	s.mux.HandleFunc("GET /api/repository-inventory", s.repositoryInventory)
 	s.mux.HandleFunc("POST /api/repositories/setup-readiness", s.repositorySetupReadiness)
+	s.mux.HandleFunc("POST /api/snapshot-ignore/preview", s.snapshotIgnorePreview)
+	s.mux.HandleFunc("POST /api/snapshot-ignore/execute", s.snapshotIgnoreExecute)
 	s.mux.HandleFunc("GET /api/insights/{id}/result", s.insightsResult)
 	s.mux.HandleFunc("GET /api/insights/{id}", s.insightsStatus)
 	s.mux.HandleFunc("POST /api/configuration/preview", s.mutationAuth(s.configurationPreview))

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -86,6 +87,41 @@ type SnapshotProtection struct {
 	Ignored bool
 }
 
+// SnapshotIgnoreRepositoryState is the bounded, read-only Git evidence used
+// by Snapshot Ignore Management.  Only booleans and validated metadata leave
+// this adapter; command output and filenames are never returned.
+type SnapshotIgnoreRepositoryState struct {
+	Root     string
+	Branch   string
+	Detached bool
+	Head     string
+	Dirty    bool
+	Tracked  bool
+	Ignored  bool
+}
+
+// SnapshotIgnoreState is retained as a concise alias for callers that name
+// the flow rather than the repository.
+type SnapshotIgnoreState = SnapshotIgnoreRepositoryState
+
+// SnapshotIgnoreContinuation is an opaque, single-use continuation for the
+// final check-ignore probe. Its only field is private, so callers can carry it
+// between typed Registry stages without supplying a path, environment, or
+// Git arguments themselves.
+type SnapshotIgnoreContinuation struct {
+	value *snapshotIgnoreContinuation
+}
+
+type snapshotIgnoreContinuation struct {
+	mu       sync.Mutex
+	service  *Service
+	root     string
+	relative string
+	env      []string
+	state    SnapshotIgnoreRepositoryState
+	consumed bool
+}
+
 // SnapshotProbe performs the fixed, read-only Git probes for a validated
 // repository-local snapshot directory. The tracked check intentionally wins
 // over ignore rules because Git can report a tracked path as ignored by a
@@ -100,7 +136,11 @@ func (s *Service) SnapshotProbe(ctx context.Context, root, relative string) (Sna
 	if rootErr != nil || rootResult.ExitCode != 0 {
 		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
 	}
-	resolvedRoot, err := filepath.Abs(filepath.Clean(strings.TrimSpace(rootResult.Stdout)))
+	rootValue := strings.TrimSpace(rootResult.Stdout)
+	if rootValue == "" || strings.ContainsAny(rootValue, "\r\n") {
+		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+	}
+	resolvedRoot, err := filepath.Abs(filepath.Clean(rootValue))
 	if err != nil || !SameRepositoryPath(resolvedRoot, root) {
 		return SnapshotProtection{}, errors.New("snapshot probe unavailable")
 	}
@@ -123,6 +163,136 @@ func (s *Service) SnapshotProbe(ctx context.Context, root, relative string) (Sna
 		return SnapshotProtection{}, nil
 	}
 	return SnapshotProtection{}, errors.New("snapshot probe unavailable")
+}
+
+// InspectSnapshotIgnoreThroughTracked performs only the first five probes of
+// the snapshot-ignore sequence: root, full HEAD, branch, clean status and
+// tracked files. The returned continuation captures the canonical root,
+// relative probe and sanitized environment for the later check-ignore call.
+// Keeping this stage separate makes it impossible for a caller to run
+// check-ignore before deriving/validating the ignore pattern.
+func (s *Service) InspectSnapshotIgnoreThroughTracked(ctx context.Context, root, relative string) (SnapshotIgnoreRepositoryState, SnapshotIgnoreContinuation, error) {
+	if s == nil || s.Runner == nil || strings.TrimSpace(root) == "" || strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) || !filepath.IsLocal(relative) {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	root = filepath.Clean(root)
+	env := s.snapshotGitEnv()
+	rootResult, rootErr := s.runSnapshotGit(ctx, root, env, "rev-parse", "--show-toplevel")
+	if rootErr != nil || rootResult.ExitCode != 0 || rootResult.Stderr != "" {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	rootValue := strings.TrimSpace(rootResult.Stdout)
+	if rootValue == "" || strings.ContainsAny(rootValue, "\r\n") {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	resolvedRoot, err := filepath.Abs(filepath.Clean(rootValue))
+	if err != nil || !SameRepositoryPath(resolvedRoot, root) {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	headResult, headErr := s.runSnapshotGit(ctx, resolvedRoot, env, "rev-parse", "--verify", "HEAD^{commit}")
+	if headErr != nil || headResult.ExitCode != 0 || headResult.Stderr != "" {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	head := strings.TrimSpace(headResult.Stdout)
+	if strings.ContainsAny(head, "\r\n") {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	if !validSnapshotCommitSHA(head) {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	branchResult, branchErr := s.runSnapshotGit(ctx, resolvedRoot, env, "symbolic-ref", "--quiet", "--short", "HEAD")
+	state := SnapshotIgnoreRepositoryState{Root: resolvedRoot, Head: head}
+	if branchResult.ExitCode == 1 {
+		if branchErr == nil || strings.TrimSpace(branchResult.Stdout) != "" || strings.TrimSpace(branchResult.Stderr) != "" {
+			return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+		}
+		state.Detached = true
+		state.Branch = "detached"
+	} else {
+		if branchErr != nil || branchResult.ExitCode != 0 || branchResult.Stderr != "" {
+			return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+		}
+		branch := strings.TrimSpace(branchResult.Stdout)
+		if branch == "" || strings.ContainsAny(branch, "\r\n") || !utf8.ValidString(branch) || hasSnapshotControl(branch) {
+			return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+		}
+		state.Branch = branch
+	}
+	statusResult, statusErr := s.runSnapshotGit(ctx, resolvedRoot, env, "status", "--porcelain=v1", "--untracked-files=normal")
+	if statusErr != nil || statusResult.ExitCode != 0 || statusResult.Stderr != "" {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	state.Dirty = strings.TrimSpace(statusResult.Stdout) != ""
+	trackedResult, trackedErr := s.runSnapshotGit(ctx, resolvedRoot, env, "ls-files", "--", filepath.ToSlash(relative))
+	if trackedErr != nil || trackedResult.ExitCode != 0 || trackedResult.Stderr != "" {
+		return SnapshotIgnoreRepositoryState{}, SnapshotIgnoreContinuation{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	state.Tracked = strings.TrimSpace(trackedResult.Stdout) != ""
+	continuation := SnapshotIgnoreContinuation{value: &snapshotIgnoreContinuation{service: s, root: resolvedRoot, relative: relative, env: append([]string(nil), env...), state: state}}
+	return state, continuation, nil
+}
+
+// FinishSnapshotIgnoreInspection consumes a continuation and runs exactly one
+// check-ignore probe against its captured root/relative/environment. A
+// tracked continuation is rejected without spawning a sixth command.
+func (s *Service) FinishSnapshotIgnoreInspection(ctx context.Context, opaque SnapshotIgnoreContinuation) (SnapshotIgnoreRepositoryState, error) {
+	continuation := opaque.value
+	if s == nil || s.Runner == nil || continuation == nil {
+		return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	continuation.mu.Lock()
+	if continuation.consumed || continuation.service != s {
+		continuation.mu.Unlock()
+		return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	continuation.consumed = true
+	root, relative, env, state := continuation.root, continuation.relative, append([]string(nil), continuation.env...), continuation.state
+	continuation.mu.Unlock()
+	if state.Tracked {
+		return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	probePath := filepath.ToSlash(filepath.Join(relative, ".roborev-ignore-check"))
+	ignoreResult, ignoreErr := s.runSnapshotGit(ctx, root, env, "check-ignore", "--quiet", "--no-index", "--", probePath)
+	if ignoreResult.ExitCode == 0 {
+		if ignoreErr != nil || strings.TrimSpace(ignoreResult.Stdout) != "" || strings.TrimSpace(ignoreResult.Stderr) != "" {
+			return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+		}
+		state.Ignored = true
+	} else if ignoreResult.ExitCode == 1 {
+		if ignoreErr == nil || strings.TrimSpace(ignoreResult.Stdout) != "" || strings.TrimSpace(ignoreResult.Stderr) != "" {
+			return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+		}
+	} else {
+		return SnapshotIgnoreRepositoryState{}, errors.New("snapshot ignore inspection unavailable")
+	}
+	return state, nil
+}
+
+func validSnapshotCommitSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func hasSnapshotControl(value string) bool {
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) runSnapshotGit(ctx context.Context, root string, env []string, args ...string) (proc.Result, error) {

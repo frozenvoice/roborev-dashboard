@@ -5,8 +5,10 @@ import { setCSRF } from './api'
 import { RepositorySetupReadiness } from './RepositorySetupReadiness'
 import { I18nProvider, LanguageSelector } from './i18n'
 
+const aliasA = 'A'.repeat(43)
+const aliasB = 'B'.repeat(43)
 const ready = {
-  version: 'v0.64.0', repositoryIdentity: 'repo-a', overall: 'ready',
+  version: 'v0.64.0', repositoryIdentity: aliasA, overall: 'ready',
   configuration: { status: 'ready' }, snapshot: { status: 'ready' },
   gitHooks: { status: 'ready' }, daemon: { status: 'online' }, tracking: { status: 'tracked' },
 }
@@ -88,11 +90,11 @@ describe('RepositorySetupReadiness', () => {
     expect(deferred[0].signal?.aborted).toBe(true)
     await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    deferred[1].resolve(jsonResponse({ ...ready, repositoryIdentity: 'repo-b' }))
+    deferred[1].resolve(jsonResponse({ ...ready, repositoryIdentity: aliasB }))
     await waitFor(() => expect(screen.getByText('All repository setup checks passed.')).toBeInTheDocument())
     deferred[0].resolve(jsonResponse({
       ...ready,
-      repositoryIdentity: 'repo-a',
+      repositoryIdentity: aliasA,
       overall: 'unavailable',
       configuration: { status: 'unavailable' },
       snapshot: { status: 'unavailable' },
@@ -154,5 +156,174 @@ describe('RepositorySetupReadiness', () => {
     expect(interval).not.toHaveBeenCalled()
     expect(eventSource).not.toHaveBeenCalled()
     for (const marker of privateMarkers) expect(document.body.textContent).not.toContain(marker)
+  })
+
+  it.each([
+    ['ready', ready],
+    ['tracked files', { ...ready, overall: 'needs-attention', snapshot: { status: 'tracked-files' } }],
+    ['unsafe', { ...ready, overall: 'unavailable', snapshot: { status: 'unsafe' } }],
+    ['unavailable', { ...ready, overall: 'unavailable', snapshot: { status: 'unavailable' } }],
+  ] as const)('only exposes the ignore CTA for a fresh not-ignored result (%s)', async (_name, value) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(value)))
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await waitFor(() => expect(screen.getByText(value.snapshot.status === 'ready' ? 'Snapshot directory is ignored by Git.' : value.snapshot.status === 'tracked-files' ? 'Snapshot directory contains tracked files.' : value.snapshot.status === 'unsafe' ? 'Snapshot directory failed the safety check.' : 'Snapshot protection could not be verified.')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Add Ignore Rule' })).not.toBeInTheDocument()
+  })
+
+  it('runs one preview, opens a no-content confirmation, and executes exactly once after double confirm', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/repositories/setup-readiness') return jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' })
+      if (path === '/api/snapshot-ignore/preview') return jsonResponse(preview)
+      if (path === '/api/snapshot-ignore/execute') return jsonResponse({ status: 'verified-success' })
+      throw new Error(`unexpected path ${path}`)
+    }))
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="legacy-selected-repository" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    expect(calls.filter(call => call.path === '/api/snapshot-ignore/preview')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/api/snapshot-ignore/execute')).toHaveLength(0)
+    expect(screen.getByRole('dialog')).toHaveTextContent('Add Snapshot Ignore Rule')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Target')
+    expect(screen.getByRole('dialog')).toHaveTextContent('.gitignore')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Append the RoboRev snapshot ignore rule.')
+    expect(screen.getByRole('dialog')).toHaveTextContent('Modify existing lines, overwrite the file, stage, commit, or push.')
+    for (const forbidden of ['PRIVATE_SNAPSHOT_PATH', 'PRIVATE_GITIGNORE_MARKER_DO_NOT_EXPOSE', 'C:\\Users\\private\\source\\secret-project', 'C:\\fake\\very-secret\\roborev.exe']) expect(document.body.textContent).not.toContain(forbidden)
+    const confirm = screen.getByRole('button', { name: 'Confirm and append' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    await waitFor(() => expect(screen.getByText('Snapshot ignore rule added.')).toBeInTheDocument())
+    expect(calls.filter(call => call.path === '/api/snapshot-ignore/execute')).toHaveLength(1)
+    const execute = calls.find(call => call.path === '/api/snapshot-ignore/execute')!
+    expect(JSON.parse(String(execute.init?.body))).toEqual({ token: 'opaque-snapshot-token' })
+    expect(Object.keys(JSON.parse(String(execute.init?.body)))).toEqual(['token'])
+    expect(calls.filter(call => call.path === '/api/repositories/setup-readiness')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Add Ignore Rule' })).not.toBeInTheDocument()
+    expect(screen.getByText('Review and commit .gitignore with Git.')).toBeInTheDocument()
+    expect(screen.getByText('Check Setup again to verify all repository setup.')).toBeInTheDocument()
+  })
+
+  it('keeps cancel, close, and Escape execute-free', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' }))
+      .mockResolvedValueOnce(jsonResponse(preview))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="legacy-selected-repository" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    const reopened = await screen.findByRole('dialog')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(reopened).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/snapshot-ignore/execute')).toBe(false)
+  })
+
+  it('aborts a preview and ignores late completion after repository switch', async () => {
+    let resolvePreview!: (response: Response) => void
+    let previewSignal: AbortSignal | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/repositories/setup-readiness') return Promise.resolve(jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' }))
+      if (path === '/api/snapshot-ignore/preview') {
+        previewSignal = init?.signal as AbortSignal
+        return new Promise<Response>(resolve => { resolvePreview = resolve })
+      }
+      return Promise.reject(new Error(`unexpected path ${path}`))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const view = render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    view.rerender(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-b" /></I18nProvider>)
+    expect(previewSignal?.aborted).toBe(true)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add Ignore Rule' })).not.toBeInTheDocument()
+    resolvePreview(jsonResponse({ version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'late-token', expiresAt: '2099-01-01T00:00:00.000Z' }))
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(call => String(call[0]) === '/api/snapshot-ignore/execute')).toBe(false)
+  })
+
+  it('does not request on locale switch and retains the open confirmation', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' }))
+      .mockResolvedValueOnce(jsonResponse(preview))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<I18nProvider><LanguageSelector /><RepositorySetupReadiness repositoryIdentity="legacy-selected-repository" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    await screen.findByRole('dialog')
+    const count = fetchMock.mock.calls.length
+    await userEvent.selectOptions(screen.getByRole('combobox'), 'ko')
+    expect(fetchMock).toHaveBeenCalledTimes(count)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('sanitizes ambiguous execute failure, consumes the token, and offers no immediate retry', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const privateMarkers = ['C:\\Users\\private\\source\\secret-project', 'C:\\Users\\private\\.roborev', 'C:\\fake\\very-secret\\roborev.exe', 'PRIVATE_SNAPSHOT_PATH', 'PRIVATE_GITIGNORE_MARKER_DO_NOT_EXPOSE', 'PRIVATE_STDERR_MARKER']
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/repositories/setup-readiness') return jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' })
+      if (path === '/api/snapshot-ignore/preview') return jsonResponse(preview)
+      if (path === '/api/snapshot-ignore/execute') return Promise.reject(new Error(privateMarkers.join(' ')))
+      throw new Error(`unexpected path ${path}`)
+    }))
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="legacy-selected-repository" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm and append' }))
+    await waitFor(() => expect(screen.getByText('Snapshot ignore update could not be verified. Inspect .gitignore before retrying.')).toBeInTheDocument())
+    expect(calls.filter(call => call.path === '/api/repositories/setup-readiness')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/api/snapshot-ignore/preview')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/api/snapshot-ignore/execute')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Add Ignore Rule' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+    for (const marker of privateMarkers) expect(document.body.textContent).not.toContain(marker)
+  })
+
+  it('discards a late execute result after repository switch without refreshing or mutating UI state', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'append-snapshot-ignore', target: '.gitignore', summary: 'Add the RoboRev snapshot directory to Git ignore rules.', token: 'opaque-snapshot-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    let resolveExecute!: (response: Response) => void
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === '/api/repositories/setup-readiness') return Promise.resolve(jsonResponse({ ...ready, snapshot: { status: 'not-ignored' }, overall: 'needs-attention' }))
+      if (path === '/api/snapshot-ignore/preview') return Promise.resolve(jsonResponse(preview))
+      if (path === '/api/snapshot-ignore/execute') return new Promise<Response>(resolve => { resolveExecute = resolve })
+      return Promise.reject(new Error(`unexpected path ${path}`))
+    }))
+    const view = render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="legacy-selected-repository" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Add Ignore Rule' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm and append' }))
+    await waitFor(() => expect(calls.filter(path => path === '/api/snapshot-ignore/execute')).toHaveLength(1))
+    view.rerender(<I18nProvider><RepositorySetupReadiness repositoryIdentity="new-legacy-repository" /></I18nProvider>)
+    expect(screen.queryByText('Snapshot ignore rule added.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Snapshot ignore update could not be verified. Inspect .gitignore before retrying.')).not.toBeInTheDocument()
+    expect(calls.filter(path => path === '/api/repositories/setup-readiness')).toHaveLength(1)
+    resolveExecute(jsonResponse({ status: 'verified-success' }))
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(screen.queryByText('Snapshot ignore rule added.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Snapshot ignore update could not be verified. Inspect .gitignore before retrying.')).not.toBeInTheDocument()
+    expect(calls.filter(path => path === '/api/repositories/setup-readiness')).toHaveLength(1)
+    expect(calls.filter(path => path === '/api/snapshot-ignore/execute')).toHaveLength(1)
   })
 })

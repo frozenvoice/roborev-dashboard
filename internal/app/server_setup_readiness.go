@@ -104,5 +104,10 @@ func (s *Server) repositorySetupReadiness(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
+	// Readiness accepts the legacy registry identity, but mutation-capable
+	// clients receive only the server-issued path-free alias. The alias is
+	// bound to the selected canonical root and cannot be used to authorize a
+	// different registered repository.
+	result.RepositoryIdentity = s.snapshotIgnoreAlias(repo.Path)
 	writeJSON(w, http.StatusOK, result)
 }

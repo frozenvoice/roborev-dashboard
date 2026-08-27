@@ -37,6 +37,11 @@ type repositorySnapshotProbe interface {
 	SnapshotProbe(context.Context, string, string) (gitx.SnapshotProtection, error)
 }
 
+type repositorySnapshotIgnoreInspector interface {
+	InspectSnapshotIgnoreThroughTracked(context.Context, string, string) (gitx.SnapshotIgnoreRepositoryState, gitx.SnapshotIgnoreContinuation, error)
+	FinishSnapshotIgnoreInspection(context.Context, gitx.SnapshotIgnoreContinuation) (gitx.SnapshotIgnoreRepositoryState, error)
+}
+
 // repositoryCIWorkflowInspector is an optional capability. Keeping it
 // separate from RepositoryInspector prevents the general registry contract
 // from acquiring a fixed CI target or other management-only fields.
@@ -627,6 +632,52 @@ func (r *Registry) SnapshotProbe(ctx context.Context, path, relative string) (gi
 		return gitx.SnapshotProtection{}, errors.New("Git snapshot inspection is unavailable")
 	}
 	return resolver.SnapshotProbe(ctx, path, relative)
+}
+
+// InspectSnapshotIgnoreThroughTracked resolves the registered legacy identity
+// and delegates the first, tracked-only stage. The returned continuation is
+// opaque and remains bound to the adapter's canonical root/environment.
+func (r *Registry) InspectSnapshotIgnoreThroughTracked(ctx context.Context, identity, relative string) (gitx.SnapshotIgnoreRepositoryState, gitx.SnapshotIgnoreContinuation, error) {
+	path, err := r.ResolveIdentity(identity)
+	if err != nil {
+		return gitx.SnapshotIgnoreRepositoryState{}, gitx.SnapshotIgnoreContinuation{}, err
+	}
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	resolver, ok := inspector.(repositorySnapshotIgnoreInspector)
+	if !ok {
+		return gitx.SnapshotIgnoreRepositoryState{}, gitx.SnapshotIgnoreContinuation{}, errors.New("Git snapshot ignore inspection is unavailable")
+	}
+	state, continuation, err := resolver.InspectSnapshotIgnoreThroughTracked(ctx, path, relative)
+	if err != nil {
+		return gitx.SnapshotIgnoreRepositoryState{}, gitx.SnapshotIgnoreContinuation{}, errors.New("Git snapshot ignore inspection is unavailable")
+	}
+	if !gitx.SameRepositoryPath(state.Root, path) {
+		return gitx.SnapshotIgnoreRepositoryState{}, gitx.SnapshotIgnoreContinuation{}, errors.New("Git snapshot ignore repository root mismatch")
+	}
+	return state, continuation, nil
+}
+
+// FinishSnapshotIgnoreInspection binds an opaque continuation to the same
+// registered identity/root before allowing its single check-ignore probe.
+func (r *Registry) FinishSnapshotIgnoreInspection(ctx context.Context, identity, root string, continuation gitx.SnapshotIgnoreContinuation) (gitx.SnapshotIgnoreRepositoryState, error) {
+	path, err := r.ResolveIdentity(identity)
+	if err != nil || !gitx.SameRepositoryPath(path, root) {
+		return gitx.SnapshotIgnoreRepositoryState{}, errors.New("Git snapshot ignore inspection is unavailable")
+	}
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	resolver, ok := inspector.(repositorySnapshotIgnoreInspector)
+	if !ok {
+		return gitx.SnapshotIgnoreRepositoryState{}, errors.New("Git snapshot ignore inspection is unavailable")
+	}
+	state, err := resolver.FinishSnapshotIgnoreInspection(ctx, continuation)
+	if err != nil || !gitx.SameRepositoryPath(state.Root, path) {
+		return gitx.SnapshotIgnoreRepositoryState{}, errors.New("Git snapshot ignore inspection is unavailable")
+	}
+	return state, nil
 }
 
 // Identity returns a stable, platform-aware correlation key for a registered

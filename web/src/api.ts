@@ -265,6 +265,14 @@ export type RepositorySetupReadiness = {
   tracking: { status: 'tracked' | 'not-tracked' | 'unavailable' }
 }
 
+/** The browser-facing repository handle is a server-issued, opaque alias. */
+export type RepositoryIdentityAlias = string
+const repositoryIdentityAliasPattern = /^[A-Za-z0-9_-]{43}$/
+
+function validRepositoryIdentityAlias(value: unknown): value is RepositoryIdentityAlias {
+  return typeof value === 'string' && repositoryIdentityAliasPattern.test(value)
+}
+
 const setupReadinessVersion = 'v0.64.0' as const
 const setupReadinessOverall = ['ready', 'needs-attention', 'unavailable'] as const
 const setupReadinessConfiguration = ['ready', 'unavailable'] as const
@@ -276,7 +284,12 @@ const setupReadinessTracking = ['tracked', 'not-tracked', 'unavailable'] as cons
 /** Normalize the exact status-only Repository Setup Readiness DTO. */
 export function normalizeRepositorySetupReadiness(value: unknown, expectedRepositoryIdentity?: string): RepositorySetupReadiness | null {
   const root = exactObject(value, ['version', 'repositoryIdentity', 'overall', 'configuration', 'snapshot', 'gitHooks', 'daemon', 'tracking'])
-  if (!root || root.version !== setupReadinessVersion || typeof root.repositoryIdentity !== 'string' || !root.repositoryIdentity || root.repositoryIdentity.trim() !== root.repositoryIdentity || [...root.repositoryIdentity].some(char => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity)) return null
+  // `expectedRepositoryIdentity` is retained as a source-compatible argument
+  // for callers that used the v1 normalizer.  It is deliberately not used for
+  // correlation: the response identity is now a server-issued opaque alias,
+  // while the request still carries the legacy selected-repository identity.
+  void expectedRepositoryIdentity
+  if (!root || root.version !== setupReadinessVersion || !validRepositoryIdentityAlias(root.repositoryIdentity)) return null
   const configuration = exactStatus(root.configuration, setupReadinessConfiguration)
   const snapshot = exactStatus(root.snapshot, setupReadinessSnapshot)
   const gitHooks = exactStatus(root.gitHooks, setupReadinessHooks)
@@ -291,6 +304,43 @@ export function normalizeRepositorySetupReadiness(value: unknown, expectedReposi
   const derived = ready ? 'ready' : unavailable ? 'unavailable' : 'needs-attention'
   if (overall !== derived) return null
   return { version: setupReadinessVersion, repositoryIdentity: root.repositoryIdentity, overall, configuration, snapshot, gitHooks, daemon, tracking } as RepositorySetupReadiness
+}
+
+export type SnapshotIgnorePreview = {
+  version: 'v0.64.0'
+  repositoryIdentity: RepositoryIdentityAlias
+  action: 'append-snapshot-ignore'
+  target: '.gitignore'
+  summary: 'Add the RoboRev snapshot directory to Git ignore rules.'
+  token: string
+  expiresAt: string
+}
+
+export type SnapshotIgnoreExecuteResult = { status: 'verified-success' | 'failed-unverified' }
+
+const snapshotIgnoreVersion = 'v0.64.0' as const
+const snapshotIgnoreAction = 'append-snapshot-ignore' as const
+const snapshotIgnoreTarget = '.gitignore' as const
+const snapshotIgnoreSummary = 'Add the RoboRev snapshot directory to Git ignore rules.' as const
+// RFC 3339 is intentionally stricter than Date.parse (which accepts many
+// browser-specific date formats).  Date.parse then rejects impossible dates.
+const rfc3339Pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const snapshotIgnoreMaxTokenLength = 4096
+
+/** Normalize the exact, content-free Snapshot Ignore preview DTO. */
+export function normalizeSnapshotIgnorePreview(value: unknown, expectedRepositoryIdentity?: string): SnapshotIgnorePreview | null {
+  const root = exactObject(value, ['version', 'repositoryIdentity', 'action', 'target', 'summary', 'token', 'expiresAt'])
+  if (!root || root.version !== snapshotIgnoreVersion || !validRepositoryIdentityAlias(root.repositoryIdentity) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity) || root.action !== snapshotIgnoreAction || root.target !== snapshotIgnoreTarget || root.summary !== snapshotIgnoreSummary) return null
+  if (typeof root.token !== 'string' || !root.token.trim() || root.token.length > snapshotIgnoreMaxTokenLength || /[\u0000-\u001F\u007F]/.test(root.token)) return null
+  if (typeof root.expiresAt !== 'string' || !rfc3339Pattern.test(root.expiresAt) || !Number.isFinite(Date.parse(root.expiresAt))) return null
+  return { version: snapshotIgnoreVersion, repositoryIdentity: root.repositoryIdentity, action: snapshotIgnoreAction, target: snapshotIgnoreTarget, summary: snapshotIgnoreSummary, token: root.token, expiresAt: root.expiresAt }
+}
+
+/** Normalize the exact, content-free Snapshot Ignore execute result DTO. */
+export function normalizeSnapshotIgnoreExecuteResult(value: unknown): SnapshotIgnoreExecuteResult | null {
+  const root = exactObject(value, ['status'])
+  if (!root || (root.status !== 'verified-success' && root.status !== 'failed-unverified')) return null
+  return { status: root.status }
 }
 
 function exactStatus<T extends readonly string[]>(value: unknown, allowed: T): { status: T[number] } | null {
@@ -1741,8 +1791,31 @@ export async function fetchRepositorySetupReadiness(repositoryIdentity: string, 
     body: JSON.stringify({ repositoryIdentity }),
     signal,
   })
-  const normalized = normalizeRepositorySetupReadiness(value, repositoryIdentity)
+  const normalized = normalizeRepositorySetupReadiness(value)
   if (!normalized) throw new APIError('invalid-repository-setup-readiness')
+  return normalized
+}
+
+/** Request one explicitly-triggered repository-scoped Snapshot Ignore preview. */
+export async function fetchSnapshotIgnorePreview(repositoryIdentity: RepositoryIdentityAlias, signal?: AbortSignal): Promise<SnapshotIgnorePreview> {
+  const value = await request<unknown>('/api/snapshot-ignore/preview', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity }),
+    signal,
+  })
+  const normalized = normalizeSnapshotIgnorePreview(value, repositoryIdentity)
+  if (!normalized) throw new APIError('invalid-snapshot-ignore-preview')
+  return normalized
+}
+
+/** Execute one server-bound, single-use Snapshot Ignore token. */
+export async function executeSnapshotIgnore(token: string): Promise<SnapshotIgnoreExecuteResult> {
+  const value = await request<unknown>('/api/snapshot-ignore/execute', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+  const normalized = normalizeSnapshotIgnoreExecuteResult(value)
+  if (!normalized) throw new APIError('invalid-snapshot-ignore-execute-result')
   return normalized
 }
 
