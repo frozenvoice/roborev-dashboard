@@ -92,7 +92,12 @@ type Dependencies struct {
 	Snapshot      func(context.Context, string, string) (SnapshotObservation, error)
 	Hooks         func(context.Context, string, string) (GitHooks, error)
 	Daemon        func(context.Context) (DaemonObservation, error)
-	FS            pathsafety.FileSystem
+	// TrackingRoot optionally maps the authorized checkout root to the
+	// effective root used by RoboRev's repository inventory. It is intentionally
+	// separate from Configuration/Snapshot/Hooks, which remain scoped to the
+	// selected checkout. Legacy fakes may omit it and retain the prior behavior.
+	TrackingRoot func(context.Context, string) (string, error)
+	FS           pathsafety.FileSystem
 }
 
 type Checker struct{ deps Dependencies }
@@ -185,7 +190,15 @@ func (c *Checker) Check(ctx context.Context, identity, root string) (Result, err
 		if err == nil || observation.State == DaemonOffline {
 			result.Daemon.Status = observation.State
 			if observation.State == DaemonOnline && observation.InventoryAvailable {
-				result.Tracking.Status = trackingForRoot(observation.InventoryRoots, root)
+				trackingRoot := root
+				trackingRootOK := true
+				if c.deps.TrackingRoot != nil {
+					trackingRoot, err = c.deps.TrackingRoot(ctx, root)
+					trackingRootOK = err == nil && strings.TrimSpace(trackingRoot) != ""
+				}
+				if trackingRootOK {
+					result.Tracking.Status = trackingForRoot(observation.InventoryRoots, trackingRoot)
+				}
 			} else if observation.State == DaemonOnline {
 				result.Tracking.Status = TrackingUnavailable
 			} else {

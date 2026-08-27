@@ -40,17 +40,29 @@ type snapshotIgnoreResultDTO struct {
 	Status string `json:"status"`
 }
 
-func (s *Server) snapshotIgnoreAlias(root string) string {
+func (s *Server) repositoryMutationAlias(root string) string {
 	mac := hmac.New(sha256.New, s.snapshotIgnoreKey[:])
 	_, _ = mac.Write([]byte(snapshotIgnoreAliasDomain))
 	_, _ = mac.Write([]byte(gitx.RepositoryKey(root)))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// resolveSnapshotIgnoreAlias performs alias lookup only against the current
-// selected repository. It never scans registered paths and uses constant-time
-// comparison, preventing the browser alias from becoming a path oracle.
-func (s *Server) resolveSnapshotIgnoreAlias(alias string) (string, string, bool) {
+// snapshotIgnoreAlias is retained as a compatibility wrapper: the alias
+// wire format remains byte-for-byte unchanged while tracking and other
+// selected-repository mutation flows share the same authority helper.
+func (s *Server) snapshotIgnoreAlias(root string) string {
+	return s.repositoryMutationAlias(root)
+}
+
+func (s *Server) repositoryTrackingAlias(root string) string {
+	return s.repositoryMutationAlias(root)
+}
+
+// resolveRepositoryMutationAlias performs alias lookup only against the
+// current selected repository. It never scans registered paths and uses
+// constant-time comparison, preventing a browser alias from becoming a path
+// oracle.
+func (s *Server) resolveRepositoryMutationAlias(alias string) (string, string, bool) {
 	if s == nil || s.Registry == nil || strings.TrimSpace(alias) == "" || alias != strings.TrimSpace(alias) {
 		return "", "", false
 	}
@@ -71,6 +83,12 @@ func (s *Server) resolveSnapshotIgnoreAlias(alias string) (string, string, bool)
 		return "", "", false
 	}
 	return legacy, root, true
+}
+
+// resolveSnapshotIgnoreAlias preserves the existing private call seam while
+// delegating to the shared selected-repository authority implementation.
+func (s *Server) resolveSnapshotIgnoreAlias(alias string) (string, string, bool) {
+	return s.resolveRepositoryMutationAlias(alias)
 }
 
 func (s *Server) authorizeSnapshotIgnore(w http.ResponseWriter, r *http.Request) bool {

@@ -497,6 +497,22 @@ export const en = {
   'setup.snapshotIgnoreSuccessNext': 'Review and commit .gitignore with Git.',
   'setup.snapshotIgnoreSuccessCheck': 'Check Setup again to verify all repository setup.',
   'setup.snapshotIgnoreFailure': 'Snapshot ignore update could not be verified. Inspect .gitignore before retrying.',
+  'setup.repositoryTrackingRegister': 'Register with RoboRev',
+  'setup.repositoryTrackingTitle': 'Register Repository with RoboRev',
+  'setup.repositoryTrackingDescription': 'Review this safe registration before confirming it.',
+  'setup.repositoryTrackingWillDo': 'Will do',
+  'setup.repositoryTrackingAction': 'Register the selected repository with the currently running RoboRev v0.64.0 daemon.',
+  'setup.repositoryTrackingWillNotDo': 'Will not do',
+  'setup.repositoryTrackingNoMutation': 'Start or restart the daemon, modify repository files, run a review, or commit or push anything.',
+  'setup.repositoryTrackingConfirmationNote': 'Only the currently selected, verified repository is eligible for this registration.',
+  'setup.repositoryTrackingConfirm': 'Confirm and register',
+  'setup.repositoryTrackingClose': 'Close Register Repository with RoboRev dialog',
+  'setup.repositoryTrackingPreviewing': 'Preparing repository registration preview…',
+  'setup.repositoryTrackingPreviewFailed': 'Repository registration preview could not be prepared. Check Setup again before trying again.',
+  'setup.repositoryTrackingRegistering': 'Registering repository with RoboRev…',
+  'setup.repositoryTrackingSuccess': 'Repository registered with RoboRev.',
+  'setup.repositoryTrackingSuccessNext': 'Run Check Setup again to verify the complete repository setup.',
+  'setup.repositoryTrackingFailure': 'Repository registration could not be verified. Run Check Setup before trying again.',
   'setup.runtime': 'RoboRev Runtime',
   'setup.daemon': 'Daemon',
   'setup.model': 'Model',
@@ -1267,6 +1283,22 @@ ko['setup.snapshotIgnoreSuccess'] = '스냅샷 Ignore 규칙을 추가했습니�
 ko['setup.snapshotIgnoreSuccessNext'] = 'Git에서 .gitignore를 검토하고 commit하세요.'
 ko['setup.snapshotIgnoreSuccessCheck'] = '모든 저장소 설정을 확인하려면 설정을 다시 확인하세요.'
 ko['setup.snapshotIgnoreFailure'] = '스냅샷 Ignore 업데이트를 검증하지 못했습니다. 다시 시도하기 전에 .gitignore를 확인하세요.'
+ko['setup.repositoryTrackingRegister'] = 'RoboRev에 등록'
+ko['setup.repositoryTrackingTitle'] = 'RoboRev에 저장소 등록'
+ko['setup.repositoryTrackingDescription'] = '확인하기 전에 이 안전한 등록 작업을 검토하세요.'
+ko['setup.repositoryTrackingWillDo'] = '수행하는 작업'
+ko['setup.repositoryTrackingAction'] = '현재 실행 중인 RoboRev v0.64.0 데몬에 선택한 저장소를 등록합니다.'
+ko['setup.repositoryTrackingWillNotDo'] = '수행하지 않는 작업'
+ko['setup.repositoryTrackingNoMutation'] = '데몬을 시작하거나 다시 시작하지 않고, 저장소 파일을 변경하거나 리뷰를 실행하거나 commit 또는 push하지 않습니다.'
+ko['setup.repositoryTrackingConfirmationNote'] = '현재 선택되어 검증된 저장소만 이 등록 작업의 대상이 됩니다.'
+ko['setup.repositoryTrackingConfirm'] = '확인하고 등록'
+ko['setup.repositoryTrackingClose'] = 'RoboRev 저장소 등록 대화상자 닫기'
+ko['setup.repositoryTrackingPreviewing'] = '저장소 등록 미리보기 준비 중…'
+ko['setup.repositoryTrackingPreviewFailed'] = '저장소 등록 미리보기를 준비하지 못했습니다. 설정을 다시 확인한 후 시도하세요.'
+ko['setup.repositoryTrackingRegistering'] = 'RoboRev에 저장소 등록 중…'
+ko['setup.repositoryTrackingSuccess'] = '저장소를 RoboRev에 등록했습니다.'
+ko['setup.repositoryTrackingSuccessNext'] = '전체 저장소 설정을 확인하려면 설정을 다시 확인하세요.'
+ko['setup.repositoryTrackingFailure'] = '저장소 등록을 검증하지 못했습니다. 다시 시도하기 전에 설정을 확인하세요.'
 ko['stats.costEmpty'] = '이 범위에 비용을 보고할 수 있는 적격 작업이 아직 없습니다.'
 ko['stats.insightsDisabled'] = '이 체크포인트에서는 Guideline Insights가 활성화되지 않았습니다.'
 ko['stats.guidelineTitle'] = 'Guideline Insights'

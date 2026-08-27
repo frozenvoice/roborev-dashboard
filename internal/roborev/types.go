@@ -130,6 +130,51 @@ type RepositorySetupReadiness struct {
 	Inventory          repoinventory.Inventory
 }
 
+// RepositoryTrackingTransport is the optional, backend-only v0.64
+// registration seam. It intentionally does not widen Service so legacy
+// adapters and fakes remain source-compatible. Preflight contains only
+// server-side authority and is never serialized to browser DTOs.
+type RepositoryTrackingTransport interface {
+	RepositoryTrackingPreflight(context.Context) (RepositoryTrackingPreflight, error)
+	RegisterRepository(context.Context, string, RepositoryTrackingBinding, RepositoryTrackingPreLaunchGuard) (RepositoryTrackingResult, error)
+}
+
+// RepositoryTrackingPreLaunchGuard is owned by the server and runs after the
+// transport has prepared the fixed request but immediately before HTTP.Do.
+// It must perform only the final root witness; browser input cannot provide
+// or replace this callback.
+type RepositoryTrackingPreLaunchGuard func(context.Context) error
+
+type RepositoryTrackingBinding struct {
+	Version    string
+	Generation uint64
+	FileID     string
+	// DaemonID is an opaque process-local binding for the already-authorized
+	// daemon endpoint. It is never serialized to browser DTOs.
+	DaemonID string
+}
+
+func (b RepositoryTrackingBinding) Valid() bool {
+	return b.Version == "v0.64.0" && b.Generation != 0 && b.FileID != "" && b.DaemonID != ""
+}
+
+func (b RepositoryTrackingBinding) Equal(other RepositoryTrackingBinding) bool {
+	return b.Version == other.Version && b.Generation == other.Generation && b.FileID == other.FileID && b.DaemonID == other.DaemonID
+}
+
+type RepositoryTrackingPreflight struct {
+	Binding   RepositoryTrackingBinding
+	Inventory repoinventory.Inventory
+}
+
+// RepositoryTrackingResult is server-side evidence for one and only one
+// register HTTP request. Attempted is set before HTTP.Do is entered and is
+// intentionally not exposed to the browser.
+type RepositoryTrackingResult struct {
+	Attempted  bool
+	StatusCode int
+}
+
 // RepositoryRenameService is optional so existing Service fakes and legacy
 // adapters remain source-compatible. Implementations must preflight again at
 // the process boundary and must not infer success from human CLI output.

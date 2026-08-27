@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -26,6 +28,8 @@ const (
 )
 
 var ErrMalformed = errors.New("malformed RoboRev repository inventory response")
+
+var ErrAmbiguousRoot = errors.New("repository inventory contains ambiguous roots")
 
 // Repository is one exact v0.64 RepoWithCount row. Identity is retained only
 // for typed upstream decoding; Dashboard authorization must never use it.
@@ -129,6 +133,75 @@ func Parse(raw []byte) (Inventory, error) {
 
 // ParseJSON is an explicit adapter-facing alias.
 func ParseJSON(raw []byte) (Inventory, error) { return Parse(raw) }
+
+// MatchRoot validates the complete inventory and returns the number of rows
+// whose canonical path is equivalent to root. Inventory rows are never merged;
+// duplicate equivalent roots are an ambiguity and therefore an error. This
+// keeps registration/readback authority independent from upstream display
+// names, identities, and review counts.
+func (i Inventory) MatchRoot(root string) (int, error) {
+	if !validInventoryRoot(root) {
+		return 0, ErrMalformed
+	}
+	if i.TotalCount < 0 || i.TotalCount > MaxSafeInteger {
+		return 0, ErrMalformed
+	}
+	selected := inventoryRootKey(root)
+	seen := make(map[string]struct{}, len(i.Repositories))
+	found := 0
+	var sum int64
+	for _, repository := range i.Repositories {
+		if !validInventoryRoot(repository.RootPath) {
+			return 0, ErrMalformed
+		}
+		if repository.Count < 0 || repository.Count > MaxSafeInteger || sum > MaxSafeInteger-repository.Count {
+			return 0, ErrMalformed
+		}
+		sum += repository.Count
+		key := inventoryRootKey(repository.RootPath)
+		if _, exists := seen[key]; exists {
+			return 0, ErrAmbiguousRoot
+		}
+		seen[key] = struct{}{}
+		if key == selected {
+			found++
+		}
+	}
+	if sum != i.TotalCount {
+		return 0, ErrMalformed
+	}
+	return found, nil
+}
+
+func validInventoryRoot(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if filepath.IsAbs(value) {
+		return true
+	}
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	if strings.HasPrefix(normalized, "/") || strings.HasPrefix(normalized, "//") {
+		return true
+	}
+	return len(normalized) >= 3 && ((normalized[0] >= 'a' && normalized[0] <= 'z') || (normalized[0] >= 'A' && normalized[0] <= 'Z')) && normalized[1] == ':' && normalized[2] == '/'
+}
+
+func inventoryRootKey(value string) string {
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	clean := filepath.Clean(filepath.FromSlash(normalized))
+	clean = strings.ReplaceAll(clean, "\\", "/")
+	windowsStyle := runtime.GOOS == "windows" || strings.HasPrefix(normalized, "//") || (len(normalized) >= 2 && normalized[1] == ':')
+	if windowsStyle {
+		return strings.ToLower(clean)
+	}
+	return clean
+}
 
 func validateObjectFields(object map[string]any, allowed map[string]bool) error {
 	for key := range object {

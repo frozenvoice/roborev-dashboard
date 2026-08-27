@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, RefreshCw, ShieldAlert, Settings2, X } from 'lucide-react'
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { executeSnapshotIgnore, fetchRepositorySetupReadiness, fetchSnapshotIgnorePreview, type RepositorySetupReadiness, type SnapshotIgnoreExecuteResult, type SnapshotIgnorePreview } from './api'
+import { executeRepositoryTracking, executeSnapshotIgnore, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, type RepositorySetupReadiness, type RepositoryTrackingExecuteResult, type RepositoryTrackingPreview, type SnapshotIgnoreExecuteResult, type SnapshotIgnorePreview } from './api'
 import { useI18n } from './i18n'
 
 type Props = { repositoryIdentity?: string }
@@ -48,28 +48,43 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
   const [attempted, setAttempted] = useState(false)
   const controllerRef = useRef<AbortController | null>(null)
   const previewControllerRef = useRef<AbortController | null>(null)
+  const trackingPreviewControllerRef = useRef<AbortController | null>(null)
   const requestLock = useRef(false)
   const previewLock = useRef(false)
+  const trackingPreviewLock = useRef(false)
   const confirmingRef = useRef(false)
+  const trackingConfirmingRef = useRef(false)
   const identityRef = useRef(repositoryIdentity)
   const mountedRef = useRef(true)
   const generationRef = useRef(0)
+  const trackingGenerationRef = useRef(0)
   const [previewPhase, setPreviewPhase] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [preview, setPreview] = useState<SnapshotIgnorePreview | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [executePhase, setExecutePhase] = useState<'idle' | 'executing'>('idle')
   const [executeResult, setExecuteResult] = useState<SnapshotIgnoreExecuteResult | null>(null)
   const [tokenConsumed, setTokenConsumed] = useState(false)
+  const [trackingPreviewPhase, setTrackingPreviewPhase] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
+  const [trackingPreview, setTrackingPreview] = useState<RepositoryTrackingPreview | null>(null)
+  const [trackingDialogOpen, setTrackingDialogOpen] = useState(false)
+  const [trackingExecutePhase, setTrackingExecutePhase] = useState<'idle' | 'executing'>('idle')
+  const [trackingExecuteResult, setTrackingExecuteResult] = useState<RepositoryTrackingExecuteResult | null>(null)
+  const [trackingTokenConsumed, setTrackingTokenConsumed] = useState(false)
 
   useEffect(() => {
     ++generationRef.current
+    ++trackingGenerationRef.current
     controllerRef.current?.abort()
     previewControllerRef.current?.abort()
+    trackingPreviewControllerRef.current?.abort()
     controllerRef.current = null
     previewControllerRef.current = null
+    trackingPreviewControllerRef.current = null
     requestLock.current = false
     previewLock.current = false
+    trackingPreviewLock.current = false
     confirmingRef.current = false
+    trackingConfirmingRef.current = false
     setResult(null)
     setError(false)
     setAttempted(false)
@@ -80,6 +95,12 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
     setExecutePhase('idle')
     setExecuteResult(null)
     setTokenConsumed(false)
+    setTrackingPreviewPhase('idle')
+    setTrackingPreview(null)
+    setTrackingDialogOpen(false)
+    setTrackingExecutePhase('idle')
+    setTrackingExecuteResult(null)
+    setTrackingTokenConsumed(false)
     identityRef.current = repositoryIdentity
   }, [repositoryIdentity])
 
@@ -88,19 +109,29 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
     return () => {
       mountedRef.current = false
       ++generationRef.current
+      ++trackingGenerationRef.current
       controllerRef.current?.abort()
       previewControllerRef.current?.abort()
+      trackingPreviewControllerRef.current?.abort()
       controllerRef.current = null
       previewControllerRef.current = null
+      trackingPreviewControllerRef.current = null
       requestLock.current = false
       previewLock.current = false
+      trackingPreviewLock.current = false
       confirmingRef.current = false
+      trackingConfirmingRef.current = false
     }
   }, [])
 
   const check = async () => {
-    if (!repositoryIdentity || requestLock.current || loading || executePhase === 'executing') return
+    if (!repositoryIdentity || requestLock.current || loading || executePhase === 'executing' || trackingExecutePhase === 'executing') return
     const selectedIdentity = repositoryIdentity
+    // A fresh explicit check invalidates all browser-held mutation evidence.
+    // Any already-started execute request remains server-owned, but its late
+    // response must not be rendered into this new evidence generation.
+    ++generationRef.current
+    ++trackingGenerationRef.current
     const generation = generationRef.current
     requestLock.current = true
     controllerRef.current?.abort()
@@ -114,12 +145,21 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
     // reopen a dialog after this fresh check settles.
     previewControllerRef.current?.abort()
     previewControllerRef.current = null
+    trackingPreviewControllerRef.current?.abort()
+    trackingPreviewControllerRef.current = null
     previewLock.current = false
+    trackingPreviewLock.current = false
     setPreviewPhase('idle')
     setPreview(null)
     setDialogOpen(false)
     setExecuteResult(null)
     setTokenConsumed(false)
+    setTrackingPreviewPhase('idle')
+    setTrackingPreview(null)
+    setTrackingDialogOpen(false)
+    setTrackingExecutePhase('idle')
+    setTrackingExecuteResult(null)
+    setTrackingTokenConsumed(false)
     try {
       const next = await fetchRepositorySetupReadiness(selectedIdentity, controller.signal)
       if (identityRef.current === selectedIdentity && generation === generationRef.current && !controller.signal.aborted && mountedRef.current) {
@@ -153,6 +193,8 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
 
   const readinessAlias = !error && result?.snapshot.status === 'not-ignored' ? result.repositoryIdentity : null
   const visiblePreview = preview && readinessAlias && preview.repositoryIdentity === readinessAlias ? preview : null
+  const trackingAlias = !error && result?.daemon.status === 'online' && result.tracking.status === 'not-tracked' ? result.repositoryIdentity : null
+  const visibleTrackingPreview = trackingPreview && trackingAlias && trackingPreview.repositoryIdentity === trackingAlias ? trackingPreview : null
 
   const addIgnoreRule = async () => {
     const alias = readinessAlias
@@ -221,6 +263,73 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
     }
   }
 
+  const registerRepository = async () => {
+    const alias = trackingAlias
+    const selectedIdentity = repositoryIdentity
+    if (!alias || !selectedIdentity || loading || trackingPreviewLock.current || trackingExecutePhase === 'executing' || trackingTokenConsumed || trackingPreviewPhase !== 'idle' || !mountedRef.current) return
+    const generation = trackingGenerationRef.current
+    const controller = new AbortController()
+    trackingPreviewControllerRef.current?.abort()
+    trackingPreviewControllerRef.current = controller
+    trackingPreviewLock.current = true
+    setTrackingPreviewPhase('loading')
+    setTrackingPreview(null)
+    setTrackingDialogOpen(false)
+    setTrackingExecuteResult(null)
+    try {
+      const next = await fetchRepositoryTrackingPreview(alias, controller.signal)
+      if (!mountedRef.current || generation !== trackingGenerationRef.current || controller.signal.aborted || identityRef.current !== selectedIdentity || result?.repositoryIdentity !== alias) return
+      setTrackingPreview(next)
+      setTrackingPreviewPhase('success')
+      setTrackingDialogOpen(true)
+    } catch {
+      if (!mountedRef.current || generation !== trackingGenerationRef.current || controller.signal.aborted || identityRef.current !== selectedIdentity) return
+      setTrackingPreview(null)
+      setTrackingPreviewPhase('error')
+    } finally {
+      if (trackingPreviewControllerRef.current === controller) trackingPreviewControllerRef.current = null
+      if (generation === trackingGenerationRef.current) trackingPreviewLock.current = false
+    }
+  }
+
+  const openTrackingDialog = () => {
+    if (visibleTrackingPreview && trackingPreviewPhase === 'success' && !trackingTokenConsumed && !trackingExecuteResult) {
+      setTrackingDialogOpen(true)
+      return
+    }
+    void registerRepository()
+  }
+
+  const cancelTracking = () => {
+    if (!trackingConfirmingRef.current) setTrackingDialogOpen(false)
+  }
+
+  const confirmTracking = async () => {
+    if (!visibleTrackingPreview || trackingTokenConsumed || trackingConfirmingRef.current || trackingExecutePhase === 'executing' || !mountedRef.current) return
+    const token = visibleTrackingPreview.token
+    const generation = trackingGenerationRef.current
+    trackingConfirmingRef.current = true
+    // Consume the only browser-held authority before making the request. The
+    // server enforces single-use and detached verification; this client never
+    // offers a retry after an ambiguous response.
+    setTrackingTokenConsumed(true)
+    setTrackingPreview(null)
+    setTrackingDialogOpen(false)
+    setTrackingExecuteResult(null)
+    setTrackingExecutePhase('executing')
+    try {
+      const next = await executeRepositoryTracking(token)
+      if (!mountedRef.current || generation !== trackingGenerationRef.current) return
+      setTrackingExecuteResult(next)
+    } catch {
+      if (!mountedRef.current || generation !== trackingGenerationRef.current) return
+      setTrackingExecuteResult({ status: 'failed-unverified' })
+    } finally {
+      trackingConfirmingRef.current = false
+      if (mountedRef.current && generation === trackingGenerationRef.current) setTrackingExecutePhase('idle')
+    }
+  }
+
   return <section className="repository-setup-readiness" aria-labelledby="repository-setup-readiness-title">
     <header className="setup-subheading">
       <div><h2 id="repository-setup-readiness-title">{t('setup.repositoryReadinessTitle')}</h2><p>{t('setup.repositoryReadinessDescription')}</p></div>
@@ -234,12 +343,19 @@ export function RepositorySetupReadiness({ repositoryIdentity = '' }: Props) {
     </div>
     {result && <div className="repository-setup-readiness-list">{rows.map(([key, label, status]) => <div className="repository-setup-readiness-row" key={key}><div><strong>{label}</strong><p>{statusDescription(key, status, t)}</p></div><span className={`status ${statusClass(status)}`}><span className="status-dot" />{statusLabel(status, t)}</span></div>)}</div>}
     {readinessAlias && !loading && !tokenConsumed && !executeResult && (previewPhase === 'idle' || (previewPhase === 'success' && !dialogOpen && !!visiblePreview)) && <div className="repository-setup-readiness-action"><button type="button" className="button primary" onClick={openIgnoreDialog}><Check size={14} />{t('setup.snapshotIgnoreAdd')}</button></div>}
+    {trackingAlias && !loading && !trackingTokenConsumed && !trackingExecuteResult && (trackingPreviewPhase === 'idle' || (trackingPreviewPhase === 'success' && !trackingDialogOpen && !!visibleTrackingPreview)) && <div className="repository-setup-readiness-action"><button type="button" className="button primary" onClick={openTrackingDialog}><Check size={14} />{t('setup.repositoryTrackingRegister')}</button></div>}
     {previewPhase === 'loading' && <p className="repository-setup-readiness-mutation-state" role="status"><RefreshCw size={15} className="spin" />{t('setup.snapshotIgnorePreviewing')}</p>}
     {previewPhase === 'error' && <p className="repository-setup-readiness-mutation-error" role="alert"><AlertTriangle size={15} aria-hidden="true" />{t('setup.snapshotIgnorePreviewFailed')}</p>}
     {executePhase === 'executing' && <p className="repository-setup-readiness-mutation-state" role="status"><RefreshCw size={15} className="spin" />{t('setup.snapshotIgnoreApplying')}</p>}
     {executeResult?.status === 'verified-success' && <div className="repository-setup-readiness-mutation-result verified-success" role="status"><strong>{t('setup.snapshotIgnoreSuccess')}</strong><span>{t('setup.snapshotIgnoreSuccessNext')}</span><span>{t('setup.snapshotIgnoreSuccessCheck')}</span></div>}
     {executeResult?.status === 'failed-unverified' && <p className="repository-setup-readiness-mutation-result failed-unverified" role="alert">{t('setup.snapshotIgnoreFailure')}</p>}
+    {trackingPreviewPhase === 'loading' && <p className="repository-setup-readiness-mutation-state" role="status"><RefreshCw size={15} className="spin" />{t('setup.repositoryTrackingPreviewing')}</p>}
+    {trackingPreviewPhase === 'error' && <p className="repository-setup-readiness-mutation-error" role="alert"><AlertTriangle size={15} aria-hidden="true" />{t('setup.repositoryTrackingPreviewFailed')}</p>}
+    {trackingExecutePhase === 'executing' && <p className="repository-setup-readiness-mutation-state" role="status"><RefreshCw size={15} className="spin" />{t('setup.repositoryTrackingRegistering')}</p>}
+    {trackingExecuteResult?.status === 'verified-success' && <div className="repository-setup-readiness-mutation-result verified-success" role="status"><strong>{t('setup.repositoryTrackingSuccess')}</strong><span>{t('setup.repositoryTrackingSuccessNext')}</span></div>}
+    {trackingExecuteResult?.status === 'failed-unverified' && <p className="repository-setup-readiness-mutation-result failed-unverified" role="alert">{t('setup.repositoryTrackingFailure')}</p>}
     {dialogOpen && visiblePreview && !tokenConsumed && <SnapshotIgnoreDialog onCancel={cancelIgnore} onConfirm={() => void confirmIgnore()} />}
+    {trackingDialogOpen && visibleTrackingPreview && !trackingTokenConsumed && <RepositoryTrackingDialog onCancel={cancelTracking} onConfirm={() => void confirmTracking()} />}
     {result && <span className="sr-only">{result.overall}</span>}
   </section>
 }
@@ -269,6 +385,34 @@ function SnapshotIgnoreDialog({ onCancel, onConfirm }: SnapshotIgnoreDialogProps
       <dl className="repository-setup-readiness-confirm-facts"><div><dt>{t('setup.snapshotIgnoreTarget')}</dt><dd><code>.gitignore</code></dd></div><div><dt>{t('setup.snapshotIgnoreWillDo')}</dt><dd>{t('setup.snapshotIgnoreAction')}</dd></div><div><dt>{t('setup.snapshotIgnoreWillNotDo')}</dt><dd>{t('setup.snapshotIgnoreNoMutation')}</dd></div></dl>
       <p className="repository-setup-readiness-confirm-note"><AlertTriangle size={15} aria-hidden="true" />{t('setup.snapshotIgnoreConfirmationNote')}</p>
       <footer><button className="button" type="button" ref={cancelRef} onClick={onCancel}>{t('common.cancel')}</button><button className="button primary" type="button" onClick={onConfirm}><Check size={15} />{t('setup.snapshotIgnoreConfirm')}</button></footer>
+    </section>
+  </div>
+}
+
+type RepositoryTrackingDialogProps = { onCancel: () => void; onConfirm: () => void }
+
+function RepositoryTrackingDialog({ onCancel, onConfirm }: RepositoryTrackingDialogProps) {
+  const { t } = useI18n()
+  const dialogRef = useRef<HTMLElement | null>(null)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => { cancelRef.current?.focus() }, [])
+  const onDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Escape') { event.preventDefault(); onCancel(); return }
+    if (event.key !== 'Tab') return
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(dialogFocusableSelector)).filter(element => !element.hidden)
+    if (focusable.length === 0) { event.preventDefault(); dialog.focus(); return }
+    const active = document.activeElement
+    const index = active instanceof HTMLElement ? focusable.indexOf(active) : -1
+    if (event.shiftKey ? index <= 0 : index === focusable.length - 1 || index < 0) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus() }
+  }
+  return <div className="prompt-overlay repository-setup-readiness-overlay" role="presentation">
+    <section className="prompt-dialog repository-setup-readiness-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-tracking-confirm-title" aria-describedby="repository-tracking-confirm-description" tabIndex={-1} ref={dialogRef} onKeyDown={onDialogKeyDown}>
+      <header><div><h2 id="repository-tracking-confirm-title">{t('setup.repositoryTrackingTitle')}</h2><p id="repository-tracking-confirm-description">{t('setup.repositoryTrackingDescription')}</p></div><button className="icon-button" type="button" aria-label={t('setup.repositoryTrackingClose')} onClick={onCancel}><X /></button></header>
+      <dl className="repository-setup-readiness-confirm-facts"><div><dt>{t('setup.repositoryTrackingWillDo')}</dt><dd>{t('setup.repositoryTrackingAction')}</dd></div><div><dt>{t('setup.repositoryTrackingWillNotDo')}</dt><dd>{t('setup.repositoryTrackingNoMutation')}</dd></div></dl>
+      <p className="repository-setup-readiness-confirm-note"><AlertTriangle size={15} aria-hidden="true" />{t('setup.repositoryTrackingConfirmationNote')}</p>
+      <footer><button className="button" type="button" ref={cancelRef} onClick={onCancel}>{t('common.cancel')}</button><button className="button primary" type="button" onClick={onConfirm}><Check size={15} />{t('setup.repositoryTrackingConfirm')}</button></footer>
     </section>
   </div>
 }

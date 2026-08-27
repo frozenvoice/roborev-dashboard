@@ -1,6 +1,7 @@
 package repoinventory
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,5 +94,31 @@ func TestParseRejectsInvalidUTF8AndOversize(t *testing.T) {
 	safe := `{"repos":[{"name":"repo","root_path":"E:/repo","count":` + strconv.FormatInt(MaxSafeInteger, 10) + `}],"total_count":` + strconv.FormatInt(MaxSafeInteger, 10) + `}`
 	if _, err := Parse([]byte(safe)); err != nil {
 		t.Fatalf("safe maximum was rejected: %v", err)
+	}
+}
+
+func TestMatchRootRejectsAmbiguousEquivalentEntries(t *testing.T) {
+	root := `C:\Users\private\source\repo`
+	inventory := Inventory{Repositories: []Repository{{RootPath: root, Name: "one"}, {RootPath: `c:/Users/private/source/repo`, Name: "two"}}}
+	if _, err := inventory.MatchRoot(root); !errors.Is(err, ErrAmbiguousRoot) {
+		t.Fatalf("err=%v, want ambiguous root", err)
+	}
+}
+
+func TestMatchRootCountsOnlyValidatedAbsoluteRoot(t *testing.T) {
+	root := `C:\repo`
+	if got, err := (Inventory{}).MatchRoot(root); err != nil || got != 0 {
+		t.Fatalf("empty match=%d err=%v", got, err)
+	}
+	if _, err := (Inventory{Repositories: []Repository{{RootPath: `relative\repo`}}}).MatchRoot(root); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("relative root err=%v", err)
+	}
+}
+
+func TestMatchRootRejectsTypedInventoryCountMismatch(t *testing.T) {
+	root := `C:\repo`
+	inventory := Inventory{Repositories: []Repository{{RootPath: root, Count: 0}}, TotalCount: 1}
+	if _, err := inventory.MatchRoot(root); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("count mismatch err=%v, want ErrMalformed", err)
 	}
 }

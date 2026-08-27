@@ -326,4 +326,158 @@ describe('RepositorySetupReadiness', () => {
     expect(calls.filter(path => path === '/api/repositories/setup-readiness')).toHaveLength(1)
     expect(calls.filter(path => path === '/api/snapshot-ignore/execute')).toHaveLength(1)
   })
+
+  it.each([
+    ['online and not tracked', { ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } }, true],
+    ['online and not tracked with unrelated attention', { ...ready, overall: 'unavailable', snapshot: { status: 'unsafe' }, gitHooks: { status: 'unknown' }, tracking: { status: 'not-tracked' } }, true],
+    ['already tracked', { ...ready, tracking: { status: 'tracked' } }, false],
+    ['tracking unavailable', { ...ready, overall: 'unavailable', tracking: { status: 'unavailable' } }, false],
+    ['daemon offline', { ...ready, overall: 'needs-attention', daemon: { status: 'offline' }, tracking: { status: 'unavailable' } }, false],
+    ['daemon unavailable', { ...ready, overall: 'unavailable', daemon: { status: 'unavailable' }, tracking: { status: 'unavailable' } }, false],
+  ] as const)('exposes tracking CTA only for %s', async (_name, value, eligible) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(value)))
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await waitFor(() => expect(screen.getByText(statusDescriptionForTest(value)).textContent).toBeTruthy())
+    if (eligible) expect(screen.getByRole('button', { name: 'Register with RoboRev' })).toBeInTheDocument()
+    else expect(screen.queryByRole('button', { name: 'Register with RoboRev' })).not.toBeInTheDocument()
+  })
+
+  it('previews and confirms repository tracking exactly once with a token-only execute', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'register-repository', target: 'RoboRev tracking', summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const calls: Array<{ path: string; init?: RequestInit }> = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      calls.push({ path, init })
+      if (path === '/api/repositories/setup-readiness') return jsonResponse({ ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } })
+      if (path === '/api/repository-tracking/preview') return jsonResponse(preview)
+      if (path === '/api/repository-tracking/execute') return jsonResponse({ status: 'verified-success' })
+      throw new Error(`unexpected path ${path}`)
+    }))
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Register with RoboRev' }))
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    expect(calls.filter(call => call.path === '/api/repository-tracking/preview')).toHaveLength(1)
+    expect(calls.filter(call => call.path === '/api/repository-tracking/execute')).toHaveLength(0)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('Register Repository with RoboRev')
+    expect(dialog).toHaveTextContent('Register the selected repository with the currently running RoboRev v0.64.0 daemon.')
+    expect(dialog).toHaveTextContent('Start or restart the daemon, modify repository files, run a review, or commit or push anything.')
+    for (const forbidden of ['C:\\Users\\private\\source\\secret-project', 'PRIVATE_REPOSITORY_PATH_DO_NOT_EXPOSE', 'PRIVATE_DAEMON_ENDPOINT', 'PRIVATE_ROBOREV_BINARY', 'PRIVATE_INVENTORY_ROOT', 'PRIVATE_REPO_IDENTITY', 'PRIVATE_DAEMON_ERROR']) expect(document.body.textContent).not.toContain(forbidden)
+    const confirm = screen.getByRole('button', { name: 'Confirm and register' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    await waitFor(() => expect(screen.getByText('Repository registered with RoboRev.')).toBeInTheDocument())
+    expect(calls.filter(call => call.path === '/api/repository-tracking/execute')).toHaveLength(1)
+    const execute = calls.find(call => call.path === '/api/repository-tracking/execute')!
+    expect(JSON.parse(String(execute.init?.body))).toEqual({ token: 'opaque-tracking-token' })
+    expect(Object.keys(JSON.parse(String(execute.init?.body)))).toEqual(['token'])
+    expect(calls.filter(call => call.path === '/api/repositories/setup-readiness')).toHaveLength(1)
+    expect(screen.getByText('Run Check Setup again to verify the complete repository setup.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps tracking cancel execute-free and reports failure without an immediate retry', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'register-repository', target: 'RoboRev tracking', summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } }))
+      .mockResolvedValueOnce(jsonResponse(preview))
+      .mockRejectedValueOnce(new Error('PRIVATE_DAEMON_ERROR'))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Register with RoboRev' }))
+    fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await userEvent.click(screen.getByRole('button', { name: 'Register with RoboRev' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm and register' }))
+    await waitFor(() => expect(screen.getByText('Repository registration could not be verified. Run Check Setup before trying again.')).toBeInTheDocument())
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('PRIVATE_DAEMON_ERROR')
+  })
+
+  it('does not fetch on locale change and discards a late tracking execute after repository switch', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'register-repository', target: 'RoboRev tracking', summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    let resolveExecute!: (response: Response) => void
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === '/api/repositories/setup-readiness') return Promise.resolve(jsonResponse({ ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } }))
+      if (path === '/api/repository-tracking/preview') return Promise.resolve(jsonResponse(preview))
+      if (path === '/api/repository-tracking/execute') return new Promise<Response>(resolve => { resolveExecute = resolve })
+      return Promise.reject(new Error(`unexpected path ${path}`))
+    }))
+    const view = render(<I18nProvider><LanguageSelector /><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Register with RoboRev' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm and register' }))
+    await waitFor(() => expect(calls.filter(path => path === '/api/repository-tracking/execute')).toHaveLength(1))
+    const count = calls.length
+    view.rerender(<I18nProvider><LanguageSelector /><RepositorySetupReadiness repositoryIdentity="repo-b" /></I18nProvider>)
+    await userEvent.selectOptions(screen.getByRole('combobox'), 'ko')
+    expect(calls).toHaveLength(count)
+    resolveExecute(jsonResponse({ status: 'verified-success' }))
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(screen.queryByText('Repository registered with RoboRev.')).not.toBeInTheDocument()
+    expect(screen.queryByText('저장소를 RoboRev에 등록했습니다.')).not.toBeInTheDocument()
+  })
+
+  it('locks duplicate tracking previews and clears the open dialog authority on repository switch', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'register-repository', target: 'RoboRev tracking', summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === '/api/repositories/setup-readiness') return jsonResponse({ ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } })
+      if (path === '/api/repository-tracking/preview') return jsonResponse(preview)
+      throw new Error(`unexpected path ${path}`)
+    }))
+    const view = render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    const register = await screen.findByRole('button', { name: 'Register with RoboRev' })
+    fireEvent.click(register)
+    fireEvent.click(register)
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
+    expect(calls.filter(path => path === '/api/repository-tracking/preview')).toHaveLength(1)
+    expect(calls.filter(path => path === '/api/repository-tracking/execute')).toHaveLength(0)
+
+    view.rerender(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-b" /></I18nProvider>)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.queryByText('Repository registered with RoboRev.')).not.toBeInTheDocument()
+    expect(calls.filter(path => path === '/api/repository-tracking/execute')).toHaveLength(0)
+  })
+
+  it('discards a late tracking preview after repository switch', async () => {
+    const preview = { version: 'v0.64.0', repositoryIdentity: aliasA, action: 'register-repository', target: 'RoboRev tracking', summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z' }
+    let resolvePreview!: (response: Response) => void
+    const calls: string[] = []
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      calls.push(path)
+      if (path === '/api/repositories/setup-readiness') return Promise.resolve(jsonResponse({ ...ready, overall: 'needs-attention', tracking: { status: 'not-tracked' } }))
+      if (path === '/api/repository-tracking/preview') return new Promise<Response>(resolve => { resolvePreview = resolve })
+      return Promise.reject(new Error(`unexpected path ${path}`))
+    }))
+    const view = render(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-a" /></I18nProvider>)
+    await userEvent.click(screen.getByRole('button', { name: 'Check Setup' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Register with RoboRev' }))
+    await waitFor(() => expect(calls.filter(path => path === '/api/repository-tracking/preview')).toHaveLength(1))
+    view.rerender(<I18nProvider><RepositorySetupReadiness repositoryIdentity="repo-b" /></I18nProvider>)
+    resolvePreview(jsonResponse(preview))
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByText('Registering repository with RoboRev…')).not.toBeInTheDocument()
+    expect(calls.filter(path => path === '/api/repository-tracking/execute')).toHaveLength(0)
+  })
 })
+
+function statusDescriptionForTest(value: { daemon: { status: string }; tracking: { status: string } }) {
+  if (value.daemon.status !== 'online') return value.daemon.status === 'offline' ? 'RoboRev daemon is offline.' : 'RoboRev daemon could not be verified.'
+  if (value.tracking.status === 'not-tracked') return 'This repository is not tracked by RoboRev.'
+  if (value.tracking.status === 'tracked') return 'This repository is tracked by RoboRev.'
+  return 'RoboRev tracking could not be verified.'
+}

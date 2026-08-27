@@ -318,6 +318,18 @@ export type SnapshotIgnorePreview = {
 
 export type SnapshotIgnoreExecuteResult = { status: 'verified-success' | 'failed-unverified' }
 
+export type RepositoryTrackingPreview = {
+  version: 'v0.64.0'
+  repositoryIdentity: RepositoryIdentityAlias
+  action: 'register-repository'
+  target: 'RoboRev tracking'
+  summary: 'Register the selected repository with the running RoboRev daemon.'
+  token: string
+  expiresAt: string
+}
+
+export type RepositoryTrackingExecuteResult = { status: 'verified-success' | 'failed-unverified' }
+
 const snapshotIgnoreVersion = 'v0.64.0' as const
 const snapshotIgnoreAction = 'append-snapshot-ignore' as const
 const snapshotIgnoreTarget = '.gitignore' as const
@@ -326,6 +338,11 @@ const snapshotIgnoreSummary = 'Add the RoboRev snapshot directory to Git ignore 
 // browser-specific date formats).  Date.parse then rejects impossible dates.
 const rfc3339Pattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
 const snapshotIgnoreMaxTokenLength = 4096
+const repositoryTrackingVersion = 'v0.64.0' as const
+const repositoryTrackingAction = 'register-repository' as const
+const repositoryTrackingTarget = 'RoboRev tracking' as const
+const repositoryTrackingSummary = 'Register the selected repository with the running RoboRev daemon.' as const
+const repositoryTrackingMaxTokenLength = 4096
 
 /** Normalize the exact, content-free Snapshot Ignore preview DTO. */
 export function normalizeSnapshotIgnorePreview(value: unknown, expectedRepositoryIdentity?: string): SnapshotIgnorePreview | null {
@@ -338,6 +355,22 @@ export function normalizeSnapshotIgnorePreview(value: unknown, expectedRepositor
 
 /** Normalize the exact, content-free Snapshot Ignore execute result DTO. */
 export function normalizeSnapshotIgnoreExecuteResult(value: unknown): SnapshotIgnoreExecuteResult | null {
+  const root = exactObject(value, ['status'])
+  if (!root || (root.status !== 'verified-success' && root.status !== 'failed-unverified')) return null
+  return { status: root.status }
+}
+
+/** Normalize the exact, content-free Repository Tracking preview DTO. */
+export function normalizeRepositoryTrackingPreview(value: unknown, expectedRepositoryIdentity?: string): RepositoryTrackingPreview | null {
+  const root = exactObject(value, ['version', 'repositoryIdentity', 'action', 'target', 'summary', 'token', 'expiresAt'])
+  if (!root || root.version !== repositoryTrackingVersion || !validRepositoryIdentityAlias(root.repositoryIdentity) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity) || root.action !== repositoryTrackingAction || root.target !== repositoryTrackingTarget || root.summary !== repositoryTrackingSummary) return null
+  if (typeof root.token !== 'string' || !root.token.trim() || root.token.length > repositoryTrackingMaxTokenLength || /[\u0000-\u001F\u007F]/.test(root.token)) return null
+  if (typeof root.expiresAt !== 'string' || !rfc3339Pattern.test(root.expiresAt) || !Number.isFinite(Date.parse(root.expiresAt))) return null
+  return { version: repositoryTrackingVersion, repositoryIdentity: root.repositoryIdentity, action: repositoryTrackingAction, target: repositoryTrackingTarget, summary: repositoryTrackingSummary, token: root.token, expiresAt: root.expiresAt }
+}
+
+/** Normalize the exact, content-free Repository Tracking execute result DTO. */
+export function normalizeRepositoryTrackingExecuteResult(value: unknown): RepositoryTrackingExecuteResult | null {
   const root = exactObject(value, ['status'])
   if (!root || (root.status !== 'verified-success' && root.status !== 'failed-unverified')) return null
   return { status: root.status }
@@ -1816,6 +1849,29 @@ export async function executeSnapshotIgnore(token: string): Promise<SnapshotIgno
   })
   const normalized = normalizeSnapshotIgnoreExecuteResult(value)
   if (!normalized) throw new APIError('invalid-snapshot-ignore-execute-result')
+  return normalized
+}
+
+/** Request one explicitly-triggered repository-scoped tracking preview. */
+export async function fetchRepositoryTrackingPreview(repositoryIdentity: RepositoryIdentityAlias, signal?: AbortSignal): Promise<RepositoryTrackingPreview> {
+  const value = await request<unknown>('/api/repository-tracking/preview', {
+    method: 'POST',
+    body: JSON.stringify({ repositoryIdentity }),
+    signal,
+  })
+  const normalized = normalizeRepositoryTrackingPreview(value, repositoryIdentity)
+  if (!normalized) throw new APIError('invalid-repository-tracking-preview')
+  return normalized
+}
+
+/** Execute one server-bound, single-use repository tracking token. */
+export async function executeRepositoryTracking(token: string): Promise<RepositoryTrackingExecuteResult> {
+  const value = await request<unknown>('/api/repository-tracking/execute', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+  const normalized = normalizeRepositoryTrackingExecuteResult(value)
+  if (!normalized) throw new APIError('invalid-repository-tracking-execute-result')
   return normalized
 }
 

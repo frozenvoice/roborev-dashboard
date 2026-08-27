@@ -25,6 +25,18 @@ type repositoryMetadataInspector interface {
 	IsLinkedWorktree(context.Context, string) (bool, error)
 }
 
+// repositoryRegistrationRootResolver is optional so existing registry
+// inspectors and their fakes remain source-compatible. Implementations that
+// understand linked-worktree layouts return the effective main checkout root
+// used by RoboRev's repository registration endpoint.
+type repositoryRegistrationRootResolver interface {
+	RegistrationRoot(context.Context, string) (string, error)
+}
+
+type repositoryRootInspector interface {
+	InspectRoot(context.Context, string) (string, error)
+}
+
 type repositoryHookPathResolver interface {
 	HooksPath(context.Context, string) (string, error)
 }
@@ -716,6 +728,68 @@ func (r *Registry) InspectIdentity(ctx context.Context, identity string) (gitx.R
 		return gitx.Repository{}, err
 	}
 	return r.inspectExpected(ctx, path)
+}
+
+// InspectRoot performs the narrow root-only Git authority probe required by
+// repository tracking. It deliberately does not fall back to Inspect, whose
+// richer HEAD/branch/status metadata is unrelated to root-path registration.
+func (r *Registry) InspectRoot(ctx context.Context, path string) (string, error) {
+	resolved, err := r.Resolve(path)
+	if err != nil {
+		return "", err
+	}
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	rootInspector, ok := inspector.(repositoryRootInspector)
+	if !ok {
+		return "", errors.New("Git repository root inspection is unavailable")
+	}
+	root, err := rootInspector.InspectRoot(ctx, resolved)
+	if err != nil || strings.TrimSpace(root) == "" || !gitx.SameRepositoryPath(root, resolved) {
+		return "", errors.New("Git repository root inspection is unavailable")
+	}
+	return filepath.Clean(root), nil
+}
+
+// RegistrationRoot resolves the selected registered repository's effective
+// RoboRev registration root. A legacy inspector without the optional Git
+// metadata capability fails closed because mutation authority cannot be
+// proven; it never accepts a browser-supplied path.
+func (r *Registry) RegistrationRoot(ctx context.Context, path string) (string, error) {
+	resolved, err := r.Resolve(path)
+	if err != nil {
+		return "", err
+	}
+	r.mu.RLock()
+	inspector := r.inspector
+	r.mu.RUnlock()
+	if resolver, ok := inspector.(repositoryRegistrationRootResolver); ok {
+		effective, resolveErr := resolver.RegistrationRoot(ctx, resolved)
+		if resolveErr != nil || strings.TrimSpace(effective) == "" || !filepath.IsAbs(effective) {
+			return "", errors.New("repository registration root is unavailable")
+		}
+		return filepath.Clean(effective), nil
+	}
+	return "", errors.New("repository registration root is unavailable")
+}
+
+// ReadinessTrackingRoot retains the setup-readiness compatibility behavior
+// for legacy test/adapters that only expose RepositoryInspector. Mutation
+// endpoints must use RegistrationRoot and fail closed when effective Git
+// root semantics cannot be proved.
+func (r *Registry) ReadinessTrackingRoot(ctx context.Context, path string) (string, error) {
+	resolved, err := r.Resolve(path)
+	if err != nil {
+		return "", err
+	}
+	r.mu.RLock()
+	_, hasResolver := r.inspector.(repositoryRegistrationRootResolver)
+	r.mu.RUnlock()
+	if hasResolver {
+		return r.RegistrationRoot(ctx, resolved)
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // InspectCIWorkflow resolves an opaque registered repository identity and

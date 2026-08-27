@@ -23,6 +23,9 @@ func newSetupReadinessChecker(service roborev.Service, registry *Registry, hooks
 		value, err := registry.SnapshotProbe(ctx, root, relative)
 		return setupreadiness.SnapshotObservation{Tracked: value.Tracked, Ignored: value.Ignored}, err
 	}
+	deps.TrackingRoot = func(ctx context.Context, root string) (string, error) {
+		return registry.ReadinessTrackingRoot(ctx, root)
+	}
 	if hooks != nil {
 		deps.Hooks = func(ctx context.Context, identity, root string) (setupreadiness.GitHooks, error) {
 			value, err := hooks.Inspect(ctx, identity, root)

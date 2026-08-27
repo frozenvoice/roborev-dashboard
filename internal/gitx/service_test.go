@@ -22,16 +22,22 @@ type recordingRunner struct {
 }
 
 type hooksPathRunner struct {
-	commands []proc.Command
-	outputs  map[string]string
-	errors   map[string]error
-	exitCode map[string]int
+	commands  []proc.Command
+	outputs   map[string]string
+	errors    map[string]error
+	exitCode  map[string]int
+	showRoots []string
 }
 
 func (r *hooksPathRunner) Run(_ context.Context, command proc.Command) (proc.Result, error) {
 	r.commands = append(r.commands, command)
 	key := strings.Join(command.Args[2:], " ")
-	result := proc.Result{Stdout: r.outputs[key], ExitCode: r.exitCode[key]}
+	stdout := r.outputs[key]
+	if key == "rev-parse --show-toplevel" && len(r.showRoots) > 0 {
+		stdout = r.showRoots[0]
+		r.showRoots = r.showRoots[1:]
+	}
+	result := proc.Result{Stdout: stdout, ExitCode: r.exitCode[key]}
 	if err := r.errors[key]; err != nil {
 		return result, err
 	}
@@ -170,6 +176,84 @@ func TestHooksPathResolvesSeparateGitDirThroughCoreWorktree(t *testing.T) {
 	}
 	if want := filepath.Join(mainRoot, ".githooks"); got != want {
 		t.Fatalf("hooks path=%q want=%q", got, want)
+	}
+}
+
+func TestRegistrationRootUsesSelectedRootForOrdinaryCheckout(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ordinary")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --show-toplevel":  root,
+		"rev-parse --git-dir":        filepath.Join(root, ".git"),
+		"rev-parse --git-common-dir": filepath.Join(root, ".git"),
+	}}
+	got, err := New(runner).RegistrationRoot(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(root) {
+		t.Fatalf("registration root=%q want=%q", got, filepath.Clean(root))
+	}
+}
+
+func TestRegistrationRootPreservesLinkedMainRootSpelling(t *testing.T) {
+	base := t.TempDir()
+	selected := filepath.Join(base, "checkout")
+	mainRoot := filepath.Join(base, "main")
+	common := filepath.Join(base, "metadata")
+	gitDir := filepath.Join(common, "worktrees", "checkout")
+	configFile := filepath.Join(common, "config")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --show-toplevel":                         selected,
+		"rev-parse --git-dir":                               gitDir,
+		"rev-parse --git-common-dir":                        common,
+		"config --file " + configFile + " --bool core.bare": "false",
+		"config --file " + configFile + " core.worktree":    filepath.Join("..", "main"),
+	}, showRoots: []string{selected, mainRoot}}
+	got, err := New(runner).RegistrationRoot(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(mainRoot) {
+		t.Fatalf("registration root=%q want=%q", got, filepath.Clean(mainRoot))
+	}
+}
+
+func TestRegistrationRootUsesOrdinaryLinkedWorktreeMainCheckout(t *testing.T) {
+	base := t.TempDir()
+	selected := filepath.Join(base, "feature")
+	mainRoot := filepath.Join(base, "main")
+	common := filepath.Join(mainRoot, ".git")
+	gitDir := filepath.Join(common, "worktrees", "feature")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --git-dir":        gitDir,
+		"rev-parse --git-common-dir": common,
+	}, showRoots: []string{selected, mainRoot}}
+	got, err := New(runner).RegistrationRoot(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(mainRoot) {
+		t.Fatalf("registration root=%q want main checkout=%q", got, filepath.Clean(mainRoot))
+	}
+}
+
+func TestRegistrationRootKeepsBareBackedLinkedCheckout(t *testing.T) {
+	base := t.TempDir()
+	selected := filepath.Join(base, "feature")
+	common := filepath.Join(base, "bare.git")
+	gitDir := filepath.Join(common, "worktrees", "feature")
+	configFile := filepath.Join(common, "config")
+	runner := &hooksPathRunner{outputs: map[string]string{
+		"rev-parse --git-dir":                               gitDir,
+		"rev-parse --git-common-dir":                        common,
+		"config --file " + configFile + " --bool core.bare": "true",
+	}, showRoots: []string{selected, selected, selected}}
+	got, err := New(runner).RegistrationRoot(context.Background(), selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(selected) {
+		t.Fatalf("registration root=%q want selected checkout=%q", got, filepath.Clean(selected))
 	}
 }
 

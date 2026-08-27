@@ -192,6 +192,48 @@ func TestTrackingAcceptsWindowsCanonicalCaseEquivalenceAcrossSeparators(t *testi
 	}
 }
 
+func TestCheckUsesEffectiveTrackingRootAndFailsClosedWhenItCannotBeResolved(t *testing.T) {
+	selectedRoot := t.TempDir()
+	effectiveRoot := t.TempDir()
+	for _, test := range []struct {
+		name         string
+		trackingRoot func(context.Context, string) (string, error)
+		want         Tracking
+	}{
+		{
+			name: "effective MainRoot match",
+			trackingRoot: func(_ context.Context, root string) (string, error) {
+				if root != selectedRoot {
+					t.Fatalf("tracking root input=%q want selected=%q", root, selectedRoot)
+				}
+				return effectiveRoot, nil
+			},
+			want: TrackingTracked,
+		},
+		{
+			name:         "effective root unavailable",
+			trackingRoot: func(context.Context, string) (string, error) { return "", errors.New("private Git error") },
+			want:         TrackingUnavailable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checker := New(Dependencies{
+				Daemon: func(context.Context) (DaemonObservation, error) {
+					return DaemonObservation{State: DaemonOnline, InventoryAvailable: true, InventoryRoots: []string{effectiveRoot}}, nil
+				},
+				TrackingRoot: test.trackingRoot,
+			})
+			result, err := checker.Check(context.Background(), "opaque", selectedRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Tracking.Status != test.want {
+				t.Fatalf("tracking=%q want=%q result=%#v", result.Tracking.Status, test.want, result)
+			}
+		})
+	}
+}
+
 func TestCheckKeepsSnapshotFailureIndependentFromHooksAndDaemon(t *testing.T) {
 	root := t.TempDir()
 	calledHooks, calledDaemon := false, false

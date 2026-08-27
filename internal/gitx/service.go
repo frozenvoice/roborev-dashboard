@@ -729,6 +729,54 @@ func (s *Service) CanonicalRoot(ctx context.Context, input string) (string, erro
 	return filepath.Clean(root), nil
 }
 
+// RegistrationRoot returns the effective repository root used by RoboRev's
+// v0.64 repository registration path.  Ordinary checkouts retain their Git
+// root.  For linked worktrees, the common .git metadata identifies the main
+// checkout; bare-backed checkouts retain the checkout returned by
+// --show-toplevel, and separate-git-dir layouts use the configured
+// core.worktree.  This is deliberately read-only and mirrors the main-root
+// resolution used by the hook adapter.
+func (s *Service) RegistrationRoot(ctx context.Context, input string) (string, error) {
+	if s == nil || s.Runner == nil || strings.TrimSpace(input) == "" {
+		return "", errors.New("repository registration root is unavailable")
+	}
+	root, err := s.CanonicalRoot(ctx, input)
+	if err != nil {
+		return "", errors.New("repository registration root is unavailable")
+	}
+	env := s.sanitizedHookGitEnv(ctx, root)
+	effective, err := s.mainRootForHooks(ctx, root, env)
+	if err != nil || strings.TrimSpace(effective) == "" {
+		return "", errors.New("repository registration root is unavailable")
+	}
+	effective, err = filepath.Abs(filepath.Clean(effective))
+	if err != nil || !filepath.IsAbs(effective) {
+		return "", errors.New("repository registration root is unavailable")
+	}
+	// Preserve the exact cleaned MainRoot spelling for the inventory key.
+	// The daemon request still receives the selected checkout root and applies
+	// MainRoot itself. CanonicalRoot below validates that this effective path is
+	// an actual Git root without replacing the upstream spelling returned here.
+	effective = filepath.Clean(effective)
+	// The effective root must itself be a Git repository root. This final
+	// typed probe also rejects a malformed core.worktree value without any
+	// filesystem or Git mutation.
+	if _, err := s.CanonicalRoot(ctx, effective); err != nil {
+		return "", errors.New("repository registration root is unavailable")
+	}
+	return effective, nil
+}
+
+// InspectRoot performs only the typed Git root probe needed by root-only
+// registration flows. It intentionally does not read HEAD, branch, status,
+// configuration, or any other repository metadata.
+func (s *Service) InspectRoot(ctx context.Context, input string) (string, error) {
+	if s == nil || s.Runner == nil || strings.TrimSpace(input) == "" {
+		return "", errors.New("Git repository root is unavailable")
+	}
+	return s.CanonicalRoot(ctx, input)
+}
+
 func (s *Service) Inspect(ctx context.Context, path string) (Repository, error) {
 	root, err := s.CanonicalRoot(ctx, path)
 	if err != nil {

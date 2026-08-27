@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeCIWorkflow, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
+import { executeCIWorkflow, executeRepositoryTracking, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRepositoryTrackingExecuteResult, normalizeRepositoryTrackingPreview, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
 const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
@@ -265,6 +265,65 @@ describe('snapshot ignore management API contract', () => {
     expect(normalizeSnapshotIgnoreExecuteResult({ status: 'failed-unverified' })).toEqual({ status: 'failed-unverified' })
     expect(normalizeSnapshotIgnoreExecuteResult({ status: 'verified-success', token: 'secret' })).toBeNull()
     expect(normalizeSnapshotIgnoreExecuteResult({ status: 'error' })).toBeNull()
+  })
+})
+
+describe('repository tracking management API contract', () => {
+  const alias = 'A'.repeat(43)
+  const preview = {
+    version: 'v0.64.0', repositoryIdentity: alias, action: 'register-repository', target: 'RoboRev tracking',
+    summary: 'Register the selected repository with the running RoboRev daemon.', token: 'opaque-tracking-token', expiresAt: '2099-01-01T00:00:00.000Z',
+  } as const
+
+  it('accepts only the exact content-free preview DTO and matching alias', () => {
+    expect(normalizeRepositoryTrackingPreview(preview, alias)).toEqual(preview)
+    for (const value of [
+      { ...preview, repositoryIdentity: 'repo-a' },
+      { ...preview, repositoryIdentity: 'B'.repeat(43) },
+      { ...preview, version: '0.64.0' },
+      { ...preview, action: 'register' },
+      { ...preview, target: 'C:\\private' },
+      { ...preview, summary: 'private' },
+      { ...preview, token: '' },
+      { ...preview, token: 'secret\u0000token' },
+      { ...preview, expiresAt: 'not-a-date' },
+      { ...preview, repo_path: 'C:\\private' },
+      { ...preview, daemonEndpoint: '127.0.0.1:7373' },
+      { ...preview, binary: 'C:\\private\\roborev.exe' },
+      { ...preview, repos: [{ root_path: 'C:\\private', name: 'private', identity: 'private', count: 1 }] },
+      { ...preview, root_path: 'C:\\private' },
+      { ...preview, identity: 'private' },
+      { ...preview, error: 'PRIVATE_DAEMON_ERROR' },
+    ]) expect(normalizeRepositoryTrackingPreview(value, alias)).toBeNull()
+  })
+
+  it('POSTs exactly the opaque alias for preview and exactly the token for execute', async () => {
+    setCSRF('test-csrf')
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(preview), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'verified-success' }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(fetchRepositoryTrackingPreview(alias)).resolves.toEqual(preview)
+    await expect(executeRepositoryTracking(preview.token)).resolves.toEqual({ status: 'verified-success' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [previewPath, previewInit] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(previewPath).toBe('/api/repository-tracking/preview')
+    expect(previewInit.method).toBe('POST')
+    expect(JSON.parse(String(previewInit.body))).toEqual({ repositoryIdentity: alias })
+    expect(Object.keys(JSON.parse(String(previewInit.body)))).toEqual(['repositoryIdentity'])
+    const [executePath, executeInit] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(executePath).toBe('/api/repository-tracking/execute')
+    expect(executeInit.method).toBe('POST')
+    expect(JSON.parse(String(executeInit.body))).toEqual({ token: preview.token })
+    expect(Object.keys(JSON.parse(String(executeInit.body)))).toEqual(['token'])
+    expect(new Headers(executeInit.headers).get('X-CSRF-Token')).toBe('test-csrf')
+  })
+
+  it('strictly normalizes execute results and rejects private fields', () => {
+    expect(normalizeRepositoryTrackingExecuteResult({ status: 'verified-success' })).toEqual({ status: 'verified-success' })
+    expect(normalizeRepositoryTrackingExecuteResult({ status: 'failed-unverified' })).toEqual({ status: 'failed-unverified' })
+    expect(normalizeRepositoryTrackingExecuteResult({ status: 'verified-success', repo_path: 'C:\\private' })).toBeNull()
+    expect(normalizeRepositoryTrackingExecuteResult({ status: 'error' })).toBeNull()
   })
 })
 
