@@ -16,7 +16,7 @@
 - Correction status: **PASS**
 - Remaining MUST-SHIP: **0**
 - Feature verdict: **v0.64 FEATURE-COMPLETE**
-- Release verdict: **RELEASE-READY-CANDIDATE / REMOTE-CI-PENDING** (successor checkpoint; not release-closed)
+- Release verdict: **RELEASE-READY-CANDIDATE / REMOTE-CI-PASSED** (successor checkpoint; not release-closed)
 - Correction reviewer: **exactly 1 fresh-context reviewer, initial NOT-CLOSED, final PASS**
 - Completed successor checkpoint: **Windows Release Readiness & Non-Destructive E2E**
 - Current next checkpoint: **Final Release Candidate Closure**
@@ -148,19 +148,19 @@ That correction reviewer initially returned **NOT-CLOSED** for one exact-v0.64 c
 - Same-user external writers can race after an unavoidable final filesystem/daemon guard.
 - Dashboard/process crash after a started external mutation may leave only an unverified outcome.
 - The first release has no prior public Dashboard artifact, so upgrade-from-previous remains explicitly N/A; same-config restart and idle-crash recovery now have copied release-EXE evidence.
-- Local clean-machine, exact-v0.64, v0.65 mismatch, reproducibility and real pinned-installer gates pass. The pushed remote CI status remains unobserved. Branch protection/ruleset metadata is unavailable under the current private-plan API response (HTTP 403).
+- Local clean-machine, exact-v0.64, v0.65 mismatch, reproducibility and real pinned-installer gates pass. Windows CI run `33203847446` also passed for release-code commit `737239a561bdb3d380dd9b7da2d49a7bb55b520c`. Branch protection/ruleset metadata is unavailable under the current private-plan API response (HTTP 403).
 - v0.65+ is unsupported until a separate capability/contract checkpoint.
 
 ## Feature closure / release-readiness handoff
 
-The corrected source/test/reviewer evidence supports `MUST-SHIP 0` and **v0.64 FEATURE-COMPLETE**. It does not claim full CLI parity. The separate successor release gate now supports **RELEASE-READY-CANDIDATE / REMOTE-CI-PENDING**; optional, superseded, unsupported and upstream-blocked taxonomy remains unchanged from `V064-COMPLETION-AUDIT.md`.
+The corrected source/test/reviewer evidence supports `MUST-SHIP 0` and **v0.64 FEATURE-COMPLETE**. It does not claim full CLI parity. The separate successor release gate now supports **RELEASE-READY-CANDIDATE / REMOTE-CI-PASSED**; optional, superseded, unsupported and upstream-blocked taxonomy remains unchanged from `V064-COMPLETION-AUDIT.md`.
 
-The exact next checkpoint is **Final Release Candidate Closure**. It observes remote CI and makes the explicit version/signing/tag/publication decisions; this document still does not claim **RELEASE-CLOSED**.
+The exact next checkpoint is **Final Release Candidate Closure**. It makes the explicit version, release-notes, signing, tag and publication decisions and confirms the final artifact/commit CI; this document still does not claim **RELEASE-CLOSED**.
 
 ## Remote repository / Git
 
 - Remote CI workflow: `.github/workflows/ci.yml` (Windows Tier 1, read-only permissions, immutable action SHAs).
-- Remote CI run evidence: **PENDING** until the pushed commit's run is observed.
+- Remote CI run evidence: **PASS**, run `33203847446` for `737239a561bdb3d380dd9b7da2d49a7bb55b520c`.
 - Branch protection/ruleset: API unavailable under the current private-plan boundary; no remote setting was changed.
 - Commit/fetch/push and final clean `HEAD == origin/main` verification are completion gates performed after the internal reviewer’s final PASS and recorded in the completion report.
 
@@ -170,6 +170,6 @@ External RoboRev `dashboard_cross`, `dashboard_deep`, 3-review, real review job,
 
 ## Release-readiness boundary (2026-08-29)
 
-This security closure establishes the feature verdict: exact RoboRev v0.64.0 is **FEATURE-COMPLETE** with remaining MUST-SHIP 0. The separate Windows Release Readiness checkpoint added Windows 11 `windows/amd64` provenance, deterministic package/SHA/reproducibility, copied-EXE non-destructive E2E, crash/restart evidence, gated official installer evidence and the remote CI definition. Its current verdict is **RELEASE-READY-CANDIDATE / REMOTE-CI-PENDING**; it must never be reported as **RELEASE-CLOSED** from this document.
+This security closure establishes the feature verdict: exact RoboRev v0.64.0 is **FEATURE-COMPLETE** with remaining MUST-SHIP 0. The separate Windows Release Readiness checkpoint added Windows 11 `windows/amd64` provenance, deterministic package/SHA/reproducibility, copied-EXE non-destructive E2E, crash/restart evidence, gated official installer evidence and a passing remote CI gate. Its current verdict is **RELEASE-READY-CANDIDATE / REMOTE-CI-PASSED**; it must never be reported as **RELEASE-CLOSED** from this document.
 
 The exact v0.64 boundary remains fail closed for v0.65+ and unknown/malformed runtime contracts. General Fix, new Panel Refine execution, General Refine, Tasks, Analyze, Review Export, CI Metrics and compact remain intentionally blocked or deferred under the audited v0.64 safety contracts. See [`docs/RELEASE.md`](RELEASE.md) for the release checklist, unsigned-binary limitations and the next **Final Release Candidate Closure** checkpoint.

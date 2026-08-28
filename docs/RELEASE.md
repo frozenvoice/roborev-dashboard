@@ -1,6 +1,6 @@
 # Windows release readiness
 
-이 문서는 RoboRev Dashboard의 첫 Windows 배포 후보를 검증하기 위한 운영 문서다. 현재 판정은 **RELEASE-READY-CANDIDATE / REMOTE-CI-PENDING**이며 **RELEASE-CLOSED** 또는 실제 release/tag 승인이 아니다. feature와 release를 분리한다.
+이 문서는 RoboRev Dashboard의 첫 Windows 배포 후보를 검증하기 위한 운영 문서다. 현재 판정은 **RELEASE-READY-CANDIDATE / REMOTE-CI-PASSED**이며 **RELEASE-CLOSED** 또는 실제 release/tag 승인이 아니다. feature와 release를 분리한다.
 
 ## 지원 범위
 
@@ -60,11 +60,11 @@ Run from a clean `main` checkout and record evidence for the exact commit:
 5. Run the packaged Windows non-destructive E2E against a copied artifact, including embedded frontend, clean temp config, fake v0.64 daemon, v0.65 mismatch, restart/crash and cleanup checks. Confirm mutation POST count is zero.
 6. Run the gated online installer E2E only when network evidence is available, for example `$env:ROBOREV_DASHBOARD_ONLINE_INSTALL_E2E='1'; go test ./internal/roborevcompat -run TestOnlinePinnedInstallerE2E -count=1`. It must use the pinned official v0.64.0 asset in a temporary HOME and verify second-install no-replace/hash preservation. Network-unavailable is **ONLINE-INSTALL-EVIDENCE-MISSING**, never PASS.
 7. Review the unsigned-binary and SmartScreen note, recovery instructions, blocked-feature list and support evidence requirements.
-8. Observe the GitHub Actions Windows Tier 1 run for the pushed commit. Until observed, record **REMOTE-CI-PENDING**; do not infer green from workflow syntax.
+8. Observe the GitHub Actions Windows Tier 1 run for the pushed commit; do not infer green from workflow syntax. Release-code commit `737239a561bdb3d380dd9b7da2d49a7bb55b520c` passed run `33203847446`, including tests, vet, build, reproducible package, packaged E2E and artifact upload from a verified non-reparse Windows checkout.
 9. Confirm branch protection/ruleset status. The current private-plan API boundary is unavailable/not configured; this remains a residual release risk until an administrator establishes it.
 10. Only a release owner may choose the real version/tag and publish a future release. This checkpoint creates no tag, release, signature or installer package.
 
-The local release gate and the real gated online installer evidence passed for the current source. The current verdict is **RELEASE-READY-CANDIDATE / REMOTE-CI-PENDING**. The next checkpoint is **Final Release Candidate Closure**, which observes the pushed Windows CI run, chooses the real release version, freezes release notes, regenerates the artifact for that version and decides signing/tag/publication. It must not infer a published release from this candidate evidence.
+The local release gate, the real gated online installer evidence and the pushed Windows CI gate passed. The current verdict is **RELEASE-READY-CANDIDATE / REMOTE-CI-PASSED**. The next checkpoint is **Final Release Candidate Closure**, which chooses the real release version, freezes release notes, regenerates the artifact for that version, confirms the final commit's CI and decides signing/tag/publication. It must not infer a published release from this candidate evidence.
 
 ## Support evidence
 
