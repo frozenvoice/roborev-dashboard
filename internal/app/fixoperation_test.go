@@ -80,30 +80,6 @@ func TestFixPreviewEndpointUsesBackendProjectionAndCSRFProtectsStart(t *testing.
 		t.Fatalf("unknown get status = %d", unknownGet.Code)
 	}
 	body, _ := json.Marshal(map[string]any{"repositoryIdentity": identity, "targetJobId": 42, "agent": "codex", "previewToken": preview.PreviewToken})
-	releaseRefine, err := server.Gate.AcquireRefine()
-	if err != nil {
-		t.Fatal(err)
-	}
-	blockedByRefine := httptest.NewRequest(http.MethodPost, "/api/fixes", strings.NewReader(string(body)))
-	blockedByRefine.Header.Set("X-CSRF-Token", server.csrfToken)
-	blockedRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(blockedRecorder, blockedByRefine)
-	if blockedRecorder.Code != http.StatusConflict {
-		t.Fatalf("fix during Panel Refine status = %d", blockedRecorder.Code)
-	}
-	releaseRefine()
-	releaseReview, err := server.Gate.AcquireMutation()
-	if err != nil {
-		t.Fatal(err)
-	}
-	blockedByReview := httptest.NewRequest(http.MethodPost, "/api/fixes", strings.NewReader(string(body)))
-	blockedByReview.Header.Set("X-CSRF-Token", server.csrfToken)
-	blockedReviewRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(blockedReviewRecorder, blockedByReview)
-	if blockedReviewRecorder.Code != http.StatusConflict {
-		t.Fatalf("fix during review mutation status = %d", blockedReviewRecorder.Code)
-	}
-	releaseReview()
 	post := httptest.NewRequest(http.MethodPost, "/api/fixes", strings.NewReader(string(body)))
 	withoutCSRF := httptest.NewRecorder()
 	server.Handler().ServeHTTP(withoutCSRF, post)
@@ -114,37 +90,11 @@ func TestFixPreviewEndpointUsesBackendProjectionAndCSRFProtectsStart(t *testing.
 	post.Header.Set("X-CSRF-Token", server.csrfToken)
 	withCSRF := httptest.NewRecorder()
 	server.Handler().ServeHTTP(withCSRF, post)
-	if withCSRF.Code != http.StatusAccepted {
-		t.Fatalf("start status = %d, body=%s", withCSRF.Code, withCSRF.Body.String())
+	if withCSRF.Code != http.StatusNotImplemented || !strings.Contains(withCSRF.Body.String(), `"phase":"fix-hidden-lifecycle-blocked"`) {
+		t.Fatalf("authorized execution status = %d, body=%s", withCSRF.Code, withCSRF.Body.String())
 	}
-	var operation struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(withCSRF.Body.Bytes(), &operation); err != nil || operation.ID == "" {
-		t.Fatalf("operation response = %s", withCSRF.Body.String())
-	}
-	list := httptest.NewRecorder()
-	server.Handler().ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/fixes?repositoryIdentity="+url.QueryEscape(identity), nil))
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), operation.ID) {
-		t.Fatalf("list status/body = %d/%s", list.Code, list.Body.String())
-	}
-	get := httptest.NewRecorder()
-	server.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/fixes/"+url.PathEscape(operation.ID), nil))
-	if get.Code != http.StatusOK {
-		t.Fatalf("get status/body = %d/%s", get.Code, get.Body.String())
-	}
-	cancelRequest := httptest.NewRequest(http.MethodPost, "/api/fixes/"+url.PathEscape(operation.ID)+"/cancel", nil)
-	withoutCancelCSRF := httptest.NewRecorder()
-	server.Handler().ServeHTTP(withoutCancelCSRF, cancelRequest)
-	if withoutCancelCSRF.Code != http.StatusForbidden {
-		t.Fatalf("missing cancel CSRF status = %d", withoutCancelCSRF.Code)
-	}
-	cancelRequest = httptest.NewRequest(http.MethodPost, "/api/fixes/"+url.PathEscape(operation.ID)+"/cancel", nil)
-	cancelRequest.Header.Set("X-CSRF-Token", server.csrfToken)
-	cancelRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(cancelRecorder, cancelRequest)
-	if cancelRecorder.Code != http.StatusAccepted {
-		t.Fatalf("cancel status/body = %d/%s", cancelRecorder.Code, cancelRecorder.Body.String())
+	if service.started != 0 {
+		t.Fatalf("blocked execution invoked Fix %d times", service.started)
 	}
 	shutdown, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
 	defer shutdownCancel()

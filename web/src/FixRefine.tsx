@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Check, CircleStop, Code2, Play, RefreshCw, ShieldCheck, X, XCircle } from 'lucide-react'
 import { type FixOperation, type FixPreview, normalizeFixOperation, normalizeFixOperationsResponse, normalizeFixPreview, type PanelConfiguration, type PanelRefineOptions, type PanelRefineRun, type ReviewJob, request } from './api'
+import { GeneralRefine } from './GeneralRefine'
 import { PanelRefine, type PanelRefineProps } from './PanelRefine'
 import { LanguageSelector, useI18n } from './i18n'
 
@@ -51,6 +52,11 @@ function phaseLabel(operation: FixOperation, t: ReturnType<typeof useI18n>['t'])
   return operation.phase === 'starting' ? t('fix.starting') : t('status.running')
 }
 function phaseTone(operation: FixOperation) { return operation.phase === 'succeeded' ? 'pass' : operation.phase === 'failed' ? 'failed' : operation.phase === 'cancelled' ? 'cancelled' : 'running' }
+// v0.64's explicit-ID fix command can manage daemon lifecycle and hooks as a
+// side effect. Keep the read-only preview/history surface, but never expose a
+// browser-authorized mutation path until upstream provides a lifecycle-free
+// contract.
+const fixExecutionEnabled = false
 
 export type PanelRefineSummaryProps = { run: PanelRefineRun; onOpen: () => void }
 export function PanelRefineSummary({ run, onOpen }: PanelRefineSummaryProps) {
@@ -194,7 +200,7 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
   }, [loadOperation, onTerminal, operation?.id, operation?.phase, repoIdentity])
 
   const submit = async () => {
-    if (!preview || submitting || active(operation)) return
+    if (!fixExecutionEnabled || !preview || submitting || active(operation)) return
     setSubmitting(true)
     setOperationError('')
     try {
@@ -238,13 +244,15 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
         {targetJobs.length ? <label className="fix-target-select" htmlFor="fix-target"><span>{t('fix.selectTarget')}</span><select id="fix-target" value={selectedJobId ?? ''} onChange={event => onSelectedJobIdChange(event.target.value ? Number(event.target.value) : null)} disabled={previewLoading || submitting}><option value="">{t('fix.chooseTarget')}</option>{targetJobs.map(job => <option key={fixJobId(job)} value={fixJobId(job) ?? ''}>{targetLabel(job)}</option>)}</select></label> : <div className="fix-empty"><Code2 size={19} /><div><strong>{t('fix.noTargets')}</strong><p>{t('fix.noTargetsBody')}</p></div></div>}
         {selected && <div className="fix-target-facts"><span><b>{t('fix.job')}</b>#{fixJobId(selected)}</span><span><b>{t('fix.gitRef')}</b><code>{short(selected.git_ref)}</code></span><span><b>{t('fix.branch')}</b>{selected.branch || '—'}</span><span><b>{t('fix.targetKind')}</b>{isSynthesisJob(selected) ? t('fix.synthesis') : t('fix.single')}</span></div>}
         {previewError && <p className="fix-error" role="alert">{t('fix.previewFailed', { error: previewError })}</p>}
+        <p className="fix-execution-disabled" role="status"><AlertTriangle size={16} />{t('fix.executionDisabled')}</p>
         {selected && <div className="fix-actions"><button className="button primary" disabled={!preview || previewLoading || Boolean(previewError) || active(operation)} onClick={() => setDialogOpen(true)}>{previewLoading ? <RefreshCw className="spin" size={15} /> : <Play size={15} />}{previewLoading ? t('fix.loadingPreview') : t('fix.reviewPreview')}</button>{preview && <small>{t('fix.previewReady')}</small>}</div>}
       </section>
       {operationLoading && !operation && <div className="skeleton" />}
       {operationError && !previewError && <p className="fix-error" role="alert">{operationError} <button className="button ghost compact" onClick={() => void loadOperations()}>{t('common.retry')}</button></p>}
       {operation && <article className={`fix-operation-card ${phaseTone(operation)}`} aria-live="polite"><header><div><span className="fix-operation-id">{t('fix.operation', { id: operation.id })}</span><h2>{phaseLabel(operation, t)}</h2></div><span className={`fix-phase ${phaseTone(operation)}`}><span className="status-dot" />{phaseLabel(operation, t)}</span></header><div className="fix-operation-facts"><span><b>{t('fix.target')}</b>#{operation.target.jobId}</span><span><b>{t('fix.startingHead')}</b><code>{short(operation.startingHead)}</code></span><span><b>{t('fix.endingHead')}</b><code>{short(operation.endingHead)}</code></span><span><b>{t('fix.endingBranch')}</b>{operation.endingBranch || '—'}</span>{operation.endingDirty !== undefined && <span><b>{t('fix.endingDirty')}</b>{operation.endingDirty ? t('status.dirty') : t('status.clean')}</span>}</div>{operation.error && <p className="fix-error" role="alert">{operation.error}{operation.errorCode && <small> · {operation.errorCode}</small>}</p>}<footer>{operation.phase === 'succeeded' && <button className="button" onClick={() => onOpenReview(operation.target.jobId)}>{t('fix.openReview')}</button>}{active(operation) && <button className="button danger" disabled={canceling} onClick={() => void cancel()}><CircleStop size={15} />{canceling ? t('fix.canceling') : t('fix.cancel')}</button>}</footer></article>}
+      <GeneralRefine repositoryIdentity={repoIdentity} onOpenReview={onOpenReview} onTerminal={onTerminal} onToast={onToast} />
       <PanelRefine {...panelRefine} />
     </section>
-    {dialogOpen && preview && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog fix-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-confirm-title"><header><div><h2 id="fix-confirm-title">{t('fix.confirmTitle')}</h2><p>{t('fix.confirmDescription')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('fix.closePreview')} onClick={() => setDialogOpen(false)} disabled={submitting}><X /></button></div></header><div className="fix-preview-facts"><span><b>{t('fix.repository')}</b><code>{preview.repositoryPath}</code></span><span><b>{t('fix.target')}</b>#{preview.target.jobId} · {preview.target.gitRef}</span><span><b>{t('fix.startingHead')}</b><code>{preview.startingHead}</code> · {preview.startingBranch}</span></div><div className="fix-command-preview"><strong>{t('fix.command')}</strong><code className="fix-executable">{preview.command.executable}</code><ol>{preview.command.args.map((arg, index) => <li key={`${index}-${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div><p className="fix-safety"><AlertTriangle size={16} />{t('fix.safety')}</p><footer><button className="button" onClick={() => setDialogOpen(false)} disabled={submitting}>{t('common.cancel')}</button><button className="button primary" onClick={() => void submit()} disabled={submitting}>{submitting ? t('fix.confirming') : <><Check size={15} />{t('fix.confirmAction')}</>}</button></footer></section></div>}
+    {dialogOpen && preview && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog fix-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-confirm-title"><header><div><h2 id="fix-confirm-title">{t('fix.confirmTitle')}</h2><p>{t('fix.confirmDescription')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('fix.closePreview')} onClick={() => setDialogOpen(false)} disabled={submitting}><X /></button></div></header><div className="fix-preview-facts"><span><b>{t('fix.repository')}</b><code>{preview.repositoryPath}</code></span><span><b>{t('fix.target')}</b>#{preview.target.jobId} · {preview.target.gitRef}</span><span><b>{t('fix.startingHead')}</b><code>{preview.startingHead}</code> · {preview.startingBranch}</span></div><div className="fix-command-preview"><strong>{t('fix.command')}</strong><code className="fix-executable">{preview.command.executable}</code><ol>{preview.command.args.map((arg, index) => <li key={`${index}-${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div><p className="fix-safety"><AlertTriangle size={16} />{t('fix.safety')}</p><p className="fix-execution-disabled" role="status"><AlertTriangle size={16} />{t('fix.executionDisabled')}</p><footer><button className="button" onClick={() => setDialogOpen(false)} disabled={submitting}>{t('common.cancel')}</button><button className="button primary" onClick={() => void submit()} disabled={!fixExecutionEnabled || submitting}>{submitting ? t('fix.confirming') : <><Check size={15} />{t('fix.confirmAction')}</>}</button></footer></section></div>}
   </>
 }

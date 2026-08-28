@@ -627,7 +627,7 @@ func (c *Client) JobOutputStatus(ctx context.Context, id int64) (JobOutputStatus
 	if err != nil {
 		return JobOutputStatus{}, err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return JobOutputStatus{}, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
@@ -914,7 +914,8 @@ func (c *Client) getDaemonJSONBounded(ctx context.Context, path string, limit in
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}

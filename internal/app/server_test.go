@@ -56,6 +56,7 @@ type fakeService struct {
 	repoPath              string
 	cancelCalls           int
 	installationCalls     int
+	fixCalls              int
 	panelRaw              json.RawMessage
 	reviewRequest         roborev.ReviewRequest
 	reviewReceipt         json.RawMessage
@@ -216,7 +217,7 @@ func (f *fakeService) ReviewPanel(ctx context.Context, request roborev.ReviewReq
 	}
 	return roborev.DecodePanelEnqueueResponse(raw, request)
 }
-func (f *fakeService) Fix(context.Context, roborev.FixRequest) error { return nil }
+func (f *fakeService) Fix(context.Context, roborev.FixRequest) error { f.fixCalls++; return nil }
 func (f *fakeService) Rerun(context.Context, int64) error            { return nil }
 func (f *fakeService) Comment(context.Context, int64, string) error  { return f.commentErr }
 func (f *fakeService) Close(context.Context, int64, bool) error      { f.closeCalls++; return nil }

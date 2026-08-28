@@ -156,7 +156,9 @@ describe('App review workflow', () => {
     expect(await screen.findByRole('button', { name: 'Review HEAD' })).toBeEnabled()
     expect(screen.getByText('Daemon online')).toBeInTheDocument()
     await openFixRefine()
-    expect(await screen.findByRole('button', { name: 'Panel Refine' })).toBeEnabled()
+    const disabledActions = await screen.findAllByRole('button', { name: 'Execution disabled' })
+    expect(disabledActions).toHaveLength(2)
+    disabledActions.forEach(action => expect(action).toBeDisabled())
   })
 
   it('keeps Review HEAD distinct from frozen rerun', async () => {
@@ -1879,7 +1881,9 @@ describe('App review workflow', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('initial refine refresh failed')
     await vi.advanceTimersByTimeAsync(2_000)
     await waitFor(() => expect(refineCalls).toBe(2))
-    expect(await screen.findByRole('button', { name: 'Panel Refine' })).toBeEnabled()
+    const disabledActions = await screen.findAllByRole('button', { name: 'Execution disabled' })
+    expect(disabledActions).toHaveLength(2)
+    disabledActions.forEach(action => expect(action).toBeDisabled())
     expect(screen.queryByText('initial refine refresh failed')).not.toBeInTheDocument()
   })
 
@@ -1962,9 +1966,10 @@ describe('App review workflow', () => {
     }))
     render(<App />)
     await openFixRefine()
-    const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
-    expect(trigger).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent('daemon is not running')
+    const triggers = await screen.findAllByRole('button', { name: 'Execution disabled' })
+    expect(triggers).toHaveLength(2)
+    triggers.forEach(trigger => expect(trigger).toBeDisabled())
+    expect(screen.getAllByRole('status').some(status => status.textContent?.includes("RoboRev v0.64.0's fix command can implicitly manage daemon lifecycle"))).toBe(true)
   })
 
   it('keeps frozen rerun unavailable until the initial Panel Refine request settles', async () => {
@@ -1985,7 +1990,7 @@ describe('App review workflow', () => {
     expect(await screen.findByRole('button', { name: /Rerun same target\/config/ })).toBeInTheDocument()
   })
 
-  it('keeps direct start and cancel failures as actionable toasts', async () => {
+  it('keeps direct Panel Refine start fail-closed without a POST', async () => {
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
@@ -1996,11 +2001,11 @@ describe('App review workflow', () => {
     }))
     render(<App />)
     await openFixRefine()
-    const trigger = await screen.findByRole('button', { name: 'Panel Refine' })
-    await waitFor(() => expect(trigger).toBeEnabled())
-    await userEvent.click(trigger)
-    await userEvent.click(screen.getByRole('button', { name: 'Start Panel Refine' }))
-    expect(await screen.findByText('start rejected')).toHaveClass('toast', 'error')
+    const triggers = await screen.findAllByRole('button', { name: 'Execution disabled' })
+    expect(triggers).toHaveLength(2)
+    triggers.forEach(trigger => expect(trigger).toBeDisabled())
+    expect(screen.queryByRole('button', { name: 'Start Panel Refine' })).not.toBeInTheDocument()
+    expect(screen.queryByText('start rejected')).not.toBeInTheDocument()
   })
 
   it('keeps cancel failure as an actionable toast', async () => {

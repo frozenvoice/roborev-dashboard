@@ -42,36 +42,20 @@ function renderPanel(overrides: Partial<PanelRefineProps> = {}) {
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('PanelRefine', () => {
-  it('synchronizes a late panel discovery without overwriting an open dialog selection', async () => {
-    const user = userEvent.setup()
+  it('keeps the new-start CTA disabled even when panel options are available', () => {
     const view = renderPanel({ panelConfiguration: null })
-    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
     view.rerender(<PanelRefine {...view.props} panelConfiguration={configuration} />)
-    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeEnabled()
-    await user.click(screen.getByRole('button', { name: 'Panel Refine' }))
-    const iteration = screen.getByLabelText('Iteration panel')
-    expect(iteration).toHaveValue('dashboard_cross')
-    await user.selectOptions(iteration, 'dashboard_deep')
-    const changedConfiguration = { ...configuration, selectedPanel: 'dashboard_deep' }
-    view.rerender(<PanelRefine {...view.props} panelConfiguration={changedConfiguration} />)
-    expect(screen.getByLabelText('Iteration panel')).toHaveValue('dashboard_deep')
-    view.rerender(<PanelRefine {...view.props} panelConfiguration={{ ...configuration, selectedPanel: 'dashboard_cross' }} />)
-    expect(screen.getByLabelText('Iteration panel')).toHaveValue('dashboard_deep')
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent("RoboRev v0.64.0's fix command can implicitly manage daemon lifecycle")
   })
 
-  it('opens a dialog with valid named panels, codex default, attempts and exact start body', async () => {
-    const user = userEvent.setup()
+  it('does not call the start callback or open a confirmation dialog', async () => {
     const onStart = vi.fn(async () => undefined)
     renderPanel({ onStart })
-    await user.click(screen.getByRole('button', { name: 'Panel Refine' }))
-    expect(screen.getByRole('dialog')).toHaveTextContent('dashboard_cross')
-    expect(screen.getByLabelText('Fix agent')).toHaveValue('codex')
-    expect(screen.getByLabelText('Max fix attempts')).toHaveValue('3')
-    expect(screen.getByText(/POST \/api\/panel-refines/)).toBeInTheDocument()
-    expect(screen.getByText(text => text.includes('roborev.exe'))).toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText('Final deep panel'), 'dashboard_deep')
-    await user.click(screen.getByRole('button', { name: 'Start Panel Refine' }))
-    expect(onStart).toHaveBeenCalledWith({ repoPath: 'E:\\repo', panel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, finalPanel: 'dashboard_deep' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
+    expect(onStart).not.toHaveBeenCalled()
   })
 
   it('renders phase, progress, SHAs, timeline and allows opening the review', async () => {
@@ -150,17 +134,17 @@ describe('PanelRefine', () => {
 
   it('does not offer start when no valid named panel is loaded', () => {
     renderPanel({ panelConfiguration: { ...configuration, panels: configuration.panels.map(panel => ({ ...panel, valid: false })) } })
-    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
   })
 
   it('does not offer start until the current repository command options are loaded', () => {
     renderPanel({ options: null })
-    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
   })
 
   it('does not offer start when backend capabilities make Panel Refine unavailable', () => {
     renderPanel({ available: false, disabledReason: 'typed fix command is unavailable' })
-    expect(screen.getByRole('button', { name: 'Panel Refine' })).toBeDisabled()
-    expect(screen.getByRole('status')).toHaveTextContent('typed fix command is unavailable')
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
+    expect(screen.getAllByRole('status')[1]).toHaveTextContent('typed fix command is unavailable')
   })
 })

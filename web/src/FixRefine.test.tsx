@@ -66,7 +66,7 @@ describe('Fix & Refine frontend contract', () => {
     expect(select).not.toHaveValue('43')
   })
 
-  it('displays backend argv and posts one explicit confirmation', async () => {
+  it('displays backend argv but keeps the unsafe mutation confirmation disabled', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -86,9 +86,11 @@ describe('Fix & Refine frontend contract', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Review execution preview' }))
     expect(await screen.findByText('C:\\Tools\\roborev.exe')).toBeInTheDocument()
     expect(screen.getByText('argv[0]')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm and run fix' }))
-    await waitFor(() => expect(calls.filter(call => call === 'POST /api/fixes')).toHaveLength(1))
-    expect(screen.getAllByText('Starting').length).toBeGreaterThan(0)
+    const confirm = screen.getByRole('button', { name: 'Confirm and run fix' })
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls.filter(call => call === 'POST /api/fixes')).toHaveLength(0)
   })
 
   it('preserves target, modal, and operation state across locale changes without refetch or POST', async () => {
@@ -112,9 +114,10 @@ describe('Fix & Refine frontend contract', () => {
     expect(screen.getByRole('combobox', { name: '수정할 문제' })).toHaveValue('41')
     expect(previewCalls).toBe(1)
     expect(postCalls).toBe(0)
+    expect(screen.getByRole('button', { name: '확인하고 수정 실행' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '확인하고 수정 실행' }))
-    await waitFor(() => expect(postCalls).toBe(1))
-    expect(screen.getByRole('heading', { name: '시작 중' })).toBeInTheDocument()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(postCalls).toBe(0)
     expect(screen.getByRole('combobox', { name: '수정할 문제' })).toHaveValue('41')
   })
 

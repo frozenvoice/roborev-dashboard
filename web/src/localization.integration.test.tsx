@@ -118,22 +118,23 @@ describe('localized confirmation surfaces', () => {
     expect(onDaemon).not.toHaveBeenCalled()
   })
 
-  it('keeps Panel Refine dialog state and command preview across a language switch', async () => {
+  it('keeps Panel Refine start disabled across a language switch without network', async () => {
     const user = userEvent.setup()
     const onStart = vi.fn(async () => undefined)
     const panelConfiguration = { repositoryIdentity: 'repo-1', panels: [{ name: 'dashboard_cross', kind: 'panel' as const, members: ['codex'], origin: 'global' as const, valid: true }], selectedPanel: 'dashboard_cross', selectionRequired: false }
     const options = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
-    render(withProvider(<PanelRefine repoPath="E:\\repo" panelConfiguration={panelConfiguration} options={options} run={null} onStart={onStart} onCancel={vi.fn(async () => undefined)} />))
-    await user.click(screen.getByRole('button', { name: 'Panel Refine' }))
-    const technicalPreview = screen.getByRole('dialog').textContent
-    expect(technicalPreview).toContain(JSON.stringify([options.executable, ...options.args]))
-    expect(technicalPreview).toContain('POST /api/panel-refines')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    render(withProvider(<><LanguageSelector /><PanelRefine repoPath="E:\\repo" panelConfiguration={panelConfiguration} options={options} run={null} onStart={onStart} onCancel={vi.fn(async () => undefined)} /></>))
+    expect(screen.getByRole('button', { name: 'Execution disabled' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent("RoboRev v0.64.0's fix command can implicitly manage daemon lifecycle")
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
     await user.selectOptions(screen.getByLabelText('Select language'), 'ko')
-    expect(screen.getByRole('dialog')).toHaveTextContent('실행 미리보기')
-    expect(screen.getByRole('dialog')).toHaveTextContent('POST /api/panel-refines')
-    expect(screen.getByRole('dialog').textContent).toContain(JSON.stringify([options.executable, ...options.args]))
-    expect(screen.getByLabelText('반복 패널')).toHaveValue('dashboard_cross')
+    expect(screen.getByRole('button', { name: '실행 비활성화' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('RoboRev v0.64.0의 fix 명령은 daemon 수명 주기를 암묵적으로 관리할 수 있으므로 Dashboard 실행을 비활성화했습니다.')
     expect(onStart).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it('switches ReviewDetail from English to Korean without network, mutation, or tab/form reset', async () => {

@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react'
-import { Check, CircleStop, Play, ShieldCheck, X, XCircle } from 'lucide-react'
-import { type PanelConfiguration, type PanelInfo, type PanelRefineIteration, type PanelRefineOptions, type PanelRefinePhase, type PanelRefineRun } from './api'
-import { LanguageSelector, useI18n } from './i18n'
+import { Check, CircleStop, ShieldCheck, XCircle } from 'lucide-react'
+import { type PanelConfiguration, type PanelRefineIteration, type PanelRefineOptions, type PanelRefinePhase, type PanelRefineRun } from './api'
+import { useI18n } from './i18n'
 
 type RefineStart = { repoPath: string; panel: string; fixAgent: 'codex'; maxFixAttempts: number; finalPanel?: string }
 
@@ -69,10 +68,6 @@ function finalPanelResult(run: PanelRefineRun, t: ReturnType<typeof useI18n>['t'
   if (!iteration) return t('panel.notRun')
   return iteration.error ? t('panel.failed') : reviewResultLabel(reviewResult(iteration.reviewResult), t)
 }
-function validNamedPanels(configuration: PanelConfiguration | null): PanelInfo[] {
-  return configuration?.panels.filter(panel => panel.valid && panel.kind === 'panel' && panel.name !== 'none') ?? []
-}
-
 function PhasePill({ phase }: { phase: PanelRefinePhase }) {
   const { t } = useI18n()
   return <span className={`refine-phase ${phaseTone(phase)}`}><span className="status-dot" />{phaseLabel(phase, t)}</span>
@@ -106,44 +101,13 @@ function isActivePhase(item: PanelRefineIteration) { return !item.reviewResult &
 
 export function PanelRefine({ repoPath, panelConfiguration, options, run, available = true, disabledReason = '', loading = false, error = '', busy = false, onStart, onCancel, onOpenReview }: PanelRefineProps) {
   const { t } = useI18n()
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const panels = validNamedPanels(panelConfiguration)
-  const defaultPanel = panels.some(panel => panel.name === panelConfiguration?.selectedPanel) ? panelConfiguration?.selectedPanel ?? panels[0]?.name ?? '' : panels[0]?.name ?? ''
-  const [iterationPanel, setIterationPanel] = useState(defaultPanel)
-  const [finalPanel, setFinalPanel] = useState('')
-  const [maxFixAttempts, setMaxFixAttempts] = useState(3)
-  const defaultAttempts = options?.defaultMaxFixAttempts ?? 3
-
-  useEffect(() => {
-    if (dialogOpen) return
-    setIterationPanel(defaultPanel)
-  }, [defaultPanel, dialogOpen])
-
-  useEffect(() => {
-    if (!dialogOpen) return
-    setFinalPanel('')
-    setMaxFixAttempts(defaultAttempts)
-  }, [defaultAttempts, dialogOpen])
-
-  const start = async () => {
-    if (!repoPath || !iterationPanel) return
-    try {
-      await onStart({ repoPath, panel: iterationPanel, fixAgent: 'codex', maxFixAttempts, ...(finalPanel ? { finalPanel } : {}) })
-      setDialogOpen(false)
-    } catch {
-      // The parent owns direct-action feedback; keep the dialog open so the
-      // user can inspect or adjust the request after a rejected start.
-    }
-  }
   const active = isActive(run)
   const terminal = Boolean(run && terminalPhases.includes(run.phase))
-  const optionsReady = Boolean(options && options.executable && options.args.length && options.allowedFixAgents.includes('codex') && options.defaultFixAgent === 'codex' && options.defaultMaxFixAttempts >= options.minFixAttempts && options.defaultMaxFixAttempts <= options.maxFixAttempts)
-  const canOpen = Boolean(available && optionsReady && panels.length && repoPath && !loading)
-  const canStart = Boolean(canOpen && panels.some(panel => panel.name === iterationPanel) && maxFixAttempts >= (options?.minFixAttempts ?? 1) && maxFixAttempts <= (options?.maxFixAttempts ?? 10))
   const title = run?.phase === 'passed' ? t('panel.titlePassed') : run?.phase === 'needs_attention' ? t('panel.titleNeedsAttention') : run?.phase === 'failed' ? t('panel.titleFailed') : run?.phase === 'cancelled' ? t('panel.titleCanceled') : t('panel.start')
   return <section className="panel-refine" aria-label={t('panel.aria')}>
+    <p className="refine-disabled-reason" role="status" id="panel-refine-disabled-reason">{t('panel.executionDisabled')}</p>
     {!available && disabledReason && <p className="refine-disabled-reason" role="status">{t('panel.refineUnavailable', { reason: disabledReason })}</p>}
-    <div className="section-heading refine-heading"><div><span className="eyebrow">{t('panel.automatedGate')}</span><h2>Panel Refine</h2><p>{t('panel.description')}</p></div><button className="button primary" disabled={busy || active || !canOpen} onClick={() => setDialogOpen(true)}><ShieldCheck size={16} />{t('panel.start')}</button></div>
+    <div className="section-heading refine-heading"><div><span className="eyebrow">{t('panel.automatedGate')}</span><h2>Panel Refine</h2><p>{t('panel.description')}</p></div><button className="button primary" type="button" disabled aria-describedby="panel-refine-disabled-reason"><ShieldCheck size={16} />{t('panel.executionDisabledCta')}</button></div>
     {error && <p className="refine-inline-error" role="alert">{t('panel.refreshedError', { error })}</p>}
     {loading && !run && <div className="skeleton" />}
     {run && <article className={`refine-card ${phaseTone(run.phase)}`}>
@@ -154,6 +118,5 @@ export function PanelRefine({ repoPath, panelConfiguration, options, run, availa
       <div className="refine-timeline"><strong>{t('panel.timeline')}</strong><ol>{run.iterations.map((item, index) => <IterationRow key={item.number + '-' + index} item={item} fixAttemptNumber={item.fixAttempted ? run.iterations.slice(0, index + 1).filter(candidate => candidate.fixAttempted).length : undefined} onOpenReview={onOpenReview} />)}</ol></div>
       <footer className="refine-card-actions">{terminal && run.currentReviewJobID && <button className="button" onClick={() => onOpenReview?.(run.currentReviewJobID!)}>{run.phase === 'passed' ? t('panel.openFinalReview') : t('panel.openLatestReview')}</button>}{active && <button className="button danger" disabled={busy} onClick={() => { void onCancel(run.id).catch(() => undefined) }}><CircleStop size={15} />{t('panel.cancel')}</button>}</footer>
     </article>}
-    {dialogOpen && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog refine-dialog" role="dialog" aria-modal="true" aria-labelledby="panel-refine-title"><header><div><span className="eyebrow">{t('panel.automatedGate')}</span><h2 id="panel-refine-title">Panel Refine</h2><p>{t('panel.dialogDescription')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('panel.close')} onClick={() => setDialogOpen(false)}><X /></button></div></header><div className="refine-form"><label htmlFor="refine-iteration-panel">{t('panel.iterationPanel')}<select id="refine-iteration-panel" value={iterationPanel} onChange={event => setIterationPanel(event.target.value)}>{panels.map(panel => <option key={panel.name} value={panel.name}>{panel.name}</option>)}</select></label><label htmlFor="refine-fix-agent">{t('panel.fixAgent')}<select id="refine-fix-agent" value="codex" disabled><option value="codex">Codex</option></select></label><label htmlFor="refine-attempts">{t('panel.maxAttempts')}<select id="refine-attempts" value={maxFixAttempts} onChange={event => setMaxFixAttempts(Number(event.target.value))}>{Array.from({ length: (options?.maxFixAttempts ?? 10) - (options?.minFixAttempts ?? 1) + 1 }, (_, index) => index + (options?.minFixAttempts ?? 1)).map(value => <option key={value} value={value}>{value}{value === defaultAttempts ? t('panel.default') : ''}</option>)}</select></label><label htmlFor="refine-final-panel">{t('panel.finalDeep')}<select id="refine-final-panel" value={finalPanel} onChange={event => setFinalPanel(event.target.value)}><option value="">{t('panel.none')}</option>{panels.map(panel => <option key={panel.name} value={panel.name}>{panel.name}</option>)}</select></label></div><div className="refine-preview"><strong>{t('panel.preview')}</strong><code>POST /api/panel-refines</code><code>{JSON.stringify({ repoPath, panel: iterationPanel, fixAgent: 'codex', maxFixAttempts, ...(finalPanel ? { finalPanel } : {}) })}</code><code>{options?.executable ? JSON.stringify([options.executable, ...options.args]) : t('panel.optionsLoading')}</code><small>{t('panel.previewDescription')}</small></div><footer><button className="button" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</button><button className="button primary" disabled={!canStart || busy} onClick={() => void start()}><Play size={16} />{t('panel.startAction')}</button></footer></section></div>}
   </section>
 }

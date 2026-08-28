@@ -308,6 +308,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/panel-refines", s.listPanelRefines)
 	s.mux.HandleFunc("GET /api/panel-refines/{id}", s.getPanelRefine)
 	s.mux.HandleFunc("GET /api/fixes/preview", s.fixPreview)
+	s.mux.HandleFunc("POST /api/general-refines/preview", s.mutationAuth(s.generalRefinePreview))
+	s.mux.HandleFunc("POST /api/general-refines", s.mutationAuth(s.generalRefineStart))
+	s.mux.HandleFunc("GET /api/general-refines", s.listGeneralRefines)
+	s.mux.HandleFunc("GET /api/general-refines/{id}", s.getGeneralRefine)
+	s.mux.HandleFunc("POST /api/general-refines/{id}/cancel", s.mutationAuth(s.cancelGeneralRefine))
 	s.mux.HandleFunc("GET /api/configuration", s.configurationSnapshot)
 	s.mux.HandleFunc("GET /api/stats/summary", s.statsSummary)
 	s.mux.HandleFunc("GET /api/stats/cost", s.statsCost)
@@ -344,7 +349,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/fixes", s.listFixes)
 	s.mux.HandleFunc("GET /api/fixes/{id}", s.getFix)
 	s.mux.HandleFunc("POST /api/reviews", s.mutation(s.createReview))
-	s.mux.HandleFunc("POST /api/panel-refines", s.mutation(s.startPanelRefine))
+	s.mux.HandleFunc("POST /api/panel-refines", s.mutationAuth(s.startPanelRefine))
 	s.mux.HandleFunc("POST /api/panel-refines/{id}/cancel", s.mutation(s.cancelPanelRefine))
 	s.mux.HandleFunc("POST /api/fixes", s.mutationAuth(s.startFix))
 	s.mux.HandleFunc("POST /api/analyses", s.mutationAuth(s.startAnalysis))
@@ -1269,9 +1274,7 @@ type fixBody struct {
 	PreviewToken       string `json:"previewToken"`
 }
 
-func fixRequest(body fixBody) fixoperation.Request {
-	return fixoperation.Request{RepositoryIdentity: body.RepositoryIdentity, TargetJobID: body.TargetJobID, Agent: body.Agent}
-}
+const fixHiddenLifecycleBlockedMessage = "RoboRev v0.64.0's fix command can implicitly manage daemon lifecycle, so Dashboard execution is disabled."
 
 func fixErrorStatus(err error) int {
 	var typed *fixoperation.Error
@@ -1455,20 +1458,36 @@ func (s *Server) getFix(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startFix(w http.ResponseWriter, r *http.Request) {
-	if s.Fixes == nil {
-		writeError(w, http.StatusServiceUnavailable, "Fix operation manager is unavailable", "fix")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
 		return
 	}
 	var body fixBody
-	if !decodeBody(w, r, &body) {
+	if !decodeUniqueBody(w, r, &body, "repositoryIdentity", "targetJobId", "agent", "previewToken") {
 		return
 	}
-	item, err := s.Fixes.Start(r.Context(), fixoperation.StartRequest{Request: fixRequest(body), PreviewToken: body.PreviewToken})
-	if err != nil {
-		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+	if strings.TrimSpace(body.PreviewToken) == "" {
+		writeError(w, http.StatusBadRequest, "preview token is required", "request")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, item)
+	if strings.TrimSpace(body.RepositoryIdentity) == "" {
+		writeError(w, http.StatusBadRequest, "repository identity is required", "repository")
+		return
+	}
+	if body.TargetJobID <= 0 {
+		writeError(w, http.StatusBadRequest, "target job ID must be positive", "targetJobId")
+		return
+	}
+	if body.Agent != "" && body.Agent != "codex" {
+		writeError(w, http.StatusBadRequest, "only the codex fix agent is supported", "agent")
+		return
+	}
+	// v0.64's explicit-ID Fix command may run ensureDaemon, restart/start a
+	// daemon, clean up legacy processes, and normalize core.hooksPath. Until
+	// upstream provides a lifecycle-free current-checkout contract, an
+	// authorized Dashboard request must stop before any manager or RoboRev
+	// call. Keep the error path-free for browser display.
+	writeError(w, http.StatusNotImplemented, fixHiddenLifecycleBlockedMessage, "fix-hidden-lifecycle-blocked")
 }
 
 func (s *Server) cancelFix(w http.ResponseWriter, r *http.Request) {
@@ -1554,39 +1573,23 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startPanelRefine(w http.ResponseWriter, r *http.Request) {
-	if s.Refines == nil {
-		writeError(w, http.StatusNotImplemented, "Panel Refine is unavailable", "panel-refine")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
 		return
 	}
 	var body panelRefineBody
-	if !decodeBody(w, r, &body) {
+	if !decodeUniqueBody(w, r, &body, "repoPath", "panel", "fixAgent", "maxFixAttempts", "finalPanel") {
 		return
 	}
-	run, err := s.Refines.Start(r.Context(), refine.StartRequest{RepoPath: body.RepoPath, Panel: body.Panel, FixAgent: body.FixAgent, MaxFixAttempts: body.MaxFixAttempts, FinalPanel: body.FinalPanel})
-	if err != nil {
-		writeError(w, panelRefineStartStatus(err), err.Error(), "panel-refine")
+	if strings.TrimSpace(body.RepoPath) == "" || strings.TrimSpace(body.Panel) == "" {
+		writeError(w, http.StatusBadRequest, "repository and panel are required", "request")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, run)
-}
-
-func panelRefineStartStatus(err error) int {
-	var typed *refine.StartError
-	if !errors.As(err, &typed) {
-		return http.StatusInternalServerError
-	}
-	switch typed.Kind {
-	case refine.StartInvalid:
-		return http.StatusBadRequest
-	case refine.StartForbidden:
-		return http.StatusForbidden
-	case refine.StartUnavailable:
-		return http.StatusServiceUnavailable
-	case refine.StartConflict:
-		return http.StatusConflict
-	default:
-		return http.StatusInternalServerError
-	}
+	// Panel Refine's first review is followed by the same explicit-ID Fix
+	// command and therefore inherits its hidden lifecycle. This tombstone is
+	// reached after mutation auth but before the Refine manager, ReviewPanel,
+	// Fix, process, or lifecycle code.
+	writeError(w, http.StatusNotImplemented, "RoboRev v0.64.0's fix command can implicitly manage daemon lifecycle, so Panel Refine execution is disabled.", "panel-refine-fix-lifecycle-blocked")
 }
 
 func (s *Server) listPanelRefines(w http.ResponseWriter, r *http.Request) {
