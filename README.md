@@ -39,7 +39,7 @@ Dashboard UI는 한국어와 English를 지원한다. 사이드바 하단의 nat
 
 Dashboard runtime installer는 현재 Windows amd64에서 RoboRev v0.64.0만 설치한다. 공식 GitHub release ZIP의 고정 크기와 Dashboard에 포함된 SHA-256을 검증하고, ZIP root의 `roborev.exe` 하나만 `%USERPROFILE%\.roborev\bin\roborev.exe`에 기존 파일을 덮어쓰지 않고 설치한다. 이후 `version --json`을 다시 검증해 현재 Dashboard process에 absolute path로 연결하고 daemon health를 확인한다. PATH, Windows 보안 정책, RoboRev init, Git hook, AI agent 및 credential은 변경하지 않는다. 이미 다른 경로의 supported binary가 있으면 그대로 사용하고, newer/unknown/blocked binary는 자동 downgrade 또는 교체하지 않는다.
 
-현재 feature 판정은 **v0.64 FEATURE-COMPLETE**지만 release gate는 별도이며 아직 닫히지 않았다. Windows release 후보는 exact RoboRev v0.64.0와 `windows/amd64`에 고정된다. `v0.65+` 또는 확인할 수 없는 버전은 fail closed한다. release provenance는 `--version-json`으로 확인할 수 있고, 재현 가능한 EXE·manifest·SHA-256 묶음은 `scripts/package.ps1 -Version <strict-SemVer> -VerifyReproducible`로 만든다. 실제 release 버전/태그/서명은 아직 선택하거나 발행하지 않는다. 전체 checklist와 unsigned Windows/SmartScreen, recovery 및 지원 범위는 [docs/RELEASE.md](docs/RELEASE.md)를 참고한다.
+현재 feature 판정은 **v0.64 FEATURE-COMPLETE**이며 첫 Dashboard release candidate 버전은 **0.1.0**으로 정했다. 지원 범위는 exact RoboRev v0.64.0와 `windows/amd64`에 고정되고, `v0.65+` 또는 확인할 수 없는 버전은 fail closed한다. 이 candidate는 **unsigned**이며 향후 tag convention은 `v0.1.0`이다. 실제 tag, GitHub Release, 다운로드 asset publication과 서명은 아직 수행하지 않았다. release provenance는 `--version-json`으로 확인할 수 있고, 재현 가능한 EXE·manifest·SHA-256 묶음은 `scripts/package.ps1 -Version <strict-SemVer> -VerifyReproducible`로 만든다. 자세한 지원 범위와 release policy는 [docs/RELEASE.md](docs/RELEASE.md), 사용자용 변경 사항은 [0.1.0 release notes](docs/RELEASE-NOTES-0.1.0.md)를 참고한다.
 
 ## 실행
 

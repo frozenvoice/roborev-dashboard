@@ -2,37 +2,45 @@
 
 마지막 갱신: 2026-08-29
 
-## Windows Release Readiness & Non-Destructive E2E
+## Final Release Candidate Closure (2026-08-29)
 
-**Current checkpoint:** Windows Release Readiness & Non-Destructive E2E
+**Current checkpoint:** Final Release Candidate Closure
+
+**Dashboard candidate version:** `0.1.0`
+
+**Future tag convention:** `v0.1.0` (not created)
 
 **Final feature verdict:** v0.64 FEATURE-COMPLETE
 
 **Remaining MUST-SHIP:** 0
 
-**Release readiness:** RELEASE-READY-CANDIDATE
+**RC status:** **RC-0.1.0-READY-TO-PUBLISH**, subject to the complete local, upstream-pin, package, E2E and exact-candidate Windows CI gates
 
-**Remote qualifier:** REMOTE-CI-PASSED
+**RoboRev compatibility:** exact `v0.64.0`
 
-**Artifact provenance:** PASS
+**Windows target:** Windows 11 `windows/amd64` Tier 1
 
-**Reproducibility:** PASS
+**Artifact policy:** reproducible, three-file, no-overwrite and unsigned
 
-**Windows E2E:** PASS
+**Tag / GitHub Release / publication:** NOT PERFORMED
 
-**Pinned installer E2E:** PASS
+**Branch protection/ruleset:** administrative residual; current private-plan API boundary is unavailable/not configured
 
-**Remote CI:** PASS — run `33203847446` for `737239a561bdb3d380dd9b7da2d49a7bb55b520c`
+**Upgrade from previous Dashboard release:** N/A; there is no prior published Dashboard release
 
-**Next:** Final Release Candidate Closure
+**Next:** Await release-owner publication decision
 
-The local release gate is green: all Go packages, Vitest 31 files / 594 tests, TypeScript/Vite production build, `go vet ./...`, developer version flags, clean-tree reproducible packaging, packaged copied-EXE Windows E2E, the real official pinned-installer E2E and `git diff --check` passed. The packaged E2E uses temporary HOME/config/Git state, an actual copied release executable, a read-only fake v0.64 daemon, a v0.65 mismatch daemon and restart/crash recovery; user-side sentinels remain unchanged. The official v0.64.0 Windows asset was consciously re-pinned after its upstream replacement to 16,028,741 bytes and SHA-256 `7a8ea79ffd3a90634e89a654e72ee0f65ea941f23106005710145ddd551290f1`, then downloaded and executed from a temporary HOME. Windows CI run `33203847446` passed every step for release-code commit `737239a561bdb3d380dd9b7da2d49a7bb55b520c`, using a verified exact-SHA, clean, non-reparse `C:\` checkout and isolated temp root. This is a release candidate, not a published, signed or closed release.
+The release candidate is the first Dashboard release in the pre-1.0 compatibility phase. The supported surface remains intentionally narrow: review/history/detail/panel workflows, setup and runtime diagnostics, repository readiness and management, typed configuration, bounded hooks/skills, Snapshot Ignore, Repository Tracking, CI Workflow management, Stats/Cost and explicitly confirmed Insights. Exact-v0.64 safety boundaries continue to block General Fix, new Panel Refine, General Refine, Tasks and Analyze execution, Review Export, CI Metrics Export, compact, repository delete/unregister and aggregate root initialization.
+
+The release procedure requires a clean source checkout, strict SemVer `0.1.0` packaging into a new output directory, exact version/provenance and manifest/SHA cross-checks, expected unsigned Authenticode status, copied-artifact non-destructive E2E, the official pinned installer E2E in a temporary HOME, full local tests/vet/build and a successful Windows Tier 1 CI run on the exact candidate source. Dynamic source SHA, run ID and artifact digest belong only in the completion report, not in this frozen handoff.
+
+The Dashboard is loopback-local and the managed daemon is local/loopback-scoped. The source audit found no Dashboard telemetry or analytics transport, and the Dashboard does not read or store provider credentials. User-triggered RoboRev or agent operations may use the network. Bootstrap, repository selection and inventory retain their existing path-bearing display contracts; path-free behavior is limited to the DTOs that explicitly define it. The executable is unsigned, so SmartScreen, Defender or Application Control may warn or block it; no bypass or self-signing is provided.
 
 - 기준 비교 대상은 exact RoboRev v0.64.0 `bc0af33c282733a9c39d72c08373b040e22c11d4`다. 이 checkpoint는 production feature expansion이 아니라 security/regression closure와 release-readiness separation이다.
 - [`docs/V064-COMPLETION-AUDIT.md`](V064-COMPLETION-AUDIT.md)에 Coverage의 remaining P-like/ambiguous capability 50개를 inventory하고, taxonomy를 A MUST-SHIP 0, B OPTIONAL-ADVANCED 7, C SUPERSEDED 9, D UNSUPPORTED-BY-DESIGN 8, E BLOCKED-BY-V0.64 14, F DOCS/CLI-UX-ONLY 12, G NEEDS-SEPARATE-AUDIT 0으로 확정한다.
 - Feature completion stop condition은 `remaining MUST-SHIP == 0`이다. 따라서 현재 판정은 **v0.64 FEATURE-COMPLETE**다. Full CLI parity는 목표가 아니며 optional/blocked/unsupported/CLI-only 항목은 이 완료 조건을 막지 않는다.
 - Upstream-blocked family는 General Fix, Panel Refine mutation, General Refine, Analyze execution, Tasks execution, Review Export, CI Metrics와 compact다. 이들은 exact v0.64의 lifecycle, safety attestation, repository isolation 또는 agent/daemon contract가 해소되기 전까지 completion blocker로 승격하지 않는다. Optional Advanced backlog는 7개이며 operator/maintenance/sync 성격의 후속 범위다.
-- Feature completion과 release readiness는 분리한다. Windows Tier 1 workflow, release packaging/version stamping, clean-machine·restart·crash E2E, real pinned-installer E2E, pushed remote CI와 README/privacy/support 문서는 이 successor checkpoint에서 PASS했다. 남은 release-readiness gap은 private-plan에서 unavailable(HTTP 403)한 branch-protection/ruleset 행정 경계와 실제 version/signing/tag/publication 결정이다.
+- Feature completion과 release readiness는 분리한다. Windows Tier 1 workflow, release packaging/version stamping, clean-machine·restart·crash E2E, real pinned-installer E2E와 README/privacy/support 문서는 이 successor checkpoint에서 PASS했다. 선행 release-readiness의 remote CI는 baseline evidence일 뿐이며, 이 closure에 필요한 exact candidate source의 Windows CI 성공을 대체하지 않는다. 남은 release-readiness gap은 private-plan에서 unavailable(HTTP 403)한 branch-protection/ruleset 행정 경계다.
 - 이 audit에서는 실제 RoboRev/daemon lifecycle/LLM/review job/CI export를 실행하지 않았다. Stream CLI/SSE는 production transport가 아니며 capability false/unsupported로 닫고, review refresh는 4초 authoritative polling을 사용한다.
 - Final security correction: generic historical rerun은 trimmed empty legacy와 `review`/`range`/`dirty`/`synthesis`만 허용하고 Fix/Compact/Insights/Analyze/Classify/unknown 및 task/run은 fail closed한다. Panel member list/detail은 strict browser read authorization을 parse/query/registry/daemon 호출 전에 수행하며, Git/daemon/process/config/setup/panel/analysis/agent 오류는 app-layer fixed message로만 browser에 투영한다. Compact와 CI Metrics는 기존 blocked/deferred 판정을 유지한다.
 - Post-commit binding/projection correction: `List`, `PanelMembers`, `TerminalJobMetadata`, `JobOutputStatus`는 cached exact-v0.64 executable binding과 fresh matching daemon health/version 없이는 downstream `/api/jobs`/`/api/job/output`를 호출하지 않는다. no-redirect, identity encoding, bounded body/prefix, body-free non-2xx error와 generation-current adoption을 유지하며 lifecycle recovery는 없다. Review list/detail/panel/receipt projection은 key-only copy 대신 field-shape schema, JS-safe IDs, 최대 256개 member ID 배열과 dedicated `job`/`review` nested schema를 사용한다. malformed composite/null은 stable 502로 fail closed하고 intentional review Markdown string은 보존한다.
@@ -142,7 +150,7 @@ Release-readiness follow-ups (별도 feature checkpoint가 아님):
 - clean-machine Windows에서 최신 Dashboard exe를 실행하고 Setup confirmation의 repository/version/target/size/full SHA와 no-init/no-agent/no-security-change 범위를 검토한 뒤 사용자가 직접 **Install & Start**를 실행한다.
 - 같은 session에서 install, runtime rebind, exact v0.64.0 daemon online/healthy, repository panel 복원, independent Review HEAD, history/detail, Setup Readiness, Stats/Cost와 Configuration read를 non-destructive smoke한다. General Fix/Panel Refine/General Refine, task/analyze/CI export, quota-consuming agent check와 실제 review job은 실행하지 않는다.
 - sidebar와 열린 install/daemon/agent-check modal 및 Fix & Refine blocked cards의 한국어↔English 전환, network/mutation 부재와 mobile wrapping을 수동 확인한다. Stream CLI/SSE는 unsupported이므로 이를 전제로 한 reconnect/child-cleanup 검증은 수행하지 않으며, 4초 authoritative polling과 non-destructive state refresh를 확인한다.
-- 후속 Windows release-readiness checkpoint가 version/commit provenance, reproducible packaging, copied-EXE clean-machine/restart/crash E2E, real pinned-installer E2E와 README/privacy/support 문서를 보강했다. 원격 Windows CI run `33203847446`도 PASS했으며, private-plan branch protection/ruleset 제약은 후속 행정 gate로 남는다.
+- 후속 Windows release-readiness checkpoint가 version/commit provenance, reproducible packaging, copied-EXE clean-machine/restart/crash E2E, real pinned-installer E2E와 README/privacy/support 문서를 보강했다. 원격 Windows CI도 PASS했으며, private-plan branch protection/ruleset 제약은 후속 행정 gate로 남는다.
 - v0.65+ compatibility와 update policy는 exact v0.64.0 support policy 밖의 future watchlist로 유지하며 자동 downgrade는 허용하지 않는다.
 
 # Guideline Insights v1 handoff (2026-08-23)
@@ -543,12 +551,10 @@ three were corrected, the same reviewer returned final **PASS**, and the full
 validation above was rerun after the fixes. No real RoboRev, daemon, LLM or
 external review job is run.
 
-## Windows Release Readiness & Non-Destructive E2E (2026-08-29; local/remote gates complete)
+## Windows Release Readiness & Non-Destructive E2E (2026-08-29; superseded by final RC closure)
 
-This is the release gate following the exact-v0.64 feature/security closure. The feature verdict remains **v0.64 FEATURE-COMPLETE** with MUST-SHIP 0. The local, online and remote-CI evidence supports **RELEASE-READY-CANDIDATE** with **REMOTE-CI-PASSED**. This is not a tag, published release, signature or **RELEASE-CLOSED** verdict.
+The Windows Tier 1 release-readiness gates followed the exact-v0.64 feature/security closure. They established the semantic prerequisites for the 0.1.0 candidate: local and remote validation, deterministic no-overwrite packaging, copied-artifact non-destructive E2E and the gated official pinned installer. The executable embeds the frontend and needs no Go/Node/npm at runtime; Git remains a runtime requirement. The managed RoboRev target is `%USERPROFILE%\\.roborev\\bin\\roborev.exe`; Dashboard state is under the OS user config directory and is not RoboRev source-of-truth data.
 
-The release scope is Windows 11 `windows/amd64` Tier 1 with exact RoboRev `v0.64.0`; v0.65+ and unknown/malformed runtime contracts fail closed. Build provenance, `--version`/`--version-json`, deterministic no-overwrite EXE/manifest/SHA-256 packaging, reproducibility, copied-artifact non-destructive E2E and the gated official pinned installer are release evidence. The executable embeds the frontend and needs no Go/Node/npm at runtime; Git remains a runtime requirement. The managed RoboRev target is `%USERPROFILE%\\.roborev\\bin\\roborev.exe`; Dashboard state is under the OS user config directory (`roborev-dashboard/config.json`) and is not RoboRev source-of-truth data.
+Project CI remains Windows Tier 1 with `contents: read`, immutable action references, reproducibility packaging and bounded release smoke from a verified non-reparse checkout and isolated temp root. The uploaded CI package is a test artifact, not a release artifact. Branch protection/ruleset is unavailable/not configured under the observed private-plan API boundary and remains a residual administrative risk.
 
-Project CI is represented by `.github/workflows/ci.yml`: Windows Tier 1, `contents: read`, pull request/main push/manual triggers, ref-scoped cancellation, Go from `go.mod`, Node 22, `npm ci`, repository tests, vet, development EXE contract checks, reproducibility packaging and bounded release smoke. Action dependencies use immutable full SHAs. The workflow has no secrets, write authority, release/tag publish, LLM or real RoboRev job and its upload is a short-retention CI artifact, not a release artifact. It materializes the exact source SHA in a clean, verified non-reparse `C:\` checkout and uses an isolated sibling temp root before any tests or packaging. Local equivalents, including the online pinned-installer gate, passed; remote run `33203847446` for `737239a561bdb3d380dd9b7da2d49a7bb55b520c` also passed through artifact upload. Branch protection/ruleset is unavailable/not configured under the observed private-plan API boundary and remains a residual risk.
-
-The human operator checklist, network/telemetry source-audit statement, credential/privacy boundary, blocked exact-v0.64 surfaces, unsigned SmartScreen/App Control behavior, recovery and first-release upgrade N/A status are maintained in [`docs/RELEASE.md`](RELEASE.md). The next checkpoint after local and remote evidence is **Final Release Candidate Closure**. No tag, release, signing, MSI/MSIX package or actual user repository mutation is authorized by this checkpoint.
+The current semantic release status, version policy, blocked-surface list, unsigned SmartScreen/App Control behavior, recovery policy and first-release upgrade N/A status are maintained in [`docs/RELEASE.md`](RELEASE.md) and [`docs/RELEASE-NOTES-0.1.0.md`](RELEASE-NOTES-0.1.0.md). The next action is **Await release-owner publication decision**. No tag, release, signing, MSI/MSIX package, package-manager publication or actual user repository mutation is authorized by this checkpoint.
