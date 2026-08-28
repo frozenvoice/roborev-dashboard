@@ -1,6 +1,6 @@
 # Fix Lifecycle Safety Audit — RoboRev v0.64.0
 
-This audit records why browser-authorized Dashboard Fix execution is fail-closed on exact RoboRev v0.64.0 (`bc0af33c282733a9c39d72c08373b040e22c11d4`). The finding affects standalone General Fix, the Fix phase of a newly started Panel Refine, and the proposed General Refine workflow.
+This audit records why browser-authorized Dashboard Fix execution is fail-closed on exact RoboRev v0.64.0 (`bc0af33c282733a9c39d72c08373b040e22c11d4`). The finding affects standalone General Fix, the Fix phase of a newly started Panel Refine, and the proposed General Refine workflow. The separate [`FIX-PATCH-FEASIBILITY.md`](FIX-PATCH-FEASIBILITY.md) audit now concludes **NO-GO** for substituting daemon background Fix with a browser patch/apply workflow.
 
 ## Exact upstream call paths
 
@@ -43,6 +43,6 @@ One of these contracts must be designed and audited before Dashboard Fix executi
 
 1. Upstream exposes an explicit-ID current-checkout Fix mode that guarantees no daemon autostart/restart/recovery and no hooks-path normalization.
 2. Upstream exposes a lifecycle-free daemon/API current-checkout mutation, commit and authoritative readback contract equivalent to the intended Fix semantics.
-3. Dashboard deliberately designs `/api/job/fix` as a different patch-generation workflow, including safe patch inspection, apply, commit, review-state transitions and ambiguity handling.
+3. Dashboard deliberately designs `/api/job/fix` as a different patch-generation workflow, including safe patch inspection, apply, commit, review-state transitions and ambiguity handling. The feasibility audit of that option is concluded **NO-GO** in [`FIX-PATCH-FEASIBILITY.md`](FIX-PATCH-FEASIBILITY.md); no audit-only Phase B or production Phase A/C claim is made.
 
 This checkpoint implements none of those future paths. It only removes unsafe browser reachability and proves the blocked endpoints make zero mutation/lifecycle calls.

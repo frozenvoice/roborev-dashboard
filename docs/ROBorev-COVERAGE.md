@@ -2,7 +2,7 @@
 
 조사일: 2026-08-28. 실제 Windows RoboRev v0.64.0 command/health response와 공식 `kenn-io/roborev` v0.64.0 source 및 GitHub release metadata를 교차 확인했다. 자동 테스트는 실제 RoboRev를 호출하지 않고 deterministic fixture를 사용하며, Dashboard는 런타임에 version/capability를 다시 감지한다.
 
-상태: **B** = Checkpoint B vertical slice, **P** = planned, **N** = unsupported/superseded 또는 local UI action 부적합/문서화만.
+상태: **B** = Checkpoint B vertical slice, **P** = planned, **N** = unsupported/superseded 또는 local UI action 부적합/문서화만. `N/unsupported-by-dashboard-safety`는 exact upstream capability가 존재해도 Dashboard의 현재 authorization/safety contract로는 노출하지 않는다는 뜻이다.
 
 | Command / API | Dashboard feature | Transport | 상태 | 자동 테스트 | Notes |
 |---|---|---|---|---|---|
@@ -41,6 +41,11 @@
 | `fix --agent codex --quiet <job-id>` | General Fix mutation | direct CLI execution unavailable | N/unsupported | 예(0-call) | explicit-ID `runFixWithSeen`도 unconditional `ensureDaemon`; Cobra entry는 relative hooksPath를 Git config로 normalize할 수 있고 recovery도 ensure를 재호출 |
 | `GET /api/fixes/preview`, `GET /api/fixes`, `GET /api/fixes/{id}`, `POST /api/fixes/{id}/cancel` | General Fix read-only eligibility/history와 active cancellation | Dashboard state projection | B | 예 | existing selected ownership/eligibility/history는 유지; command capability 존재와 execution safety를 구분 |
 | `POST /api/fixes` | General Fix confirmed execution | authorized fail-closed tombstone | P/disabled/BLOCKED | 예 | HTTP 501 `fix-hidden-lifecycle-blocked`; `Service.Fix`, `Client.Fix`, process와 lifecycle 호출 0 |
+| `POST /api/job/fix` | Background Fix patch generation | exact v0.64.0 daemon HTTP API | N/unsupported-by-dashboard-safety | 아니요(감사 전용) | exact body는 `parent_job_id` + optional `prompt`/`git_ref`/`stale_job_id`; raw `ReviewJob` 201 response, daemon-side config/agent/model/reasoning resolution (reasoning is stored on the job), always-agentic executor, worktree and failover are not frozen by Dashboard; not called |
+| `GET /api/job/patch?job_id=...` | Stored Fix patch inspection | exact v0.64.0 daemon HTTP API (`text/plain`) | N/unsupported-by-dashboard-safety | 아니요(감사 전용) | raw patch response has no patch-specific bound, digest, repository binding or privacy-safe typed envelope; not an audit-only B surface |
+| TUI `applyFixPatch` / `checkApplyCommitPatch` | Fix patch apply candidate | upstream TUI + `git apply --check/--binary` | N/unsupported-by-dashboard-safety | 아니요(감사 전용) | branch worktree discovery, touched-file dirty check, dry-run and apply are separate point-in-time operations; ordinary non-`--reject` hunk conflicts normally reject the whole patch, but the full check→apply→stage→commit flow has no transaction/readback contract for generic I/O or concurrency ambiguity; kit check/apply suppress inherited `GIT_*` while raw TUI add/commit inherit `os.Environ()`; no Dashboard exact-HEAD/whole-tree-clean contract |
+| `POST /api/job/applied` | Mark locally committed Fix as applied | exact v0.64.0 daemon HTTP API | N/unsupported-by-dashboard-safety | 아니요(감사 전용) | conditional `done` + `job_type=fix` → `applied` DB transition; local commit and daemon state can diverge, no idempotency/readback contract |
+| `POST /api/job/rebased` + `stale_job_id` via `/api/job/fix` | Stale Fix rebase lifecycle | exact v0.64.0 daemon HTTP API + TUI | N/unsupported-by-dashboard-safety | 아니요(감사 전용) | stale patch is read from DB, a new Fix is enqueued, then old row is marked rebased in a separate request; no atomic old/new reservation or current-checkout safety |
 | upstream `refine` | broad historical/branch iterative refine | direct CLI intentionally unavailable | N | 아니요 | hidden `ensureDaemon`, history sweep, arbitrary options and broader mutation semantics are outside Dashboard authority; production process occurrence 0 |
 | `POST /api/general-refines/preview`, `POST /api/general-refines` | Dashboard General Refine | authorized fail-closed tombstones | P/blocked-by-upstream-contract | 예 | HTTP 501 `general-refine-fix-lifecycle-blocked`; review enqueue, Fix, Refine process와 lifecycle 호출 0 |
 | `analyze --list` | analysis type discovery | CLI text | B | 예 | exact v0.64.0 capability; bounded strict parser가 header, safe slug, description, duplicate와 size/count를 검증하며 `--json`을 사용하지 않음 |
@@ -311,7 +316,6 @@ Root init production occurrence remains 0. This checkpoint supersedes the suppor
 | `POST /api/fixes` | General Fix execution | authorized HTTP 501 tombstone | P/disabled/BLOCKED | 예 | `phase=fix-hidden-lifecycle-blocked`; Fix/process/lifecycle calls 0 |
 | `POST /api/panel-refines` | new Panel Refine loop | authorized HTTP 501 tombstone | P/disabled/BLOCKED | 예 | `phase=panel-refine-fix-lifecycle-blocked`; ReviewPanel/Fix/process/lifecycle calls 0 |
 | `POST /api/general-refines/preview`, `POST /api/general-refines` | General Refine | authorized HTTP 501 tombstone | P/blocked-by-upstream-contract | 예 | `phase=general-refine-fix-lifecycle-blocked`; review/Fix/refine/lifecycle calls 0 |
-| `POST /api/job/fix` | daemon background fix job | intentionally not used | N/not-equivalent | 아니요 | daemon resolves config/agent/model/reasoning, enqueues an agentic worktree job and stores a patch; not current-checkout CLI Fix commit/readback semantics |
 
 The correction changes only browser-authorized Fix-bearing mutations. Review HEAD, safe panel review, review history/detail, ordinary rerun, comment/close, Setup, Snapshot Ignore, Repository Tracking, Git Hook Management, Agent Hook Management, Skills, Repository Agent Configuration and CI Workflow remain B. General Fix eligibility/preview/history and Panel Refine history/detail/timeline remain read-only. Tasks/Analyze execution remain disabled, Review Export remains BLOCKED, and Repository Delete/unregister remains BLOCKED.
 

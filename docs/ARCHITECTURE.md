@@ -180,6 +180,51 @@ General Fix의 read-only target eligibility, preview, list/detail/history와 이
 
 Daemon `POST /api/job/fix`는 background agentic worktree job을 만들고 daemon-side config/agent/model/reasoning을 resolve해 patch를 저장하므로 current-checkout CLI Fix의 commit/comment/close/review semantics와 동등하지 않다. 이 checkpoint는 이를 대체 transport로 사용하지 않는다. 상세 근거와 future unblock 조건은 [FIX-LIFECYCLE-AUDIT.md](FIX-LIFECYCLE-AUDIT.md)에 기록한다.
 
+### Fix threat models: Direct CLI, Background Patch, Apply
+
+Fix 표면은 같은 “Fix” 라벨을 공유해도 세 가지 서로 다른 위협 모델이다.
+
+* **Direct CLI Fix** (`fix --agent codex --quiet <job-id>`)는 사용자가 실행하는
+  RoboRev 명령이다. v0.64.0은 Cobra 진입점의 상대 `core.hooksPath` 정규화와
+  `runFixWithSeen`/재연결의 `ensureDaemon`을 자체 권한으로 수행할 수 있다.
+  이 self-healing은 직접 CLI 사용자에게는 upstream 동작이지만, Dashboard의
+  “Fix” 확인으로 숨은 Git config/daemon start·restart·recovery를 승인할 수
+  있는 계약은 아니다. 따라서 Dashboard에서는 실행을 노출하지 않는다.
+* **Background Fix Patch** (`POST /api/job/fix`)는 daemon이 `JobTypeFix`와
+  `Agentic: true`를 저장하고 worktree에서 agent를 실행해 raw patch를
+  생성하는 별도 작업이다. parent/config/agent/model/reasoning 검증은
+  Dashboard가 선택한 immutable plan이 아니라 daemon의 현재 상태다. reasoning은
+  enqueue row에 저장되어 worker가 재사용하지만, pre-enqueue token/config
+  generation에 bind되지 않으며 hot reload와 primary→backup failover가
+  enqueue 뒤 executor/safety 선택을 바꿀 수 있다.
+  worktree는 파일시스템 sandbox가 아니고, `/api/job/patch`는 bounded
+  repo-bound patch envelope가 아니다. Phase A generation은 **NO-GO**이며
+  Dashboard는 이 endpoint를 호출하지 않는다.
+* **Patch Apply**는 TUI가 별도 단계로 수행한다. `CheckPatch` 뒤
+  `ApplyPatch`, touched-file dirty check, `git add --`, `git commit --only`,
+  `/api/job/applied`, parent close/rebase가 각각 분리되어 있다. dry-run은
+  reservation이 아니다. `--reject` 없는 일반적인 hunk conflict는 Git 기본
+  동작상 전체 patch를 거부하고 통상 mutation-zero이므로 target readback으로
+  확인할 수 있지만, generic I/O/concurrency 오류와 그 뒤의 stage/commit은
+  별도 authoritative readback이 필요하다. local commit과 daemon
+  mark/parent close는 원자적이지 않다. Phase B
+  inspection도 audit-only B로 승격하지 않으며 Phase C apply/commit은
+  **NO-GO**다. 상세 source evidence, required frozen token과 별도 bounded
+  patch/apply 계약은 [FIX-PATCH-FEASIBILITY.md](FIX-PATCH-FEASIBILITY.md)에
+  기록한다.
+
+  kit의 `CheckPatch`/`ApplyPatch`는 inherited `GIT_*`와 global/system
+  configuration을 억제하는 defensive runner를 사용하지만, TUI의 raw
+  `git add`/`git commit`은 `os.Environ()`을 상속한다. 동일한 명시적 Git
+  environment binding 없이 두 단계의 repository/config 의미를 같다고
+  가정하지 않는다.
+
+이 분리는 Fix browser privacy boundary를 바꾸지 않는다. path, executable,
+raw command/error/output은 browser DTO로 나가지 않는다. Tasks/Analyze 실행은
+계속 disabled, Review Export는 **BLOCKED**, Repository Delete/unregister는
+**BLOCKED**이며, General Fix/Panel Refine/General Refine mutation CTA도
+계속 blocked다.
+
 ### Tasks
 
 Tasks는 **history-only** 화면이다. v0.64 Custom Task 실행은 fail-closed로 비활성화되어 있다. 이유는 다음과 같다.

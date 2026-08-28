@@ -2,6 +2,14 @@
 
 마지막 갱신: 2026-08-28
 
+## Current checkpoint — Lifecycle-Free Fix Patch Feasibility Audit
+
+- 기준 commit은 `8b86f75d2733f8a867ef510b1c0ad3c1c3910ad3` (`Sanitize blocked fix browser projection`)이며, 비교 대상은 exact RoboRev v0.64.0 `bc0af33c282733a9c39d72c08373b040e22c11d4`다.
+- `POST /api/job/fix` background generation, `GET /api/job/patch` inspection, TUI-style apply/commit, `/api/job/applied`와 stale/rebase를 source-audit한 결과는 **NO-GO**다. Phase A generation과 Phase C apply/commit은 production GO가 아니며 Phase B inspection도 audit-only B로 승격하지 않는다.
+- Blocker는 daemon의 live config/hot-reload와 primary→backup failover, 항상 agentic/dangerous executor, worktree의 비-sandbox 성격, queue pause race, unbounded/raw patch, CheckPatch→ApplyPatch→commit→mark/close의 비원자 partial failure다. 상세 근거와 required frozen reservation token은 [`docs/FIX-PATCH-FEASIBILITY.md`](FIX-PATCH-FEASIBILITY.md)에 있다.
+- General Fix, Panel Refine, General Refine mutation은 계속 blocked이고 Fix browser privacy boundary를 유지한다. Tasks/Analyze execution은 disabled, Review Export는 **BLOCKED**, Repository Delete/unregister는 **BLOCKED**다.
+- 다음 독립 checkpoint는 **CI Metrics Export Feasibility Audit**이며 이 checkpoint에서 구현하지 않는다.
+
 ## 현재 상태
 
 - 새 Git 저장소를 `main` branch로 초기화했다.
@@ -440,3 +448,15 @@ General Fix read-only eligibility/preview/history, Panel Refine historical reads
 The daemon `/api/job/fix` endpoint is not used: it creates a background agentic worktree job, resolves daemon-side agent/model/reasoning/config and stores a patch, rather than providing the current-checkout CLI Fix commit/comment/close/review contract. Future work requires an upstream no-lifecycle Fix mode, a lifecycle-free current-checkout API, or a separately designed patch/apply/commit workflow. See [`docs/FIX-LIFECYCLE-AUDIT.md`](FIX-LIFECYCLE-AUDIT.md) and [`docs/GENERAL-REFINE.md`](GENERAL-REFINE.md).
 
 No real RoboRev review, Fix, Refine, daemon lifecycle, LLM or external RoboRev review was run for this correction.
+
+## Lifecycle-Free Fix Patch Feasibility Audit handoff (2026-08-28)
+
+The audit is complete and is documented in [`docs/FIX-PATCH-FEASIBILITY.md`](FIX-PATCH-FEASIBILITY.md). Final verdict: **NO-GO** against exact RoboRev v0.64.0 commit `bc0af33c282733a9c39d72c08373b040e22c11d4`, with Dashboard base `8b86f75d2733f8a867ef510b1c0ad3c1c3910ad3`.
+
+The audit covered the exact `FixJobRequest` (`parent_job_id`, optional `prompt`, `git_ref`, `stale_job_id`), raw `ReviewJob` 201 response, loose parent checks, daemon-side config resolution, hot reload, primary/backup failover, always-agentic dangerous executors, worktree/submodule/LFS/base-SHA behavior, unbounded raw patch retrieval, TUI CheckPatch/ApplyPatch/add/commit/mark-applied/parent-close/rebase flow, Windows/path/symlink/reparse/submodule concerns, and every partial-failure boundary. Phase A generation and Phase C apply/commit are not production GO; Phase B inspection is not an audit-only B claim.
+
+No `/api/job/fix`, `/api/job/patch`, `/api/job/applied`, `/api/job/rebased`, patch apply, commit or rebase production path was added. General Fix, Panel Refine and General Refine remain blocked. Existing Fix browser privacy projection remains path/executable/raw-error/stderr/output safe. Tasks and Analyze execution remain disabled, Review Export remains **BLOCKED**, and Repository Delete/unregister remains **BLOCKED**.
+
+The smallest unblock is an atomic frozen Fix plan/reservation token bound to the opaque repository and parent, exact base/full HEAD/checkout, config digest/reload generation, primary and backup agent/model/provider/reasoning/failover, executor/sandbox/dangerous settings and writable roots, plus a genuinely safe contained agent mode. Independently, a bounded repository-bound patch envelope and safer apply/index/commit/readback contract are required. An ordinary non-`--reject` hunk conflict has Git's default whole-patch rejection and is normally mutation-zero, subject to target readback; this does not make the full check→apply→stage→commit flow transactional. Generic I/O/concurrency or post-apply ambiguity requires authoritative readback, and a mutation-started unverified result is `failed-unverified`.
+
+The next independent checkpoint is **CI Metrics Export Feasibility Audit**; it is selected only and is not implemented here. Validation completed with targeted Go `go test ./internal/app ./internal/fixoperation ./internal/roborev ./internal/refine ./internal/operation` PASS; targeted FixRefine/GeneralRefine/PanelRefine/API frontend coverage (4 files, 78 tests) PASS; `scripts/test.ps1` PASS (all Go suites, 31 frontend files/587 tests and embedded web build); `scripts/build.ps1` PASS; and `dist/roborev-dashboard.exe --help` PASS. The first sandboxed Vitest/esbuild attempt hit an environment EPERM and the escalated rerun passed. Exactly one fresh-context internal read-only reviewer returned PASS with no material findings; its two minor documentation omissions were corrected and the same reviewer returned final PASS. No real RoboRev, daemon, LLM or external review job was run.
