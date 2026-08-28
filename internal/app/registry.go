@@ -268,6 +268,27 @@ type freshProbeResult struct {
 	incomplete bool
 }
 
+// contextDeadlineErr closes the small scheduler race where a context's
+// deadline has passed but its cancellation timer has not yet run. Fresh
+// admission and result-credit boundaries use the wall-clock deadline as a
+// second source of truth so late successful probes are never accepted.
+func contextDeadlineErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func contextDeadlineExpired(ctx context.Context) bool {
+	return contextDeadlineErr(ctx) != nil
+}
+
 // FreshRegisteredPathsWithStatus returns completed canonical roots, whether
 // one or more probes timed out, and any parent-context error. Membership is
 // frozen before probing; only fresh inspections can contribute paths.
@@ -303,6 +324,10 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 	paths := make([]string, 0, len(snapshot))
 	consume := func(result freshProbeResult) {
 		processed++
+		if contextDeadlineExpired(phaseCtx) {
+			incomplete = true
+			return
+		}
 		if result.valid {
 			paths = append(paths, result.path)
 		}
@@ -311,7 +336,10 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 		}
 	}
 	for offset := uint64(0); offset < uint64(len(snapshot)); {
-		if phaseCtx.Err() != nil {
+		if err := contextDeadlineErr(ctx); err != nil {
+			return nil, false, err
+		}
+		if contextDeadlineExpired(phaseCtx) {
 			incomplete = true
 			break
 		}
@@ -331,15 +359,18 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 		}
 		select {
 		case result := <-results:
+			if err := contextDeadlineErr(ctx); err != nil {
+				return nil, false, err
+			}
 			consume(result)
 		case <-phaseCtx.Done():
 			incomplete = true
 			goto done
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			return nil, false, contextDeadlineErr(ctx)
 		}
 	}
-	if err := ctx.Err(); err != nil {
+	if err := contextDeadlineErr(ctx); err != nil {
 		return nil, false, err
 	}
 
@@ -349,19 +380,22 @@ func (r *Registry) freshRegisteredPaths(ctx context.Context, rootTimeout, phaseT
 	for processed < accepted {
 		select {
 		case result := <-results:
+			if err := contextDeadlineErr(ctx); err != nil {
+				return nil, false, err
+			}
 			consume(result)
 		case <-phaseCtx.Done():
 			incomplete = true
 			goto done
 		case <-ctx.Done():
-			return nil, false, ctx.Err()
+			return nil, false, contextDeadlineErr(ctx)
 		}
 	}
 done:
-	if err := ctx.Err(); err != nil {
+	if err := contextDeadlineErr(ctx); err != nil {
 		return nil, false, err
 	}
-	if phaseCtx.Err() != nil && processed < accepted {
+	if contextDeadlineExpired(phaseCtx) {
 		incomplete = true
 	}
 	sort.Strings(paths)
@@ -369,13 +403,13 @@ done:
 }
 
 func (r *Registry) startFreshProbe(parent context.Context, path string, rootTimeout time.Duration, results chan<- freshProbeResult) bool {
-	if parent.Err() != nil {
+	if contextDeadlineExpired(parent) {
 		return false
 	}
 	rootCtx, rootCancel := context.WithTimeout(parent, rootTimeout)
 	r.probeMu.Lock()
 	r.initProbeStateLocked()
-	if r.probeClosing || parent.Err() != nil {
+	if r.probeClosing || contextDeadlineExpired(parent) || contextDeadlineExpired(rootCtx) {
 		r.probeMu.Unlock()
 		rootCancel()
 		return false
@@ -404,12 +438,12 @@ func (r *Registry) startFreshProbe(parent context.Context, path string, rootTime
 	go func() {
 		repo, inspectErr := r.inspectExpected(rootCtx, path)
 		result := freshProbeResult{}
-		if rootCtx.Err() != nil {
+		if contextDeadlineExpired(rootCtx) {
 			result.incomplete = true
 		} else if inspectErr == nil {
 			result.path = repo.Path
 			result.valid = true
-		} else if rootCtx.Err() != nil || errors.Is(inspectErr, context.Canceled) || errors.Is(inspectErr, context.DeadlineExceeded) {
+		} else if contextDeadlineExpired(rootCtx) || errors.Is(inspectErr, context.Canceled) || errors.Is(inspectErr, context.DeadlineExceeded) {
 			result.incomplete = true
 		}
 		// Release is linearized before delivery so a caller that receives this
