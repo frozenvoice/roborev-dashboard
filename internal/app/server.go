@@ -1313,10 +1313,10 @@ func (s *Server) fixPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	preview, err := s.Fixes.Prepare(r.Context(), fixoperation.Request{RepositoryIdentity: r.URL.Query().Get("repositoryIdentity"), TargetJobID: id, Agent: agent})
 	if err != nil {
-		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+		writeError(w, fixErrorStatus(err), safeFixError(err), "fix")
 		return
 	}
-	writeJSON(w, http.StatusOK, preview)
+	writeJSON(w, http.StatusOK, toFixPreviewDTO(preview))
 }
 
 // taskExecutionDisabledMessage states the fail-closed reason without implying
@@ -1422,7 +1422,7 @@ func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listFixes(w http.ResponseWriter, r *http.Request) {
 	if s.Fixes == nil {
-		writeJSON(w, http.StatusOK, fixoperation.ListResponse{Operations: []*fixoperation.Operation{}})
+		writeJSON(w, http.StatusOK, fixOperationsResponseDTO{Operations: []*fixOperationDTO{}})
 		return
 	}
 	identity := strings.TrimSpace(r.URL.Query().Get("repositoryIdentity"))
@@ -1434,10 +1434,10 @@ func (s *Server) listFixes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.Registry.ResolveIdentity(identity); err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Fixes.List(identity))
+	writeJSON(w, http.StatusOK, toFixOperationsResponseDTO(s.Fixes.List(identity)))
 }
 
 func (s *Server) getFix(w http.ResponseWriter, r *http.Request) {
@@ -1451,10 +1451,10 @@ func (s *Server) getFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.Registry.ResolveIdentity(item.RepositoryIdentity); err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
 		return
 	}
-	writeJSON(w, http.StatusOK, item)
+	writeJSON(w, http.StatusOK, toFixOperationDTO(item))
 }
 
 func (s *Server) startFix(w http.ResponseWriter, r *http.Request) {
@@ -1505,11 +1505,11 @@ func (s *Server) cancelFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Fixes.Cancel(item.ID); err != nil {
-		writeError(w, fixErrorStatus(err), err.Error(), "fix")
+		writeError(w, fixErrorStatus(err), safeFixError(err), "fix")
 		return
 	}
 	item, _ = s.Fixes.Get(item.ID)
-	writeJSON(w, http.StatusAccepted, item)
+	writeJSON(w, http.StatusAccepted, toFixOperationDTO(item))
 }
 
 type commentBody struct {

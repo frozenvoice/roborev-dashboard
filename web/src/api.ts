@@ -1578,10 +1578,13 @@ export type FixTarget = {
   panelName?: string
 }
 
-export type FixCommand = { executable: string; args: string[] }
+/**
+ * Browser-safe fix command projection.  The server may execute a configured
+ * binary, but that private path is not part of the browser contract.
+ */
+export type FixCommand = { executable: 'roborev'; args: string[] }
 export type FixPreview = {
   repositoryIdentity: string
-  repositoryPath: string
   target: FixTarget
   agent: string
   command: FixCommand
@@ -1590,10 +1593,10 @@ export type FixPreview = {
   previewToken: string
 }
 export type FixPhase = 'starting' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type FixErrorCode = 'fix_command_failed' | 'fix_did_not_commit' | 'fix_left_dirty' | 'repository_changed' | 'repository_unavailable' | 'operation_timed_out' | 'cancelled'
 export type FixOperation = {
   id: number | string
   repositoryIdentity: string
-  repositoryPath: string
   target: FixTarget
   agent: string
   command: FixCommand
@@ -1606,14 +1609,15 @@ export type FixOperation = {
   startedAt?: string
   updatedAt?: string
   completedAt?: string
-  error?: string
-  errorCode?: string
-  cancelRequestedAt?: string
+  errorCode?: FixErrorCode
 }
 export type FixOperationsResponse = { operations: FixOperation[]; operation: FixOperation | null }
 
 function readFixAlias(object: Record<string, unknown>, camel: string, snake: string) { return object[camel] ?? object[snake] }
-function fixString(object: Record<string, unknown>, camel: string, snake = camel) { const value = readFixAlias(object, camel, snake); return typeof value === 'string' ? value : undefined }
+function fixString(object: Record<string, unknown>, camel: string, snake = camel) {
+  const value = readFixAlias(object, camel, snake)
+  return typeof value === 'string' && value.length <= 512 && !/[\u0000-\u001f\u007f\\]/.test(value) ? value : undefined
+}
 function fixNumber(object: Record<string, unknown>, camel: string, snake = camel) {
   const value = readFixAlias(object, camel, snake)
   if (typeof value === 'number') return Number.isSafeInteger(value) ? value : undefined
@@ -1623,46 +1627,72 @@ function fixNumber(object: Record<string, unknown>, camel: string, snake = camel
 }
 function parseFixTarget(value: unknown): FixTarget | null {
   const object = objectValue(value)
-  if (!object) return null
-  const jobId = fixNumber(object, 'jobId', 'job_id')
-  const gitRef = fixString(object, 'gitRef', 'git_ref')
+  if (!object || hasForbiddenFixKey(object) || !hasOnlyFixKeys(object, fixTargetKeys)) return null
+  const jobId = fixNumber(object, 'jobId')
+  const gitRef = fixString(object, 'gitRef')
   const branch = fixString(object, 'branch')
-  const jobType = fixString(object, 'jobType', 'job_type')
-  const panelRole = fixString(object, 'panelRole', 'panel_role')
+  const jobType = fixString(object, 'jobType')
+  const panelRole = fixString(object, 'panelRole')
   if (jobId === undefined || jobId <= 0 || !gitRef || !branch || !jobType || typeof panelRole !== 'string') return null
-  return { jobId, gitRef, branch, jobType, panelRole, panelName: fixString(object, 'panelName', 'panel_name') }
+  return { jobId, gitRef, branch, jobType, panelRole, panelName: fixString(object, 'panelName') }
 }
-function parseFixCommand(value: unknown): FixCommand | null {
+const forbiddenFixKeys = new Set(['repositorypath', 'path', 'binary', 'binarypath', 'cwd', 'env', 'stdout', 'stderr', 'rawerror'])
+const fixPreviewKeys = new Set(['repositoryIdentity', 'target', 'agent', 'command', 'startingHead', 'startingBranch', 'previewToken'])
+const fixOperationKeys = new Set(['id', 'repositoryIdentity', 'target', 'agent', 'phase', 'status', 'command', 'startingHead', 'startingBranch', 'newHead', 'endingHead', 'endingBranch', 'endingDirty', 'startedAt', 'updatedAt', 'completedAt', 'errorCode'])
+const fixErrorCodes = new Set<FixErrorCode>(['fix_command_failed', 'fix_did_not_commit', 'fix_left_dirty', 'repository_changed', 'repository_unavailable', 'operation_timed_out', 'cancelled'])
+const fixOperationsResponseKeys = new Set(['operations', 'operation'])
+const fixTargetKeys = new Set(['jobId', 'gitRef', 'branch', 'jobType', 'panelRole', 'panelName'])
+const fixCommandKeys = new Set(['executable', 'args'])
+function hasOnlyFixKeys(object: Record<string, unknown>, allowed: Set<string>) { return Object.keys(object).every(key => allowed.has(key)) }
+function hasForbiddenFixKey(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== 'object') return false
+  if (seen.has(value)) return false
+  seen.add(value)
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = key.replace(/[_-]/g, '').toLowerCase()
+    if (forbiddenFixKeys.has(normalized) || hasForbiddenFixKey(child, seen)) return true
+  }
+  return false
+}
+function parseFixErrorCode(object: Record<string, unknown>): FixErrorCode | null | undefined {
+  const value = object.errorCode
+  if (value === undefined) return undefined
+  return typeof value === 'string' && fixErrorCodes.has(value as FixErrorCode) ? value as FixErrorCode : null
+}
+function parseFixCommand(value: unknown, targetJobId: number, agent: string): FixCommand | null {
   const object = objectValue(value)
-  if (!object || typeof object.executable !== 'string' || !object.executable.trim() || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
-  return { executable: object.executable, args: object.args as string[] }
+  if (!object || hasForbiddenFixKey(object) || !hasOnlyFixKeys(object, fixCommandKeys) || object.executable !== 'roborev' || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string')) return null
+  const args = object.args as string[]
+  if (agent !== 'codex' || args.length !== 5 || args[0] !== 'fix' || args[1] !== '--agent' || args[2] !== agent || args[3] !== '--quiet' || args[4] !== String(targetJobId)) return null
+  return { executable: 'roborev', args }
 }
 function parseFixPreview(value: unknown): FixPreview | null {
   const object = objectValue(value)
-  if (!object || typeof readFixAlias(object, 'repositoryIdentity', 'repository_identity') !== 'string' || typeof readFixAlias(object, 'repositoryPath', 'repository_path') !== 'string' || typeof object.agent !== 'string' || typeof readFixAlias(object, 'startingHead', 'starting_head') !== 'string' || typeof readFixAlias(object, 'startingBranch', 'starting_branch') !== 'string' || typeof readFixAlias(object, 'previewToken', 'preview_token') !== 'string') return null
+  if (!object || hasForbiddenFixKey(object) || !hasOnlyFixKeys(object, fixPreviewKeys) || typeof object.repositoryIdentity !== 'string' || typeof object.agent !== 'string' || typeof object.startingHead !== 'string' || typeof object.startingBranch !== 'string' || typeof object.previewToken !== 'string') return null
   const target = parseFixTarget(object.target)
-  const command = parseFixCommand(object.command)
+  const command = target && parseFixCommand(object.command, target.jobId, object.agent)
   if (!target || !command) return null
-  return { repositoryIdentity: readFixAlias(object, 'repositoryIdentity', 'repository_identity') as string, repositoryPath: readFixAlias(object, 'repositoryPath', 'repository_path') as string, target, agent: object.agent, command, startingHead: readFixAlias(object, 'startingHead', 'starting_head') as string, startingBranch: readFixAlias(object, 'startingBranch', 'starting_branch') as string, previewToken: readFixAlias(object, 'previewToken', 'preview_token') as string }
+  return { repositoryIdentity: object.repositoryIdentity, target, agent: object.agent, command, startingHead: object.startingHead, startingBranch: object.startingBranch, previewToken: object.previewToken }
 }
 function parseFixOperation(value: unknown): FixOperation | null {
   const object = objectValue(value)
-  if (!object || (typeof object.id !== 'string' && typeof object.id !== 'number')) return null
+  if (!object || hasForbiddenFixKey(object) || !hasOnlyFixKeys(object, fixOperationKeys) || (typeof object.id !== 'string' && typeof object.id !== 'number')) return null
   const phase = fixString(object, 'phase')
   const phases: FixPhase[] = ['starting', 'running', 'succeeded', 'failed', 'cancelled']
   const target = parseFixTarget(object.target)
-  const command = parseFixCommand(object.command)
-  const repositoryIdentity = fixString(object, 'repositoryIdentity', 'repository_identity')
-  const repositoryPath = fixString(object, 'repositoryPath', 'repository_path')
-  if (!phase || !phases.includes(phase as FixPhase) || !target || !command || !repositoryIdentity || !repositoryPath || typeof object.agent !== 'string') return null
-  const optionalBool = (camel: string, snake: string) => { const value = readFixAlias(object, camel, snake); return typeof value === 'boolean' ? value : undefined }
-  return { id: object.id as number | string, repositoryIdentity, repositoryPath, target, agent: object.agent, command, phase: phase as FixPhase, startingHead: fixString(object, 'startingHead', 'starting_head'), startingBranch: fixString(object, 'startingBranch', 'starting_branch'), endingHead: fixString(object, 'endingHead', 'ending_head'), endingBranch: fixString(object, 'endingBranch', 'ending_branch'), endingDirty: optionalBool('endingDirty', 'ending_dirty'), startedAt: fixString(object, 'startedAt', 'started_at'), updatedAt: fixString(object, 'updatedAt', 'updated_at'), completedAt: fixString(object, 'completedAt', 'completed_at'), error: fixString(object, 'error'), errorCode: fixString(object, 'errorCode', 'error_code'), cancelRequestedAt: fixString(object, 'cancelRequestedAt', 'cancel_requested_at') }
+  const agent = fixString(object, 'agent')
+  const command = target && agent && parseFixCommand(object.command, target.jobId, agent)
+  const repositoryIdentity = fixString(object, 'repositoryIdentity')
+  const errorCode = parseFixErrorCode(object)
+  if (!phase || !phases.includes(phase as FixPhase) || !target || !command || !repositoryIdentity || !agent || errorCode === null) return null
+  const optionalBool = (key: string) => { const value = object[key]; return typeof value === 'boolean' ? value : undefined }
+  return { id: object.id as number | string, repositoryIdentity, target, agent, command, phase: phase as FixPhase, startingHead: fixString(object, 'startingHead'), startingBranch: fixString(object, 'startingBranch'), endingHead: fixString(object, 'endingHead') ?? fixString(object, 'newHead'), endingBranch: fixString(object, 'endingBranch'), endingDirty: optionalBool('endingDirty'), startedAt: fixString(object, 'startedAt'), updatedAt: fixString(object, 'updatedAt'), completedAt: fixString(object, 'completedAt'), ...(errorCode === undefined ? {} : { errorCode: errorCode as FixErrorCode }) }
 }
 export function normalizeFixPreview(value: unknown): FixPreview | null { return parseFixPreview(value) }
 export function normalizeFixOperation(value: unknown): FixOperation | null { return parseFixOperation(value) }
 export function normalizeFixOperationsResponse(value: unknown): FixOperationsResponse {
   const object = objectValue(value)
-  if (!object) return { operations: [], operation: null }
+  if (!object || hasForbiddenFixKey(object) || !hasOnlyFixKeys(object, fixOperationsResponseKeys)) return { operations: [], operation: null }
   const values = Array.isArray(object.operations) ? object.operations : []
   const operations = values.map(parseFixOperation).filter((item): item is FixOperation => Boolean(item))
   const direct = parseFixOperation(object.operation)

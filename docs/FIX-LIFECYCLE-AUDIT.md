@@ -31,6 +31,12 @@ It does not provide the current-checkout CLI Fix transaction that applies change
 
 Read-only General Fix eligibility/preview/history, Panel Refine history/detail/timeline, and the independently safe Review HEAD, review history/detail, ordinary rerun, comment/close and repository management surfaces are not reclassified. `FixCommand` capability may still report that the upstream command exists; command existence is not Dashboard execution safety.
 
+## Browser privacy boundary
+
+The Fix HTTP handlers do not serialize `fixoperation.Preview` or `fixoperation.Operation` directly. The app layer projects separate browser DTOs for preview, list, detail, and cancel responses. The internal manager may retain the canonical repository path, the resolved RoboRev executable, and raw process diagnostics for authority and postcondition bookkeeping, but those values stop at the app boundary.
+
+Browser-visible Fix history contains typed semantic fields and `errorCode`; it does not contain `repositoryPath`, the resolved executable, raw `Error`, stderr, or process output. When a command preview is present, its executable is the fixed display value `roborev` and its arguments are rebuilt from the safe semantic job ID (`fix --agent codex --quiet <job-id>`), never copied from manager command state. Privacy fixtures cover both raw and JSON-escaped private path, executable, stderr, and output markers across preview/list/detail/cancel responses, including a completed operation whose internal error contains those markers and a separate active operation exercising cancel compatibility.
+
 ## Future unblock conditions
 
 One of these contracts must be designed and audited before Dashboard Fix execution can return:

@@ -80,7 +80,7 @@ type FixRefineProps = {
   panelRefine: PanelRefineProps
 }
 
-export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelectedJobIdChange, onOpenReview, onTerminal, onToast, panelRefine }: FixRefineProps) {
+export function FixRefine({ repoIdentity, jobs, selectedJobId, onSelectedJobIdChange, onOpenReview, onTerminal, onToast, panelRefine }: FixRefineProps) {
   const { t } = useI18n()
   const translateRef = useRef(t)
   translateRef.current = t
@@ -119,8 +119,8 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
       const next = normalizeFixPreview(value)
       if (!next || next.repositoryIdentity !== repoIdentity || next.target.jobId !== selectedJobId || next.agent !== 'codex') throw new Error(translateRef.current('error.fixPreviewMalformed'))
       setPreview(next)
-    }).catch(error => {
-      if (generation === previewGeneration.current) setPreviewError((error as Error).message)
+    }).catch(() => {
+      if (generation === previewGeneration.current) setPreviewError(translateRef.current('error.fixPreviewMalformed'))
     }).finally(() => {
       if (generation === previewGeneration.current) setPreviewLoading(false)
     })
@@ -138,8 +138,8 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
       setOperation(scoped)
       setOperationError('')
       return scoped
-    } catch (error) {
-      if (generation === operationGeneration.current) setOperationError((error as Error).message)
+    } catch {
+      if (generation === operationGeneration.current) setOperationError(translateRef.current('error.fixOperationMalformed'))
       return null
     } finally {
       if (generation === operationGeneration.current) setOperationLoading(false)
@@ -177,9 +177,9 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
       let next: FixOperation | null
       try {
         next = await loadOperation(operation.id)
-      } catch (error) {
+      } catch {
         if (!cancelled) {
-          setOperationError((error as Error).message)
+          setOperationError(translateRef.current('error.fixOperationMalformed'))
           timer = setTimeout(poll, 1500)
         }
         return
@@ -214,9 +214,9 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
         terminalNotified.current = next.id
         await onTerminal().catch(() => undefined)
       }
-    } catch (error) {
-      setOperationError((error as Error).message)
-      onToast?.('error', (error as Error).message)
+    } catch {
+      setOperationError(t('error.fixOperationMalformed'))
+      onToast?.('error', t('error.fixOperationMalformed'))
     } finally { setSubmitting(false) }
   }
   const cancel = async () => {
@@ -230,9 +230,9 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
         terminalNotified.current = next.id
         await onTerminal().catch(() => undefined)
       }
-    } catch (error) {
-      setOperationError((error as Error).message)
-      onToast?.('error', (error as Error).message)
+    } catch {
+      setOperationError(t('fix.cancelFailed'))
+      onToast?.('error', t('fix.cancelFailed'))
     } finally { setCanceling(false) }
   }
   const targetLabel = (job: ReviewJob) => `${job.commit_subject || job.subject || job.git_ref || `#${fixJobId(job)}`} · ${isSynthesisJob(job) ? t('fix.synthesis') : t('fix.single')}`
@@ -249,10 +249,10 @@ export function FixRefine({ repoPath, repoIdentity, jobs, selectedJobId, onSelec
       </section>
       {operationLoading && !operation && <div className="skeleton" />}
       {operationError && !previewError && <p className="fix-error" role="alert">{operationError} <button className="button ghost compact" onClick={() => void loadOperations()}>{t('common.retry')}</button></p>}
-      {operation && <article className={`fix-operation-card ${phaseTone(operation)}`} aria-live="polite"><header><div><span className="fix-operation-id">{t('fix.operation', { id: operation.id })}</span><h2>{phaseLabel(operation, t)}</h2></div><span className={`fix-phase ${phaseTone(operation)}`}><span className="status-dot" />{phaseLabel(operation, t)}</span></header><div className="fix-operation-facts"><span><b>{t('fix.target')}</b>#{operation.target.jobId}</span><span><b>{t('fix.startingHead')}</b><code>{short(operation.startingHead)}</code></span><span><b>{t('fix.endingHead')}</b><code>{short(operation.endingHead)}</code></span><span><b>{t('fix.endingBranch')}</b>{operation.endingBranch || '—'}</span>{operation.endingDirty !== undefined && <span><b>{t('fix.endingDirty')}</b>{operation.endingDirty ? t('status.dirty') : t('status.clean')}</span>}</div>{operation.error && <p className="fix-error" role="alert">{operation.error}{operation.errorCode && <small> · {operation.errorCode}</small>}</p>}<footer>{operation.phase === 'succeeded' && <button className="button" onClick={() => onOpenReview(operation.target.jobId)}>{t('fix.openReview')}</button>}{active(operation) && <button className="button danger" disabled={canceling} onClick={() => void cancel()}><CircleStop size={15} />{canceling ? t('fix.canceling') : t('fix.cancel')}</button>}</footer></article>}
+      {operation && <article className={`fix-operation-card ${phaseTone(operation)}`} aria-live="polite"><header><div><span className="fix-operation-id">{t('fix.operation', { id: operation.id })}</span><h2>{phaseLabel(operation, t)}</h2></div><span className={`fix-phase ${phaseTone(operation)}`}><span className="status-dot" />{phaseLabel(operation, t)}</span></header><div className="fix-operation-facts"><span><b>{t('fix.target')}</b>#{operation.target.jobId}</span><span><b>{t('fix.startingHead')}</b><code>{short(operation.startingHead)}</code></span><span><b>{t('fix.endingHead')}</b><code>{short(operation.endingHead)}</code></span><span><b>{t('fix.endingBranch')}</b>{operation.endingBranch || '—'}</span>{operation.endingDirty !== undefined && <span><b>{t('fix.endingDirty')}</b>{operation.endingDirty ? t('status.dirty') : t('status.clean')}</span>}</div>{operation.errorCode && <p className="fix-error fix-error-code" role="status">{t('fix.failureCode', { code: operation.errorCode })}</p>}<footer>{operation.phase === 'succeeded' && <button className="button" onClick={() => onOpenReview(operation.target.jobId)}>{t('fix.openReview')}</button>}{active(operation) && <button className="button danger" disabled={canceling} onClick={() => void cancel()}><CircleStop size={15} />{canceling ? t('fix.canceling') : t('fix.cancel')}</button>}</footer></article>}
       <GeneralRefine repositoryIdentity={repoIdentity} onOpenReview={onOpenReview} onTerminal={onTerminal} onToast={onToast} />
       <PanelRefine {...panelRefine} />
     </section>
-    {dialogOpen && preview && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog fix-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-confirm-title"><header><div><h2 id="fix-confirm-title">{t('fix.confirmTitle')}</h2><p>{t('fix.confirmDescription')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('fix.closePreview')} onClick={() => setDialogOpen(false)} disabled={submitting}><X /></button></div></header><div className="fix-preview-facts"><span><b>{t('fix.repository')}</b><code>{preview.repositoryPath}</code></span><span><b>{t('fix.target')}</b>#{preview.target.jobId} · {preview.target.gitRef}</span><span><b>{t('fix.startingHead')}</b><code>{preview.startingHead}</code> · {preview.startingBranch}</span></div><div className="fix-command-preview"><strong>{t('fix.command')}</strong><code className="fix-executable">{preview.command.executable}</code><ol>{preview.command.args.map((arg, index) => <li key={`${index}-${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div><p className="fix-safety"><AlertTriangle size={16} />{t('fix.safety')}</p><p className="fix-execution-disabled" role="status"><AlertTriangle size={16} />{t('fix.executionDisabled')}</p><footer><button className="button" onClick={() => setDialogOpen(false)} disabled={submitting}>{t('common.cancel')}</button><button className="button primary" onClick={() => void submit()} disabled={!fixExecutionEnabled || submitting}>{submitting ? t('fix.confirming') : <><Check size={15} />{t('fix.confirmAction')}</>}</button></footer></section></div>}
+    {dialogOpen && preview && <div className="prompt-overlay" role="presentation"><section className="prompt-dialog fix-dialog" role="dialog" aria-modal="true" aria-labelledby="fix-confirm-title"><header><div><h2 id="fix-confirm-title">{t('fix.confirmTitle')}</h2><p>{t('fix.confirmDescription')}</p></div><div className="modal-header-actions"><LanguageSelector compact /><button className="icon-button" aria-label={t('fix.closePreview')} onClick={() => setDialogOpen(false)} disabled={submitting}><X /></button></div></header><div className="fix-preview-facts"><span><b>{t('fix.repository')}</b></span><span><b>{t('fix.target')}</b>#{preview.target.jobId} · {preview.target.gitRef}</span><span><b>{t('fix.startingHead')}</b><code>{preview.startingHead}</code> · {preview.startingBranch}</span></div><div className="fix-command-preview"><strong>{t('fix.command')}</strong><code className="fix-executable">roborev</code><ol>{preview.command.args.map((arg, index) => <li key={`${index}-${arg}`}><span>argv[{index}]</span><code>{arg}</code></li>)}</ol></div><p className="fix-safety"><AlertTriangle size={16} />{t('fix.safety')}</p><p className="fix-execution-disabled" role="status"><AlertTriangle size={16} />{t('fix.executionDisabled')}</p><footer><button className="button" onClick={() => setDialogOpen(false)} disabled={submitting}>{t('common.cancel')}</button><button className="button primary" onClick={() => void submit()} disabled={!fixExecutionEnabled || submitting}>{submitting ? t('fix.confirming') : <><Check size={15} />{t('fix.confirmAction')}</>}</button></footer></section></div>}
   </>
 }

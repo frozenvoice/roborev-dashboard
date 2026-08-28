@@ -16,8 +16,8 @@ const jobs: ReviewJob[] = [
   { id: 44, status: 'done', verdict: 'F', closed: true, git_ref: 'closed', branch: 'main', job_type: 'review', panel_role: '' },
   { id: 45, status: 'running', verdict: 'F', closed: false, git_ref: 'running', branch: 'main', job_type: 'review', panel_role: '' },
 ]
-const preview = { repositoryIdentity: 'repo-1', repositoryPath: 'C:\\repo', target: { jobId: 41, gitRef: 'abc123', branch: 'main', jobType: 'review', panelRole: '', panelName: '' }, agent: 'codex', command: { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '41'] }, startingHead: 'abc123456789', startingBranch: 'main', previewToken: 'token-1' }
-const operation = { id: 'fix-1', repositoryIdentity: 'repo-1', repositoryPath: 'C:\\repo', target: preview.target, agent: 'codex', command: preview.command, phase: 'starting', startingHead: preview.startingHead, startingBranch: 'main' }
+const preview = { repositoryIdentity: 'repo-1', target: { jobId: 41, gitRef: 'abc123', branch: 'main', jobType: 'review', panelRole: '', panelName: '' }, agent: 'codex', command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '41'] }, startingHead: 'abc123456789', startingBranch: 'main', previewToken: 'token-1' }
+const operation = { id: 'fix-1', repositoryIdentity: 'repo-1', target: preview.target, agent: 'codex', command: preview.command, phase: 'starting', startingHead: preview.startingHead, startingBranch: 'main' }
 const operationFor = (phase: string) => ({ ...operation, phase })
 
 function renderFix(selectedJobId: number | null = null) {
@@ -33,13 +33,75 @@ function deferred<T>() {
 
 describe('Fix & Refine frontend contract', () => {
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en') })
-  it('normalizes exact fix preview and operation aliases without accepting malformed commands', () => {
-    expect(normalizeFixPreview({ repository_identity: 'repo-1', repository_path: 'C:\\repo', target: { job_id: 41, git_ref: 'abc', branch: 'main', job_type: 'review', panel_role: '' }, agent: 'codex', command: { executable: 'roborev', args: ['fix', '41'] }, starting_head: 'abc', starting_branch: 'main', preview_token: 'token' })).toMatchObject({ repositoryIdentity: 'repo-1', target: { jobId: 41 }, command: { args: ['fix', '41'] } })
-    expect(normalizeFixPreview({ repositoryIdentity: 'repo-1', repositoryPath: 'C:\\repo', target: preview.target, agent: 'codex', command: { executable: 'roborev', args: [1] }, startingHead: 'abc', startingBranch: 'main', previewToken: 'token' })).toBeNull()
+  it('normalizes the strict privacy-safe fix contract without accepting malformed commands', () => {
+    expect(normalizeFixPreview({ repositoryIdentity: 'repo-1', target: { jobId: 41, gitRef: 'abc', branch: 'main', jobType: 'review', panelRole: '' }, agent: 'codex', command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '41'] }, startingHead: 'abc', startingBranch: 'main', previewToken: 'token' })).toMatchObject({ repositoryIdentity: 'repo-1', target: { jobId: 41 }, command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '41'] } })
+    expect(normalizeFixPreview({ ...preview, command: { ...preview.command, args: [1] } })).toBeNull()
+    expect(normalizeFixPreview({ ...preview, command: { ...preview.command, executable: 'C:\\fake\\very-secret\\roborev.exe' } })).toBeNull()
+    expect(normalizeFixPreview({ ...preview, repositoryPath: 'C:\\Users\\private\\source\\secret-project' })).toBeNull()
     expect(normalizeFixPreview({ ...preview, target: { ...preview.target, jobId: 0 } })).toBeNull()
     expect(normalizeFixPreview({ ...preview, target: { ...preview.target, jobId: '9007199254740992' } })).toBeNull()
     expect(normalizeFixOperationsResponse({ operations: [operation], operation: null }).operation?.id).toBe('fix-1')
     expect(normalizeFixOperationsResponse({ operations: [{ ...operation, target: { ...operation.target, jobId: '9007199254740992' } }], operation: null }).operations).toHaveLength(0)
+    expect(normalizeFixOperationsResponse({ operations: [{ ...operation, errorCode: 'PRIVATE_FIX_STDERR' }], operation: null }).operations).toHaveLength(0)
+    expect(normalizeFixOperationsResponse({ operations: [{ ...operation, errorCode: 42 }], operation: null }).operations).toHaveLength(0)
+  })
+
+  it.each([
+    ['repositoryPath', { ...preview, repositoryPath: 'C:\\Users\\private\\source\\secret-project' }],
+    ['path', { ...preview, target: { ...preview.target, path: 'C:\\Users\\private\\source\\secret-project' } }],
+    ['binary', { ...preview, binary: 'C:\\fake\\very-secret\\roborev.exe' }],
+    ['binaryPath', { ...preview, command: { ...preview.command, binaryPath: 'C:\\fake\\very-secret\\roborev.exe' } }],
+    ['cwd', { ...preview, command: { ...preview.command, cwd: 'C:\\Users\\private\\source\\secret-project' } }],
+    ['env', { ...preview, command: { ...preview.command, env: { PRIVATE_FIX_STDERR: 'PRIVATE_FIX_OUTPUT' } } }],
+    ['stdout', { ...preview, stdout: 'PRIVATE_FIX_OUTPUT' }],
+    ['stderr', { ...preview, stderr: 'PRIVATE_FIX_STDERR' }],
+    ['rawError', { ...preview, rawError: 'PRIVATE_FIX_STDERR' }],
+    ['escaped raw_error', { ...preview, raw_error: 'C:\\\\Users\\\\private\\\\source\\\\secret-project' }],
+    ['unknown command execution field', { ...preview, command: { ...preview.command, workingDirectory: 'C:\\Users\\private\\source\\secret-project' } }],
+  ])('rejects forbidden or unknown %s fields', (_name, value) => {
+    expect(normalizeFixPreview(value)).toBeNull()
+  })
+
+  it('rejects private fields recursively from historical operations too', () => {
+    expect(normalizeFixOperationsResponse({ operations: [{ ...operation, command: { ...operation.command, dir: 'C:\\Users\\private\\source\\secret-project' } }], operation: null }).operations).toHaveLength(0)
+    expect(normalizeFixOperationsResponse({ operations: [{ ...operation, rawError: 'PRIVATE_FIX_STDERR' }], operation: null }).operations).toHaveLength(0)
+  })
+
+  it('keeps private preview and historical markers out of the DOM', async () => {
+    const privateMarkers = [
+      'C:\\Users\\private\\source\\secret-project',
+      'C:\\fake\\very-secret\\roborev.exe',
+      'PRIVATE_FIX_STDERR',
+      'PRIVATE_FIX_OUTPUT',
+      'C:\\\\Users\\\\private\\\\source\\\\secret-project',
+    ]
+    const privatePreview = { ...preview, repositoryPath: privateMarkers[0], command: { ...preview.command, executable: privateMarkers[1] }, stderr: privateMarkers[2], stdout: privateMarkers[3], raw_error: privateMarkers[4] }
+    const privateOperation = { ...operation, path: privateMarkers[0], command: { ...operation.command, executable: privateMarkers[1] }, stderr: privateMarkers[2], stdout: privateMarkers[3], rawError: privateMarkers[4] }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('/api/fixes/preview')) return new Response(JSON.stringify(privatePreview), { status: 200 })
+      if (path.includes('/api/fixes?')) return new Response(JSON.stringify({ operations: [privateOperation], operation: privateOperation }), { status: 200 })
+      return new Response('{}', { status: 200 })
+    }))
+    renderFix(41)
+    await screen.findByText(/Could not prepare this fix/)
+    for (const marker of privateMarkers) expect(document.body.textContent).not.toContain(marker)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('renders only an allowlisted historical failure code, never raw diagnostics', async () => {
+    const safeOperation = { ...operation, phase: 'failed', errorCode: 'fix_command_failed' }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('/api/fixes?')) return new Response(JSON.stringify({ operations: [safeOperation], operation: safeOperation }), { status: 200 })
+      return new Response('{}', { status: 200 })
+    }))
+    render(<I18nProvider><FixRefine repoPath="C:\\Users\\private\\source\\secret-project" repoIdentity="repo-1" jobs={jobs} selectedJobId={null} onSelectedJobIdChange={vi.fn()} onOpenReview={vi.fn()} onTerminal={vi.fn(async () => undefined)} panelRefine={panelProps} /></I18nProvider>)
+    expect(await screen.findByText('Failure code: fix_command_failed')).toBeInTheDocument()
+    expect(normalizeFixOperationsResponse({ operations: [{ ...safeOperation, errorCode: 'PRIVATE_FIX_STDERR' }], operation: null }).operations).toHaveLength(0)
+    for (const marker of ['C:\\Users\\private\\source\\secret-project', 'C:\\fake\\very-secret\\roborev.exe', 'PRIVATE_FIX_STDERR', 'PRIVATE_FIX_OUTPUT']) {
+      expect(document.body.textContent).not.toContain(marker)
+    }
   })
 
   it('mirrors backend eligibility and rejects missing or malformed target identity', () => {
@@ -66,7 +128,7 @@ describe('Fix & Refine frontend contract', () => {
     expect(select).not.toHaveValue('43')
   })
 
-  it('displays backend argv but keeps the unsafe mutation confirmation disabled', async () => {
+  it('displays the safe semantic command but keeps the unsafe mutation confirmation disabled', async () => {
     const calls: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -77,14 +139,19 @@ describe('Fix & Refine frontend contract', () => {
       return new Response('{}', { status: 200 })
     }))
     const onSelected = vi.fn()
-    const view = render(<I18nProvider><FixRefine repoPath="C:\\repo" repoIdentity="repo-1" jobs={jobs} selectedJobId={null} onSelectedJobIdChange={onSelected} onOpenReview={vi.fn()} onTerminal={vi.fn(async () => undefined)} panelRefine={panelProps} /></I18nProvider>)
+    const view = render(<I18nProvider><FixRefine repoPath="C:\\Users\\private\\source\\secret-project" repoIdentity="repo-1" jobs={jobs} selectedJobId={null} onSelectedJobIdChange={onSelected} onOpenReview={vi.fn()} onTerminal={vi.fn(async () => undefined)} panelRefine={panelProps} /></I18nProvider>)
     fireEvent.change(await screen.findByLabelText('Finding to fix'), { target: { value: '41' } })
     expect(onSelected).toHaveBeenCalledWith(41)
     // A controlled selector is intentionally used by the App; rerender with the selected ID to model that owner update.
-    view.rerender(<I18nProvider><FixRefine repoPath="C:\\repo" repoIdentity="repo-1" jobs={jobs} selectedJobId={41} onSelectedJobIdChange={onSelected} onOpenReview={vi.fn()} onTerminal={vi.fn(async () => undefined)} panelRefine={panelProps} /></I18nProvider>)
+    view.rerender(<I18nProvider><FixRefine repoPath="C:\\Users\\private\\source\\secret-project" repoIdentity="repo-1" jobs={jobs} selectedJobId={41} onSelectedJobIdChange={onSelected} onOpenReview={vi.fn()} onTerminal={vi.fn(async () => undefined)} panelRefine={panelProps} /></I18nProvider>)
     await screen.findByRole('button', { name: 'Review execution preview' })
     fireEvent.click(screen.getByRole('button', { name: 'Review execution preview' }))
-    expect(await screen.findByText('C:\\Tools\\roborev.exe')).toBeInTheDocument()
+    const dialog = screen.getByRole('dialog')
+    expect(await screen.findByText('Selected repository')).toBeInTheDocument()
+    expect(screen.getByText('roborev')).toBeInTheDocument()
+    for (const marker of ['C:\\Users\\private\\source\\secret-project', 'C:\\fake\\very-secret\\roborev.exe', 'PRIVATE_FIX_STDERR', 'PRIVATE_FIX_OUTPUT', 'C:\\\\Users\\\\private\\\\source\\\\secret-project']) {
+      expect(dialog.textContent).not.toContain(marker)
+    }
     expect(screen.getByText('argv[0]')).toBeInTheDocument()
     const confirm = screen.getByRole('button', { name: 'Confirm and run fix' })
     expect(confirm).toBeDisabled()

@@ -2687,7 +2687,7 @@ describe('App review workflow', () => {
 
   it('preselects a parent finding in Fix & Refine without executing a fix', async () => {
     const calls: Array<{ path: string; method: string }> = []
-    const fixPreview = { repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', target: { jobId: 42, gitRef: jobs[0].git_ref, branch: 'main', jobType: 'synthesis', panelRole: 'synthesis', panelName: 'dashboard_cross' }, agent: 'codex', command: { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: jobs[0].git_ref, startingBranch: 'main', previewToken: 'preview-42' }
+    const fixPreview = { repositoryIdentity: 'repo-1', target: { jobId: 42, gitRef: jobs[0].git_ref, branch: 'main', jobType: 'synthesis', panelRole: 'synthesis', panelName: 'dashboard_cross' }, agent: 'codex', command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: jobs[0].git_ref, startingBranch: 'main', previewToken: 'preview-42' }
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       calls.push({ path, method: init?.method ?? 'GET' })
@@ -2708,7 +2708,7 @@ describe('App review workflow', () => {
 
   it('preselects an omitted-role single finding from Reviews without executing a fix', async () => {
     const single = { ...jobs[0], job_type: 'review', panel_role: undefined, panel_name: undefined, panel_run_uuid: undefined }
-    const fixPreview = { repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', target: { jobId: 42, gitRef: single.git_ref, branch: 'main', jobType: 'review', panelRole: '' }, agent: 'codex', command: { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: single.git_ref, startingBranch: 'main', previewToken: 'preview-single-42' }
+    const fixPreview = { repositoryIdentity: 'repo-1', target: { jobId: 42, gitRef: single.git_ref, branch: 'main', jobType: 'review', panelRole: '' }, agent: 'codex', command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '42'] }, startingHead: single.git_ref, startingBranch: 'main', previewToken: 'preview-single-42' }
     const calls: Array<{ path: string; method: string }> = []
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
