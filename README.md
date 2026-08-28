@@ -29,7 +29,7 @@ Set-Location roborev-dashboard
 
 ## 언어 전환
 
-Dashboard UI는 한국어와 English를 지원한다. 사이드바 하단의 native language selector에서 언어를 바꿀 수 있으며, 선택은 `roborev-dashboard-language`에 안전하게 저장되고 다음 실행에서 복원된다. 저장소, panel, review, modal, setup 진행 상태와 입력 내용은 언어 전환으로 재설정되지 않고 네트워크 요청이나 mutation도 발생하지 않는다. 열린 Install, daemon, agent check, Fix Prompt, Panel Refine 확인 화면에서도 헤더의 compact selector로 즉시 전환할 수 있다.
+Dashboard UI는 한국어와 English를 지원한다. 사이드바 하단의 native language selector에서 언어를 바꿀 수 있으며, 선택은 `roborev-dashboard-language`에 안전하게 저장되고 다음 실행에서 복원된다. 저장소, panel, review, modal, setup 진행 상태와 입력 내용은 언어 전환으로 재설정되지 않고 네트워크 요청이나 mutation도 발생하지 않는다. 열린 Install, daemon, agent check, Fix Prompt 화면에서도 헤더의 compact selector로 즉시 전환할 수 있다.
 
 번역 대상은 Dashboard chrome과 안내 문구이며 RoboRev, Git/SHA/API/CLI/CSRF/URL/JSON, 경로·버전·이름·ID와 backend 원문 오류 같은 technical/source-of-truth 값은 그대로 표시한다. 한국어가 긴 상태나 모바일 폭에서 줄바꿈되도록 최소한의 responsive CSS만 적용한다.
 
@@ -65,7 +65,7 @@ Dashboard는 선택한 repository의 global/local RoboRev panel을 발견한다.
 
 RoboRev v0.64.0 daemon이 이미 online/healthy일 때 Dashboard는 repository별 `roborev stream --repo` JSONL source를 backend에서 bounded하게 relay한다. browser SSE(`GET /api/events?repositoryIdentity=...`)에는 raw event가 아닌 `{repositoryIdentity, sequence, kind: "jobs-changed"}`만 전달된다. stream은 **lossy refresh/invalidation hint**이고 `/api/reviews` **authoritative API = actual state**다. frontend는 event burst를 coalesce한 뒤 기존 review API를 다시 조회하며, 기존 **4초 polling = fallback/safety net**은 stream 실패·재연결·unsupported runtime에서도 유지된다. repository identity가 바뀌면 이전 event와 late response는 무시된다.
 
-현재 clean-machine checkpoint는 RoboRev가 설치되지 않은 상태를 보존한다. 다음 수동 E2E에서 Setup 화면의 pinned v0.64.0 확인 범위와 Install & Start를 검토한 뒤에만 RoboRev를 설치하고, daemon online·panel 복원·Review HEAD·Panel Refine을 확인한다.
+현재 clean-machine checkpoint는 RoboRev가 설치되지 않은 상태를 보존한다. 다음 수동 E2E에서 Setup 화면의 pinned v0.64.0 확인 범위와 Install & Start를 검토한 뒤에만 RoboRev를 설치하고, daemon online·panel 복원·Review HEAD를 확인한다. Panel Refine과 Fix/Refine 실행은 현재 fail closed 상태다.
 
 **Agents & Setup**은 effective `[review.subagents]` alias와 underlying RoboRev agent를 구분해 표시하고, exact v0.64.0 command descriptor와 safe executable lookup으로 quota를 사용하지 않는 `Detected` 상태를 제공한다. Cursor의 `agent` command는 격리된 임시 working directory와 credential/preload 변수가 제거된 환경에서 bounded version-only identity probe를 실행해 Grok alias와 혼동하지 않도록 fail closed한다. `Health`는 자동 실행되지 않으며, 사용자가 특정 canonical agent의 **Run check**를 확인한 경우에만 작은 실제 RoboRev smoke request를 보내므로 subscription/API quota를 사용할 수 있다. 다른 RoboRev 버전에서는 discovery와 check를 실행하지 않는다.
 
@@ -75,11 +75,9 @@ Finding review의 detail에서는 `Copy Fix Prompt` 또는 `Open Fix Prompt`로 
 
 ## Panel Refine
 
-`Panel Refine`은 현재 repository의 clean HEAD를 `dashboard_cross` 같은 선택 panel로 새로 review하고, synthesis가 실패하면 Codex fix를 실행해 새 commit을 다시 review하는 자동 반복 workflow다. 대화상자에서 iteration panel, fix agent(Codex), 최대 1~10회(기본 3회), 선택적인 final deep panel(`dashboard_deep`)을 지정한다. 시작 전 preview에는 실제 `POST /api/panel-refines` body와 `roborev fix --agent codex --quiet <synthesisJobID>` argv template이 표시되며, executable은 서버 설정에서만 선택된다. final panel을 지정하면 iteration panel이 통과한 뒤에만 실행되며, final finding도 같은 fix budget으로 수정한 후 iteration panel부터 다시 검증한다.
+새 `Panel Refine` 시작은 현재 production에서 fail closed다. exact RoboRev v0.64.0의 Fix 경로가 hook normalization과 daemon lifecycle을 포함하므로 Dashboard가 이를 실행하지 않으며, `POST /api/panel-refines`는 501 blocked 응답으로 끝난다. 따라서 새 Panel Refine mutation CTA나 실행은 제공하지 않는다.
 
-진행 상태는 Dashboard backend가 소유하므로 browser reload/reopen 뒤에도 process가 살아 있는 동안 다시 표시된다. Dashboard process를 종료하면 실행 중인 Panel Refine은 취소되며 재시작 후 자동 resume하지 않는다. 취소 결과에는 fresh inspection의 HEAD, branch, dirty 여부와 inspection 실패가 함께 표시된다. 시작과 각 iteration 전후에 clean working tree, branch, HEAD, 등록 repository identity를 다시 확인하므로 외부 변경이나 dirty 결과는 자동 fix 대신 주의 상태로 멈춘다. 같은 repository에서 Review HEAD, Rerun 또는 다른 Panel Refine과 동시에 실행할 수 없다.
-
-RoboRev v0.64.0의 `fix --agent codex --quiet <synthesis-id>`가 fix commit 뒤 panel 없는 default review를 자동 enqueue할 수 있어, Dashboard가 선택한 panel review와 별도의 unrelated extra review가 보일 수 있다. Dashboard는 이를 추측으로 숨기지 않는다.
+기존 Panel Refine의 read/detail/timeline은 계속 확인할 수 있고, 이미 실행 중인 in-memory 작업에 대한 cancellation compatibility도 유지한다. 이는 새 작업을 시작하거나 daemon을 암묵적으로 시작하지 않는다. General Fix와 General Refine 실행도 같은 이유로 blocked이며, finding의 `Fix Prompt`는 읽기 전용 local template로만 제공된다.
 
 ## 안전 원칙
 
