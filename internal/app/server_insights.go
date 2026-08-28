@@ -2,16 +2,20 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/insights"
+	"github.com/froze/roborev-dashboard/internal/operation"
+	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
 const maxInsightsMarkdown = 4 << 20
@@ -49,10 +53,10 @@ func (s *Server) insightsPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	preview, err := s.Insights.Preview(r.Context(), insights.PreviewRequest{RepositoryIdentity: strings.TrimSpace(body.RepositoryIdentity), Window: body.Window, BranchScope: body.BranchScope})
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "insights-preview")
+		writeError(w, http.StatusConflict, safeInsightsError(err), "insights-preview")
 		return
 	}
-	writeJSON(w, http.StatusOK, preview)
+	writeJSON(w, http.StatusOK, browserInsightsPreview(preview))
 }
 
 func (s *Server) startInsights(w http.ResponseWriter, r *http.Request) {
@@ -65,9 +69,7 @@ func (s *Server) startInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The token itself is opaque. The workflow manager resolves its bound
-	// identity and consumes it atomically before any fresh process preflight.
-	// Keep the selected lease across that acceptance/launch boundary so a
-	// repository switch cannot race the one permitted enqueue.
+	// identity and consumes it atomically before any fresh transport checks.
 	if token := strings.TrimSpace(body.Token); token == "" {
 		writeError(w, http.StatusBadRequest, "Insights confirmation token is required", "insights")
 		return
@@ -77,9 +79,22 @@ func (s *Server) startInsights(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Insights confirmation token is expired or already used", "insights")
 		return
 	}
+	if s.Gate == nil {
+		writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
+		return
+	}
+	// Insights enqueue is an agentic daemon operation. Keep the same global
+	// gate ordering as every other mutating surface so daemon control, review,
+	// and setup cannot race the accepted /api/enqueue request.
+	releaseGlobal, gateErr := s.Gate.AcquireFix()
+	if gateErr != nil {
+		writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
+		return
+	}
+	defer releaseGlobal()
 	releaseRepository, gateErr := s.Gate.AcquireRepository(gitx.RepositoryKey(identity))
 	if gateErr != nil {
-		writeError(w, http.StatusConflict, gateErr.Error(), "operation")
+		writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
 		return
 	}
 	defer releaseRepository()
@@ -89,12 +104,98 @@ func (s *Server) startInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	result, err := s.Insights.Start(r.Context(), body.Token)
+	// Once the token, global gate, repository gate, and selected lease have
+	// been accepted, the daemon enqueue is an independent background job. Do
+	// not let a browser disconnect cancel the accepted launch boundary.
+	result, err := s.Insights.Start(context.WithoutCancel(r.Context()), body.Token)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "insights")
+		writeError(w, http.StatusConflict, safeInsightsError(err), "insights")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, result)
+	writeJSON(w, http.StatusAccepted, browserInsightsLaunch(result))
+}
+
+type browserInsightsPreviewDTO struct {
+	RepositoryIdentity string                 `json:"repositoryIdentity"`
+	RepositoryName     string                 `json:"repositoryName"`
+	Window             insights.Window        `json:"window"`
+	BranchScope        insights.BranchScope   `json:"branchScope"`
+	Branch             string                 `json:"branch,omitempty"`
+	Command            browserInsightsCommand `json:"command"`
+	Warnings           []string               `json:"warnings"`
+	Token              string                 `json:"token"`
+	ExpiresAt          time.Time              `json:"expiresAt"`
+}
+
+type browserInsightsCommand struct {
+	Executable string   `json:"executable"`
+	Args       []string `json:"args"`
+}
+
+func browserInsightsPreview(preview insights.Preview) browserInsightsPreviewDTO {
+	args := []string{"insights"}
+	if preview.BranchScope == insights.BranchCurrent {
+		args = append(args, "--branch", preview.Branch)
+	}
+	args = append(args, "--since", string(preview.Window), "--json")
+	return browserInsightsPreviewDTO{RepositoryIdentity: preview.RepositoryIdentity, RepositoryName: preview.RepositoryName, Window: preview.Window, BranchScope: preview.BranchScope, Branch: preview.Branch, Command: browserInsightsCommand{Executable: "roborev", Args: args}, Warnings: append([]string(nil), preview.Warnings...), Token: preview.Token, ExpiresAt: preview.ExpiresAt}
+}
+
+func safeInsightsError(err error) string {
+	if errors.Is(err, roborev.ErrBindingChanged) {
+		return "RoboRev binding changed; prepare Insights again"
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "repository") {
+		return "repository is not authorized"
+	}
+	return "Guideline Insights could not be prepared"
+}
+
+type browserInsightsLaunchDTO struct {
+	Status  string    `json:"status"`
+	JobID   int64     `json:"jobId,omitempty"`
+	Agent   string    `json:"agent,omitempty"`
+	Since   time.Time `json:"since,omitempty"`
+	Skipped bool      `json:"skipped,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+	Message string    `json:"message,omitempty"`
+}
+
+func browserInsightsLaunch(result insights.StartResponse) browserInsightsLaunchDTO {
+	response := browserInsightsLaunchDTO{Status: result.Status}
+	switch result.Status {
+	case "queued":
+		response.JobID = result.JobID
+		response.Since = result.Since
+		if safeInsightsAgent(result.Agent) {
+			response.Agent = result.Agent
+		} else {
+			response.Agent = "configured"
+		}
+	case "skipped":
+		response.Skipped = true
+		response.Since = result.Since
+		response.Reason = "No eligible failing reviews were queued."
+	case "unverified":
+		response.Message = "Launch outcome could not be verified. A RoboRev Insights job may already have been queued."
+	default:
+		response.Status = "unverified"
+		response.Message = "Launch outcome could not be verified. A RoboRev Insights job may already have been queued."
+	}
+	return response
+}
+
+func safeInsightsAgent(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func strictInsightIdentity(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -202,7 +303,10 @@ func (s *Server) insightsResult(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.RoboRev.Show(r.Context(), meta.id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "result")
+		// The daemon's transport/error body may contain prompts, paths, or
+		// provider diagnostics. Keep that detail on the server boundary and
+		// expose only a stable browser-safe classification.
+		writeError(w, http.StatusBadGateway, "Insights result could not be loaded", "result")
 		return
 	}
 	if len(raw) > maxInsightsMarkdown {
@@ -211,7 +315,7 @@ func (s *Server) insightsResult(w http.ResponseWriter, r *http.Request) {
 	}
 	markdown, err := decodeInsightsMarkdown(raw, meta.id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "result")
+		writeError(w, http.StatusBadGateway, "Insights result is invalid", "result")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobId": meta.id, "status": "done", "markdown": markdown})

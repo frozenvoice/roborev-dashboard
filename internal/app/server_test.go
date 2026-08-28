@@ -24,6 +24,7 @@ func (fakeInspector) Inspect(_ context.Context, path string) (gitx.Repository, e
 
 type mutableInspector struct {
 	repository gitx.Repository
+	err        error
 }
 
 type fakePanelResolver struct {
@@ -43,6 +44,9 @@ func testPanelCatalog() roborev.PanelCatalog {
 }
 
 func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Repository, error) {
+	if m.err != nil {
+		return gitx.Repository{}, m.err
+	}
 	repo := m.repository
 	if repo.Path == "" {
 		repo.Path = path
@@ -52,18 +56,25 @@ func (m *mutableInspector) Inspect(_ context.Context, path string) (gitx.Reposit
 
 type fakeService struct {
 	commentErr            error
+	cancelErr             error
 	closeCalls            int
+	closeErr              error
 	repoPath              string
 	cancelCalls           int
 	installationCalls     int
+	installationValue     *roborev.Installation
 	fixCalls              int
 	panelRaw              json.RawMessage
+	panelMembersErr       error
 	reviewRequest         roborev.ReviewRequest
 	reviewReceipt         json.RawMessage
+	reviewErr             error
 	reviewCalls           int
+	rerunErr              error
 	showRaw               json.RawMessage
 	showCalls             int
 	showErr               error
+	listErr               error
 	promptCalls           int
 	promptValue           string
 	promptErr             error
@@ -78,13 +89,20 @@ type fakeService struct {
 	authorizedLogCalls    int
 	authorizedPaths       []string
 	panelMembersCalls     int
+	rerunCalls            int
 }
 
 func (f *fakeService) Installation(context.Context) roborev.Installation {
 	f.installationCalls++
+	if f.installationValue != nil {
+		return *f.installationValue
+	}
 	return roborev.Installation{Installed: true, Version: "v0.64.0", Capabilities: roborev.Capabilities{ReviewEnqueueAPI: true, FrozenRerunAPI: true, JobListAPI: true, JobOutputStatusAPI: true, PanelReview: true, FixCommand: true}, Status: json.RawMessage(`{"running":true,"known":true}`)}
 }
 func (f *fakeService) List(context.Context, string, int) (json.RawMessage, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	return json.RawMessage(`[]`), nil
 }
 func (f *fakeService) SynthesisStatus(_ context.Context, id int64) (roborev.SynthesisStatus, error) {
@@ -138,6 +156,9 @@ func (f *fakeService) Show(context.Context, int64) (json.RawMessage, error) {
 }
 func (f *fakeService) PanelMembers(context.Context, string) (json.RawMessage, error) {
 	f.panelMembersCalls++
+	if f.panelMembersErr != nil {
+		return nil, f.panelMembersErr
+	}
 	if f.panelRaw != nil {
 		return f.panelRaw, nil
 	}
@@ -204,6 +225,9 @@ func (f *fakeService) AuthorizedLog(_ context.Context, id int64, registeredPaths
 func (f *fakeService) Review(_ context.Context, request roborev.ReviewRequest) (json.RawMessage, error) {
 	f.reviewCalls++
 	f.reviewRequest = request
+	if f.reviewErr != nil {
+		return nil, f.reviewErr
+	}
 	if f.reviewReceipt != nil {
 		return f.reviewReceipt, nil
 	}
@@ -218,10 +242,10 @@ func (f *fakeService) ReviewPanel(ctx context.Context, request roborev.ReviewReq
 	return roborev.DecodePanelEnqueueResponse(raw, request)
 }
 func (f *fakeService) Fix(context.Context, roborev.FixRequest) error { f.fixCalls++; return nil }
-func (f *fakeService) Rerun(context.Context, int64) error            { return nil }
+func (f *fakeService) Rerun(context.Context, int64) error            { f.rerunCalls++; return f.rerunErr }
 func (f *fakeService) Comment(context.Context, int64, string) error  { return f.commentErr }
-func (f *fakeService) Close(context.Context, int64, bool) error      { f.closeCalls++; return nil }
-func (f *fakeService) Cancel(context.Context, int64) error           { f.cancelCalls++; return nil }
+func (f *fakeService) Close(context.Context, int64, bool) error      { f.closeCalls++; return f.closeErr }
+func (f *fakeService) Cancel(context.Context, int64) error           { f.cancelCalls++; return f.cancelErr }
 func (f *fakeService) StartDaemon(context.Context) error             { return nil }
 
 func setupServer(t *testing.T, service *fakeService) *Server {
@@ -318,6 +342,156 @@ func TestCommentCloseDoesNotCloseWhenCommentFails(t *testing.T) {
 	}
 }
 
+func TestBrowserErrorsDoNotExposeExternalDiagnostics(t *testing.T) {
+	const (
+		privatePath   = `C:\Users\private\repositories\secret-project`
+		privateMarker = "PRIVATE_EXTERNAL_DIAGNOSTIC_7f3c"
+		run           = "986d3bfa-05da-4621-aeca-66f493a19ea3"
+	)
+	privateErr := errors.New(privatePath + ": " + privateMarker)
+	type testCase struct {
+		name      string
+		configure func(*fakeService)
+		request   func(*testing.T, *Server) *http.Request
+		status    int
+		phase     string
+	}
+	requestWithCSRF := func(method, path, body string) func(*testing.T, *Server) *http.Request {
+		return func(_ *testing.T, server *Server) *http.Request {
+			request := httptest.NewRequest(method, path, strings.NewReader(body))
+			request.Header.Set("X-CSRF-Token", server.csrfToken)
+			return request
+		}
+	}
+	cases := []testCase{
+		{
+			name:      "list",
+			configure: func(service *fakeService) { service.listErr = privateErr },
+			request:   requestWithCSRF(http.MethodGet, "/api/reviews?repo="+url.QueryEscape(`E:\repo`), ""),
+			status:    http.StatusBadGateway, phase: "list",
+		},
+		{
+			name:      "detail",
+			configure: func(service *fakeService) { service.showErr = privateErr },
+			request:   requestWithCSRF(http.MethodGet, "/api/reviews/42", ""),
+			status:    http.StatusBadGateway, phase: "detail",
+		},
+		{
+			name:      "create",
+			configure: func(service *fakeService) { service.reviewErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews", `{"repoPath":"E:\\repo","panel":"none"}`),
+			status:    http.StatusBadGateway, phase: "enqueue",
+		},
+		{
+			name:      "rerun",
+			configure: func(service *fakeService) { service.rerunErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews/42/rerun", ""),
+			status:    http.StatusBadGateway, phase: "rerun",
+		},
+		{
+			name:      "comment",
+			configure: func(service *fakeService) { service.commentErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews/42/comment", `{"comment":"details"}`),
+			status:    http.StatusBadGateway, phase: "comment",
+		},
+		{
+			name:      "comment-close",
+			configure: func(service *fakeService) { service.closeErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews/42/comment-close", `{"comment":"details"}`),
+			status:    http.StatusBadGateway, phase: "close",
+		},
+		{
+			name:      "close",
+			configure: func(service *fakeService) { service.closeErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews/42/close", ""),
+			status:    http.StatusBadGateway, phase: "close",
+		},
+		{
+			name:      "cancel",
+			configure: func(service *fakeService) { service.cancelErr = privateErr },
+			request:   requestWithCSRF(http.MethodPost, "/api/reviews/42/cancel", ""),
+			status:    http.StatusBadGateway, phase: "cancel",
+		},
+		{
+			name:      "panel-members",
+			configure: func(service *fakeService) { service.panelMembersErr = privateErr },
+			request: func(t *testing.T, server *Server) *http.Request {
+				identity, err := server.Registry.Identity(`E:\repo`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := "/api/panels/" + run + "/members?parentJobId=42&repositoryIdentity=" + url.QueryEscape(identity)
+				return strictBrowserReadRequest(http.MethodGet, path)
+			},
+			status: http.StatusBadGateway, phase: "panel-members",
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeService{}
+			test.configure(service)
+			server := setupServer(t, service)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, test.request(t, server))
+			if recorder.Code != test.status {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, test.status, recorder.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("response is not JSON: %v", err)
+			}
+			if response["phase"] != test.phase {
+				t.Fatalf("phase = %v, want %q: %s", response["phase"], test.phase, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if strings.Contains(body, privateMarker) || strings.Contains(body, privatePath) {
+				t.Fatalf("external diagnostic leaked: %s", body)
+			}
+		})
+	}
+}
+
+func TestGitInspectionErrorsDoNotExposeExternalDiagnostics(t *testing.T) {
+	const (
+		root          = `E:\repo`
+		privatePath   = `C:\Users\private\repositories\secret-project`
+		privateMarker = "PRIVATE_GIT_INSPECTION_DIAGNOSTIC_4a2e"
+	)
+	inspector := &mutableInspector{repository: gitx.Repository{Name: "repo", Path: root, Branch: "main", Head: "abcdef123456", HeadShort: "abcdef12"}}
+	registry := NewRegistry(inspector, "")
+	if _, err := registry.Add(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	inspector.err = errors.New(privatePath + ": " + privateMarker)
+	service := &fakeService{}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Panels = fakePanelResolver{catalog: testPanelCatalog()}
+	request := httptest.NewRequest(http.MethodPost, "/api/reviews", strings.NewReader(`{"repoPath":"E:\\repo","panel":"none"}`))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["phase"] != "repository" {
+		t.Fatalf("phase = %v, want repository: %s", response["phase"], recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), privateMarker) || strings.Contains(recorder.Body.String(), privatePath) {
+		t.Fatalf("Git diagnostic leaked: %s", recorder.Body.String())
+	}
+	if service.reviewCalls != 0 {
+		t.Fatalf("Review called after failed Git inspection: %d", service.reviewCalls)
+	}
+}
+
 func TestMutationRequiresCSRF(t *testing.T) {
 	server := setupServer(t, &fakeService{})
 	request := httptest.NewRequest(http.MethodPost, "/api/reviews/42/cancel", nil)
@@ -411,9 +585,44 @@ func TestRuntimeHealthDoesNotBootstrapRepositories(t *testing.T) {
 	}
 }
 
+func TestRuntimeAndBootstrapProjectInstallationWithoutPrivateFields(t *testing.T) {
+	const privateMarker = "INSTALLATION_PRIVATE_MARKER"
+	installation := roborev.Installation{
+		Installed:   true,
+		Binary:      privateMarker,
+		Version:     "v0.64.0",
+		Status:      json.RawMessage(`{"running":true,"known":true,"health":{"recent_errors":["` + privateMarker + `"]}}`),
+		Error:       privateMarker,
+		FailureCode: privateMarker,
+		Capabilities: roborev.Capabilities{
+			ReviewEnqueueAPI:  true,
+			JobListAPI:        true,
+			SummaryStats:      true,
+			CostStats:         true,
+			GuidelineInsights: true,
+		},
+	}
+	server := setupServer(t, &fakeService{installationValue: &installation})
+
+	for _, path := range []string{"/api/runtime", "/api/bootstrap"} {
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", path, recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if strings.Contains(body, privateMarker) || strings.Contains(body, `"binary"`) || strings.Contains(body, `"error"`) {
+			t.Fatalf("%s leaked private installation fields: %s", path, body)
+		}
+		if !strings.Contains(body, `"installed":true`) || !strings.Contains(body, `"version":"v0.64.0"`) || !strings.Contains(body, `"running":true`) {
+			t.Fatalf("%s lost required installation projection: %s", path, body)
+		}
+	}
+}
+
 func TestPanelRefineListReturnsAuthorizedEnvelopeAndOptions(t *testing.T) {
 	server := setupServer(t, &fakeService{})
-	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Crepo", nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Crepo")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -438,7 +647,7 @@ func TestPanelRefineListReturnsAuthorizedEnvelopeAndOptions(t *testing.T) {
 
 func TestPanelRefineListRejectsUnregisteredRepository(t *testing.T) {
 	server := setupServer(t, &fakeService{})
-	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Cforeign", nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Cforeign")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
@@ -448,7 +657,7 @@ func TestPanelRefineListRejectsUnregisteredRepository(t *testing.T) {
 
 func TestPanelRefineListRequiresRepositoryQuery(t *testing.T) {
 	server := setupServer(t, &fakeService{})
-	request := httptest.NewRequest(http.MethodGet, "/api/panel-refines", nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panel-refines")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
@@ -467,10 +676,10 @@ func TestPanelMembersAcceptsRoboRevV064FullRunAndEnforcesRepositoryBoundary(t *t
 		t.Fatal(err)
 	}
 	query := "?parentJobId=42&repositoryIdentity=" + url.QueryEscape(identity)
-	request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members"+query, nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members"+query)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || recorder.Body.String() != string(service.panelRaw) {
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "repo_path") || !strings.Contains(recorder.Body.String(), `"panel_role":"member"`) {
 		t.Fatalf("registered panel members = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	if service.panelMembersCalls != 1 || service.metadataCalls != 0 {
@@ -478,7 +687,7 @@ func TestPanelMembersAcceptsRoboRevV064FullRunAndEnforcesRepositoryBoundary(t *t
 	}
 
 	service.panelRaw = json.RawMessage(`{"jobs":[{"id":42,"repo_path":"E:\\foreign","panel_name":"dashboard_cross","panel_run_uuid":"` + run + `","panel_role":"synthesis","job_type":"synthesis"},{"id":43,"repo_path":"E:\\foreign","panel_name":"dashboard_cross","panel_run_uuid":"` + run + `","panel_role":"member","job_type":"review"}]}`)
-	request = httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members"+query, nil)
+	request = strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members"+query)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusForbidden {
@@ -502,7 +711,7 @@ func TestPanelMembersAcceptsBackendValidatedAlternateWindowsPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity), nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -541,7 +750,7 @@ func TestPanelMembersRequiresExactIdentityQueryAndParent(t *testing.T) {
 	}
 	base := "/api/panels/" + run + "/members"
 	for _, query := range []string{"", "?parentJobId=42", "?repositoryIdentity=" + url.QueryEscape(identity), "?parentJobId=42&repositoryIdentity=" + url.QueryEscape(identity) + "&extra=x", "?parentJobId=0&repositoryIdentity=" + url.QueryEscape(identity), "?parentJobId=42&parentJobId=43&repositoryIdentity=" + url.QueryEscape(identity)} {
-		request := httptest.NewRequest(http.MethodGet, base+query, nil)
+		request := strictBrowserReadRequest(http.MethodGet, base+query)
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusBadRequest {
@@ -549,7 +758,7 @@ func TestPanelMembersRequiresExactIdentityQueryAndParent(t *testing.T) {
 		}
 	}
 	for _, invalidRun := range []string{"not-a-uuid", "986d3bfa-05da-4621-aeca-66f493a19e3"} {
-		request := httptest.NewRequest(http.MethodGet, "/api/panels/"+invalidRun+"/members?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity), nil)
+		request := strictBrowserReadRequest(http.MethodGet, "/api/panels/"+invalidRun+"/members?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity))
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusBadRequest {
@@ -557,7 +766,7 @@ func TestPanelMembersRequiresExactIdentityQueryAndParent(t *testing.T) {
 		}
 	}
 
-	request := httptest.NewRequest(http.MethodGet, base+"?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity), nil)
+	request := strictBrowserReadRequest(http.MethodGet, base+"?parentJobId=42&repositoryIdentity="+url.QueryEscape(identity))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -595,7 +804,7 @@ func TestPanelMembersRejectsSemanticAndMalformedUpstreamRows(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			service := server.RoboRev.(*fakeService)
 			service.panelRaw = test.raw
-			request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members"+query, nil)
+			request := strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members"+query)
 			recorder := httptest.NewRecorder()
 			server.Handler().ServeHTTP(recorder, request)
 			if recorder.Code != test.want {
@@ -645,7 +854,7 @@ func TestPanelMembersRejectsParentAndRegisteredRepositoryConflicts(t *testing.T)
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			service.panelRaw = test.raw
-			request := httptest.NewRequest(http.MethodGet, requestURL, nil)
+			request := strictBrowserReadRequest(http.MethodGet, requestURL)
 			recorder := httptest.NewRecorder()
 			server.Handler().ServeHTTP(recorder, request)
 			if recorder.Code != test.want {
@@ -667,15 +876,15 @@ func TestPanelMemberDetailValidatesListBeforeShowAndShowIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	query := "?parentJobId=42&repositoryIdentity=" + url.QueryEscape(identity)
-	request := httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query, nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || recorder.Body.String() != string(show) || service.showCalls != 1 || service.panelMembersCalls != 1 || service.metadataCalls != 0 {
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "repo_path") || !strings.Contains(recorder.Body.String(), `"output":"heavy"`) || service.showCalls != 1 || service.panelMembersCalls != 1 || service.metadataCalls != 0 {
 		t.Fatalf("detail = %d PanelMembers=%d Show=%d JobMetadata=%d body=%s", recorder.Code, service.panelMembersCalls, service.showCalls, service.metadataCalls, recorder.Body.String())
 	}
 
 	service.showCalls = 0
-	request = httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members/999"+query, nil)
+	request = strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members/999"+query)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound || service.showCalls != 0 {
@@ -702,7 +911,7 @@ func TestPanelMemberDetailValidatesListBeforeShowAndShowIdentity(t *testing.T) {
 			job[field] = "synthesis"
 		}
 		service.showRaw, _ = json.Marshal(payload)
-		request = httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query, nil)
+		request = strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query)
 		recorder = httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusConflict || service.showCalls != 1 {
@@ -711,7 +920,7 @@ func TestPanelMemberDetailValidatesListBeforeShowAndShowIdentity(t *testing.T) {
 	}
 	service.showCalls = 0
 	service.showRaw = json.RawMessage(`not-json`)
-	request = httptest.NewRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query, nil)
+	request = strictBrowserReadRequest(http.MethodGet, "/api/panels/"+run+"/members/43"+query)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusBadGateway || service.showCalls != 1 {

@@ -4,22 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
-	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 	"github.com/froze/roborev-dashboard/internal/stats"
 )
 
 const (
-	statsCommandTimeout = 15 * time.Second
-	statsSince24h       = "24h"
-	statsSince7d        = "7d"
-	statsSince30d       = "30d"
-	statsSince90d       = "90d"
+	statsSince24h = "24h"
+	statsSince7d  = "7d"
+	statsSince30d = "30d"
+	statsSince90d = "90d"
 )
 
 var (
@@ -107,25 +105,30 @@ func validateStatsBranch(value string) error {
 }
 
 func (c *Client) Summary(ctx context.Context, repoPath, branch, since string) (stats.Summary, error) {
-	args, err := SummaryArgs(repoPath, branch, since)
+	if err := validateStatsRepo(repoPath); err != nil {
+		return stats.Summary{}, err
+	}
+	if err := validateStatsBranch(branch); err != nil {
+		return stats.Summary{}, err
+	}
+	if !allowedStatsSince(since) {
+		return stats.Summary{}, fmt.Errorf("unsupported stats window %q", since)
+	}
+	binding, err := c.statsHTTPPreflight(ctx, true)
 	if err != nil {
 		return stats.Summary{}, err
 	}
-	binary, generation, err := c.statsPreflight(ctx, true)
+	query := url.Values{}
+	query.Set("repo", repoPath)
+	query.Set("since", since)
+	if branch != "" {
+		query.Set("branch", branch)
+	}
+	raw, err := c.daemonHTTPGet(ctx, binding, "/api/summary?"+query.Encode(), 200, stats.SummaryOutputLimit)
 	if err != nil {
 		return stats.Summary{}, err
 	}
-	result, err := c.runStatsSnapshot(ctx, binary, repoPath, args, stats.SummaryOutputLimit)
-	if err != nil {
-		return stats.Summary{}, err
-	}
-	if !c.bindingUnchanged(binary, generation) {
-		return stats.Summary{}, ErrBindingChanged
-	}
-	if result.StdoutTruncated || result.StderrTruncated {
-		return stats.Summary{}, fmt.Errorf("%w: bounded output was truncated", stats.ErrMalformedSummary)
-	}
-	value, err := stats.ParseSummary(result.Stdout)
+	value, err := stats.ParseSummary(string(raw))
 	if err != nil {
 		return stats.Summary{}, err
 	}
@@ -139,87 +142,79 @@ func (c *Client) Summary(ctx context.Context, repoPath, branch, since string) (s
 }
 
 func (c *Client) Cost(ctx context.Context, repoPath, branch string) (stats.Cost, error) {
-	args, err := CostArgs(repoPath, branch)
+	if err := validateStatsRepo(repoPath); err != nil {
+		return stats.Cost{}, err
+	}
+	if err := validateStatsBranch(branch); err != nil {
+		return stats.Cost{}, err
+	}
+	binding, err := c.statsHTTPPreflight(ctx, false)
 	if err != nil {
 		return stats.Cost{}, err
 	}
-	binary, generation, err := c.statsPreflight(ctx, false)
+	query := url.Values{}
+	query.Set("repo", repoPath)
+	if branch != "" {
+		query.Set("branch", branch)
+	}
+	raw, err := c.daemonHTTPGet(ctx, binding, "/api/cost?"+query.Encode(), 200, stats.CostOutputLimit)
 	if err != nil {
 		return stats.Cost{}, err
 	}
-	result, err := c.runStatsSnapshot(ctx, binary, repoPath, args, stats.CostOutputLimit)
-	if err != nil {
-		return stats.Cost{}, err
-	}
-	if !c.bindingUnchanged(binary, generation) {
-		return stats.Cost{}, ErrBindingChanged
-	}
-	if result.StdoutTruncated || result.StderrTruncated {
-		return stats.Cost{}, fmt.Errorf("%w: bounded output was truncated", stats.ErrMalformedCost)
-	}
-	return stats.ParseCost(result.Stdout)
+	return stats.ParseCost(string(raw))
 }
 
-func (c *Client) statsPreflight(ctx context.Context, summary bool) (string, uint64, error) {
+// statsHTTPPreflight binds the read to the already-installed executable
+// generation and a fresh, healthy matching daemon without invoking a stats
+// CLI command (which would call ensureDaemon in v0.64). The short version
+// probe is the existing machine-readable installation probe; only the
+// requested summary/cost operation is transported over HTTP.
+func (c *Client) statsHTTPPreflight(ctx context.Context, summary bool) (daemonHTTPBinding, error) {
 	if c == nil {
-		return "", 0, ErrUnsupportedStats
+		return daemonHTTPBinding{}, ErrUnsupportedStats
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	binary, _, generation := c.snapshot()
-	if strings.TrimSpace(binary) == "" {
-		return "", 0, ErrUnsupportedStats
+	binary, daemonURL, generation := c.snapshot()
+	if strings.TrimSpace(binary) == "" || strings.TrimSpace(daemonURL) == "" {
+		return daemonHTTPBinding{}, ErrUnsupportedStats
 	}
 	version, err := c.detectVersion(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", 0, ctx.Err()
+			return daemonHTTPBinding{}, ctx.Err()
 		}
-		return "", 0, ErrUnsupportedStats
+		if errors.Is(err, ErrBindingChanged) {
+			return daemonHTTPBinding{}, ErrBindingChanged
+		}
+		return daemonHTTPBinding{}, ErrUnsupportedStats
 	}
 	capability := capabilities(version).CostStats
 	if summary {
 		capability = capabilities(version).SummaryStats
 	}
 	if !roborevcompat.IsSupportedVersion(version) || !capability {
-		return "", 0, fmt.Errorf("%w: RoboRev %s", ErrUnsupportedStats, version)
+		return daemonHTTPBinding{}, fmt.Errorf("%w: RoboRev %s", ErrUnsupportedStats, version)
 	}
 	health, err := c.healthStatus(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", 0, ctx.Err()
+			return daemonHTTPBinding{}, ctx.Err()
 		}
 		if isUnreachableHealthError(err) {
-			return "", 0, ErrStatsOffline
+			return daemonHTTPBinding{}, ErrStatsOffline
 		}
-		return "", 0, err
+		return daemonHTTPBinding{}, err
 	}
 	if !health.Healthy {
-		return "", 0, ErrStatsUnhealthy
+		return daemonHTTPBinding{}, ErrStatsUnhealthy
 	}
 	if !roborevcompat.IsMatchingSupportedVersion(version, health.Version) {
-		return "", 0, ErrUnsupportedStats
+		return daemonHTTPBinding{}, ErrUnsupportedStats
 	}
-	if !c.bindingUnchanged(binary, generation) {
-		return "", 0, ErrBindingChanged
+	if !c.generationCurrent(generation) {
+		return daemonHTTPBinding{}, ErrBindingChanged
 	}
-	return binary, generation, nil
-}
-
-func (c *Client) runStatsSnapshot(ctx context.Context, binary, repoPath string, args []string, outputLimit int) (proc.Result, error) {
-	if strings.TrimSpace(binary) == "" {
-		return proc.Result{}, ErrUnsupportedStats
-	}
-	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: append([]string(nil), args...), Dir: repoPath, Timeout: statsCommandTimeout, OutputLimit: outputLimit})
-	if err != nil {
-		// The HTTP layer maps this to a stable phase/message; keeping stderr
-		// attached here is useful to non-HTTP callers without logging secrets.
-		message := strings.TrimSpace(result.Stderr)
-		if message == "" {
-			message = err.Error()
-		}
-		return result, fmt.Errorf("stats command failed: %w: %s", err, message)
-	}
-	return result, nil
+	return daemonHTTPBinding{daemonURL: daemonURL, generation: generation, version: version}, nil
 }

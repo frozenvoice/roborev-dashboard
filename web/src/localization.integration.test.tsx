@@ -6,7 +6,7 @@ import { App, ReviewDetail } from './App'
 import { InstallConfirmation, Setup, SetupBanner, AgentCheckConfirmation } from './Setup'
 import { PanelRefine } from './PanelRefine'
 import { I18nProvider, LANGUAGE_STORAGE_KEY, LanguageSelector } from './i18n'
-import type { SetupState } from './api'
+import { BACKEND_COMMAND_SENTINEL, type AgentsResponse, type ConfiguredReviewAgent, type RuntimeControlState, type SetupState } from './api'
 
 const setupState: SetupState = {
   status: 'idle', phase: 'idle', operationActive: false, installed: false, recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true,
@@ -15,10 +15,10 @@ const setupState: SetupState = {
   assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev.exe', downloadedBytes: 0, totalBytes: 1200,
 }
 
-const runtime = {
+const runtime: RuntimeControlState = {
   daemonRunning: true, operationActive: false, queueState: 'processing' as const, canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true,
   daemonCommands: {
-    start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] },
+    start: { executable: 'roborev', args: ['daemon', 'start'] }, stop: { executable: 'roborev', args: ['daemon', 'stop'] }, restart: { executable: 'roborev', args: ['daemon', 'restart'] },
   },
 }
 
@@ -75,9 +75,9 @@ describe('localized confirmation surfaces', () => {
 
   it('formats valid agent check times by locale and preserves invalid raw timestamps', () => {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, 'en')
-    const agents = { repositoryIdentity: 'repo-1', configured: [
-      { name: 'Claude Code', agent: 'claude-code', command: 'claude', detected: true, health: 'passed' as const, lastCheckedAt: '2026-08-19T01:02:03Z' },
-      { name: 'Other', agent: 'other', command: 'other', detected: true, health: 'passed' as const, lastCheckedAt: 'not-a-date' },
+    const agents: AgentsResponse = { repositoryIdentity: 'repo-1', configured: [
+      { name: 'Claude Code', agent: 'claude-code', command: BACKEND_COMMAND_SENTINEL, detected: true, health: 'passed' as const, lastCheckedAt: '2026-08-19T01:02:03Z' },
+      { name: 'Other', agent: 'other', command: BACKEND_COMMAND_SENTINEL, detected: true, health: 'passed' as const, lastCheckedAt: 'not-a-date' },
     ] }
     render(withProvider(<Setup state={setupState} agents={agents} />))
     expect(screen.getByText(/Aug/)).toBeInTheDocument()
@@ -100,7 +100,7 @@ describe('localized confirmation surfaces', () => {
 
   it('switches agent and daemon confirmations in place while preserving callbacks and previews', async () => {
     const user = userEvent.setup()
-    const agent = { name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', health: 'not_checked' as const }
+    const agent: ConfiguredReviewAgent = { name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: BACKEND_COMMAND_SENTINEL, commandSource: 'config', detected: true, detectionReason: 'Found in PATH', health: 'not_checked' as const }
     const onCheck = vi.fn()
     const { rerender } = render(withProvider(<AgentCheckConfirmation agent={agent} onCancel={vi.fn()} onConfirm={onCheck} />))
     await user.selectOptions(screen.getByLabelText('Select language'), 'ko')
@@ -114,7 +114,7 @@ describe('localized confirmation surfaces', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('데몬을 중지합니다.')
     await user.selectOptions(screen.getByLabelText('언어 선택'), 'en')
     expect(screen.getByRole('dialog')).toHaveTextContent('This stops the daemon.')
-    expect(screen.getByRole('dialog').textContent).toContain('roborev.exe')
+    expect(screen.getByRole('dialog').textContent).toContain('roborev')
     expect(onDaemon).not.toHaveBeenCalled()
   })
 
@@ -122,7 +122,7 @@ describe('localized confirmation surfaces', () => {
     const user = userEvent.setup()
     const onStart = vi.fn(async () => undefined)
     const panelConfiguration = { repositoryIdentity: 'repo-1', panels: [{ name: 'dashboard_cross', kind: 'panel' as const, members: ['codex'], origin: 'global' as const, valid: true }], selectedPanel: 'dashboard_cross', selectionRequired: false }
-    const options = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
+    const options = { executable: 'roborev' as const, args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] as ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'] as ['codex'], defaultFixAgent: 'codex' as const, defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     render(withProvider(<><LanguageSelector /><PanelRefine repoPath="E:\\repo" panelConfiguration={panelConfiguration} options={options} run={null} onStart={onStart} onCancel={vi.fn(async () => undefined)} /></>))

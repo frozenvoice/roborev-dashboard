@@ -108,6 +108,15 @@ describe('StatsInsights', () => {
     await waitFor(() => expect(screen.queryByText('summary unavailable')).not.toBeInTheDocument())
   })
 
+  it('does not render private path markers from stats errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => response({ error: String.raw`daemon failed at C:\private\stats-secret` }, 502)))
+    renderStats()
+    expect(await screen.findByText('Stats summary could not be loaded')).toBeInTheDocument()
+    expect(screen.getByText('Stats cost could not be loaded')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('stats-secret')
+    expect(document.body.textContent).not.toContain('C:\\private')
+  })
+
   it('does not request while unavailable and does not reload on locale rerender', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => String(input).includes('/cost?') ? response(cost) : response(summary))
     vi.stubGlobal('fetch', fetchMock)

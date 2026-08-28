@@ -322,20 +322,24 @@ func (c *Client) postEmptyJSON(ctx context.Context, path string) (json.RawMessag
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
 	defer resp.Body.Close()
+	// Error bodies are not part of the queue-control contract and may contain
+	// daemon internals or user-controlled content. Check the exact status
+	// before reading anything, and keep the error independent of the body.
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, runtimeControlResponseLimit+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(data)) > runtimeControlResponseLimit {
 		return nil, errors.New("RoboRev queue response exceeded bounded output")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("RoboRev daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errors.New("RoboRev queue response was empty")

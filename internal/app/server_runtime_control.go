@@ -67,34 +67,70 @@ func (s *Server) runtimeControlDTO(state runtimecontrol.State) runtimeControlDTO
 			reason, blocked = "RoboRev Setup is active.", true
 		case snapshot.Refine > 0:
 			reason, blocked = "Panel Refine is active.", true
+		case snapshot.Fixes > 0:
+			reason, blocked = "A Fix operation is active.", true
 		case snapshot.Mutations > 0:
 			reason, blocked = "A RoboRev mutation is active.", true
 		case snapshot.RuntimeControl:
 			reason, blocked = "A runtime control operation is active.", true
 		}
 	}
-	binary := serviceBinary(s.RoboRev)
 	startArgs, _ := roborev.DaemonArgs("start")
 	stopArgs, _ := roborev.DaemonArgs("stop")
 	restartArgs, _ := roborev.DaemonArgs("restart")
+	// The concrete executable is an internal implementation detail. The
+	// browser receives only the semantic command preview; execution still
+	// uses the server-owned, validated service binary.
+	const executable = "roborev"
 	return runtimeControlDTO{
-		DaemonRunning: state.DaemonRunning, DaemonOperation: string(state.Operation),
+		DaemonRunning: state.DaemonRunning, DaemonOperation: safeRuntimeOperation(state.Operation),
 		OperationActive: state.Active, QueueState: queueState,
 		CanPause:       !blocked && state.DaemonRunning && state.QueueKnown && !state.QueuePaused,
 		CanResume:      !blocked && state.DaemonRunning && state.QueueKnown && state.QueuePaused,
 		CanStart:       !blocked && state.DaemonKnown && !state.DaemonRunning,
 		CanStop:        !blocked && state.DaemonKnown && state.DaemonRunning,
 		CanRestart:     !blocked && state.DaemonKnown,
-		DisabledReason: reason, Error: state.Error,
-		StartCommand:   runtimeCommandDTO{Executable: binary, Args: startArgs},
-		StopCommand:    runtimeCommandDTO{Executable: binary, Args: stopArgs},
-		RestartCommand: runtimeCommandDTO{Executable: binary, Args: restartArgs},
+		DisabledReason: safeRuntimeReason(reason), Error: safeRuntimeError(state.Error),
+		StartCommand:   runtimeCommandDTO{Executable: executable, Args: startArgs},
+		StopCommand:    runtimeCommandDTO{Executable: executable, Args: stopArgs},
+		RestartCommand: runtimeCommandDTO{Executable: executable, Args: restartArgs},
 		DaemonCommands: map[string]runtimeCommandDTO{
-			"start":   {Executable: binary, Args: startArgs},
-			"stop":    {Executable: binary, Args: stopArgs},
-			"restart": {Executable: binary, Args: restartArgs},
+			"start":   {Executable: executable, Args: startArgs},
+			"stop":    {Executable: executable, Args: stopArgs},
+			"restart": {Executable: executable, Args: restartArgs},
 		},
 	}
+}
+
+func safeRuntimeOperation(operation runtimecontrol.Operation) string {
+	switch operation {
+	case runtimecontrol.OperationStart, runtimecontrol.OperationStop,
+		runtimecontrol.OperationRestart, runtimecontrol.OperationPause,
+		runtimecontrol.OperationResume:
+		return string(operation)
+	default:
+		return ""
+	}
+}
+
+func safeRuntimeReason(reason string) string {
+	switch reason {
+	case "RoboRev Setup is active.", "Panel Refine is active.",
+		"A Fix operation is active.", "A RoboRev mutation is active.",
+		"A runtime control operation is active.":
+		return reason
+	case "":
+		return ""
+	default:
+		return "Runtime control is unavailable."
+	}
+}
+
+func safeRuntimeError(message string) string {
+	if message == "" {
+		return ""
+	}
+	return "Runtime control operation failed."
 }
 
 func (s *Server) requireRuntimeVersion(ctx context.Context) error {
@@ -185,5 +221,18 @@ func writeRuntimeControlError(w http.ResponseWriter, err error, _ runtimeControl
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusRequestTimeout
 	}
-	writeError(w, status, err.Error(), "runtime-control")
+	message := "Runtime control operation failed."
+	switch {
+	case errors.Is(err, operation.ErrBusy):
+		message = "Another Dashboard operation is active."
+	case errors.Is(err, runtimecontrol.ErrDaemonOffline):
+		message = "RoboRev daemon is offline."
+	case errors.Is(err, runtimecontrol.ErrManagerClosed):
+		message = "Runtime controls are unavailable."
+	case errors.Is(err, roborevcompat.ErrUnsupportedVersion):
+		message = "RoboRev v0.64.0 is required."
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		message = "Runtime control request timed out."
+	}
+	writeError(w, status, message, "runtime-control")
 }

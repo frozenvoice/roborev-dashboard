@@ -46,7 +46,8 @@ func (c *Client) repositoryMergeJobsRead(ctx context.Context, sourcePath string,
 	if err != nil {
 		return err
 	}
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return err
 	}
@@ -84,19 +85,21 @@ type mergeJobsLimitReader struct {
 }
 
 func (r *mergeJobsLimitReader) Read(p []byte) (int, error) {
-	if r.read >= r.limit {
+	// Permit exactly one byte past the configured limit. This is the bounded
+	// limit+1 probe that distinguishes an exactly-at-limit response from an
+	// oversized response without retaining an unbounded body.
+	if r.read > r.limit {
 		r.overflow = true
 		return 0, errors.New("bounded response exceeded limit")
 	}
-	if len(p) > r.limit-r.read {
-		p = p[:r.limit-r.read]
+	maxRead := r.limit + 1 - r.read
+	if len(p) > maxRead {
+		p = p[:maxRead]
 	}
 	n, err := r.reader.Read(p)
 	r.read += n
-	if r.read >= r.limit && err == nil {
-		// The next read establishes whether there really is more input. Keep
-		// the current bytes available to the decoder and mark overflow only
-		// when it asks for another byte.
+	if r.read > r.limit {
+		r.overflow = true
 	}
 	return n, err
 }

@@ -729,3 +729,101 @@ func TestRepositoryMergeJobsRejectsBodyOverflow(t *testing.T) {
 		t.Fatalf("err=%v want bounded overflow error", err)
 	}
 }
+
+func TestRepositoryMergeJobsUsesNoRedirectAndDoesNotExposeErrorBody(t *testing.T) {
+	destinationRequests := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationRequests++
+	}))
+	defer destination.Close()
+	sourceRequests := 0
+	sourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceRequests++
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Location", destination.URL+"/followed")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "merge-secret-marker")
+	}))
+	defer sourceServer.Close()
+	client, err := NewClient("roborev", &repositoryMergeTestRunner{}, sourceServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, _ := filepath.Abs("stale/source")
+	err = client.repositoryMergeJobsRead(context.Background(), source, 0)
+	if err == nil || strings.Contains(err.Error(), "merge-secret-marker") {
+		t.Fatalf("redirect error = %v, want sanitized non-body error", err)
+	}
+	if sourceRequests != 1 || destinationRequests != 0 {
+		t.Fatalf("source requests = %d, destination requests = %d; want 1/0", sourceRequests, destinationRequests)
+	}
+}
+
+func TestRepositoryMergeJobsClosesNonSuccessBodyWithoutReadingOrRetrying(t *testing.T) {
+	body := &runtimeTrackingBody{reader: strings.NewReader("merge-secret-marker")}
+	transportCalls := 0
+	client, err := NewClient("roborev", &repositoryMergeTestRunner{}, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		transportCalls++
+		if req.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", req.Header.Get("Accept-Encoding"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Status:     "502 Bad Gateway",
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    req,
+		}, nil
+	})}
+	source, _ := filepath.Abs("stale/source")
+	err = client.repositoryMergeJobsRead(context.Background(), source, 0)
+	if err == nil || strings.Contains(err.Error(), "merge-secret-marker") {
+		t.Fatalf("error = %v, want sanitized non-body error", err)
+	}
+	if transportCalls != 1 || body.reads != 0 || !body.closed {
+		t.Fatalf("transport calls = %d, body reads = %d, closed = %v; want 1/0/true", transportCalls, body.reads, body.closed)
+	}
+}
+
+func TestRepositoryMergeJobsAcceptsExactlyBoundedBodyAndRejectsOneByteOver(t *testing.T) {
+	source, _ := filepath.Abs("stale/source")
+	makeBody := func(size int64) []byte {
+		prefix := `{"jobs":[],"has_more":false,"stats":"`
+		suffix := `"}`
+		padding := int(size) - len(prefix) - len(suffix)
+		if padding < 0 {
+			t.Fatalf("test body target is too small")
+		}
+		return []byte(prefix + strings.Repeat("x", padding) + suffix)
+	}
+	for _, test := range []struct {
+		name string
+		size int64
+		want bool
+	}{
+		{name: "exact limit", size: repositoryMergeJobsBodyLimit, want: true},
+		{name: "one byte over", size: repositoryMergeJobsBodyLimit + 1, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				setMergeJobsContentType(w)
+				_, _ = w.Write(makeBody(test.size))
+			}))
+			defer server.Close()
+			client, err := NewClient("roborev", &repositoryMergeTestRunner{}, server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = client.repositoryMergeJobsRead(context.Background(), source, 0)
+			if (err == nil) != test.want {
+				t.Fatalf("read error = %v, accepted = %v; want accepted = %v", err, err == nil, test.want)
+			}
+		})
+	}
+}

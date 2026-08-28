@@ -63,7 +63,7 @@ Dashboard는 선택한 repository의 global/local RoboRev panel을 발견한다.
 
 ### Live review updates
 
-RoboRev v0.64.0 daemon이 이미 online/healthy일 때 Dashboard는 repository별 `roborev stream --repo` JSONL source를 backend에서 bounded하게 relay한다. browser SSE(`GET /api/events?repositoryIdentity=...`)에는 raw event가 아닌 `{repositoryIdentity, sequence, kind: "jobs-changed"}`만 전달된다. stream은 **lossy refresh/invalidation hint**이고 `/api/reviews` **authoritative API = actual state**다. frontend는 event burst를 coalesce한 뒤 기존 review API를 다시 조회하며, 기존 **4초 polling = fallback/safety net**은 stream 실패·재연결·unsupported runtime에서도 유지된다. repository identity가 바뀌면 이전 event와 late response는 무시된다.
+Dashboard는 production에서 `roborev stream` CLI와 SSE transport를 사용하지 않는다. `StreamEvents` capability는 false이며 `OpenStream`은 fail closed하므로 stream process가 시작되지 않는다. Review 상태는 frontend의 4초 authoritative polling으로 갱신하고, repository identity가 바뀌면 이전 응답을 폐기한다. Review/Rerun/Show/Comment/Close/Reopen/Cancel과 Stats/Cost/Insights의 daemon-backed 기능은 exact v0.64.0에 binding된 bounded direct daemon HTTP를 사용한다.
 
 현재 clean-machine checkpoint는 RoboRev가 설치되지 않은 상태를 보존한다. 다음 수동 E2E에서 Setup 화면의 pinned v0.64.0 확인 범위와 Install & Start를 검토한 뒤에만 RoboRev를 설치하고, daemon online·panel 복원·Review HEAD를 확인한다. Panel Refine과 Fix/Refine 실행은 현재 fail closed 상태다.
 
@@ -82,5 +82,7 @@ Finding review의 detail에서는 `Copy Fix Prompt` 또는 `Open Fix Prompt`로 
 ## 안전 원칙
 
 Dashboard는 shell console을 제공하지 않는다. 모든 작업은 typed request를 허용 목록의 argument array로 변환한다. mutation은 등록된 Git repository와 same-origin/CSRF 검사를 통과해야 한다. RoboRev DB와 agent credential은 읽거나 저장하지 않는다.
+
+실행 가능한 RoboRev CLI surface가 있는 기능도 browser가 arbitrary command를 선택하지 않으며, preview에는 서버가 계산한 sanitized semantic `roborev` command shape만 표시한다. daemon HTTP 응답은 exact status, strict JSON, bounded body와 no-redirect 정책으로 검증하고 raw upstream 오류와 private metadata는 browser에 전달하지 않는다.
 
 설계는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), 명령 coverage는 [docs/ROBorev-COVERAGE.md](docs/ROBorev-COVERAGE.md), 현재 작업 상태는 [docs/HANDOFF.md](docs/HANDOFF.md)를 참고한다.

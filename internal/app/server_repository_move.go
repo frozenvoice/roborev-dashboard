@@ -17,7 +17,10 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
-const repositoryMovePreviewTTL = 3 * time.Minute
+const (
+	repositoryMovePreviewTTL = 3 * time.Minute
+	repositoryMovePreviewMax = 64
+)
 
 type repositoryMovePreviewBody struct {
 	SourcePath                    *string `json:"sourcePath"`
@@ -53,7 +56,21 @@ func (s *repositoryMovePreviewStore) put(record repositoryMovePreviewRecord) (st
 	token := hex.EncodeToString(bytes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireLocked(time.Now())
+	now := time.Now()
+	s.expireLocked(now)
+	for len(s.pending) >= repositoryMovePreviewMax {
+		oldest := ""
+		var oldestExpiry time.Time
+		for candidate, pending := range s.pending {
+			if oldest == "" || pending.ExpiresAt.Before(oldestExpiry) || (pending.ExpiresAt.Equal(oldestExpiry) && candidate < oldest) {
+				oldest, oldestExpiry = candidate, pending.ExpiresAt
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(s.pending, oldest)
+	}
 	s.pending[token] = record
 	return token, nil
 }
@@ -164,7 +181,7 @@ func (s *Server) repositoryMovePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	destination, err := s.Registry.InspectIdentity(r.Context(), strings.TrimSpace(*body.DestinationRepositoryIdentity))
 	if err != nil {
-		writeError(w, http.StatusConflict, "destination repository is unavailable: "+err.Error(), "repository-move")
+		writeError(w, http.StatusConflict, "destination repository is unavailable", "repository-move")
 		return
 	}
 	if gitx.SameRepositoryPath(source.RootPath, destination.Path) {
@@ -195,7 +212,7 @@ func (s *Server) repositoryMovePreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "issue repository move preview token", "repository-move")
 		return
 	}
-	writeJSON(w, http.StatusOK, repositoryMovePreviewDTO{SourcePath: source.RootPath, SourceName: source.Name, JobCount: source.Count, DestinationRepositoryIdentity: record.DestinationIdentity, DestinationPath: destination.Path, DestinationName: destination.Name, Command: repositoryMoveCommandDTO{Executable: preflight.Command.Executable, Args: append([]string(nil), preflight.Command.Args...), WorkingDirectory: preflight.Command.Dir}, Token: token, ExpiresAt: expires})
+	writeJSON(w, http.StatusOK, repositoryMovePreviewDTO{SourcePath: source.RootPath, SourceName: source.Name, JobCount: source.Count, DestinationRepositoryIdentity: record.DestinationIdentity, DestinationPath: destination.Path, DestinationName: destination.Name, Command: repositoryMoveCommandDTO{Executable: "roborev", Args: append([]string(nil), preflight.Command.Args...), WorkingDirectory: destination.Path}, Token: token, ExpiresAt: expires})
 }
 
 func (s *Server) repositoryMoveConfirm(w http.ResponseWriter, r *http.Request) {
@@ -370,5 +387,18 @@ func writeRepositoryMoveError(w http.ResponseWriter, err error) {
 	case errors.Is(err, repomove.ErrInvalidRequest), errors.Is(err, repomove.ErrSourcePathRequired), errors.Is(err, repomove.ErrDestinationPathRequired), errors.Is(err, repomove.ErrSourcePathNotAbsolute), errors.Is(err, repomove.ErrDestinationNotAbsolute):
 		status = http.StatusBadRequest
 	}
-	writeError(w, status, err.Error(), "repository-move")
+	message := "Repository move process failed."
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		message = "Repository move timed out."
+	case errors.Is(err, roborev.ErrRepositoryMoveOffline), errors.Is(err, roborev.ErrRepositoryMoveUnhealthy), errors.Is(err, roborev.ErrUnsupportedRepositoryMove), errors.Is(err, roborev.ErrUnsupportedRepositoryInventory):
+		message = "Repository move is unavailable."
+	case errors.Is(err, roborev.ErrBindingChanged):
+		message = "Repository move binding changed; refresh and try again."
+	case errors.Is(err, roborev.ErrRepositoryMoveStale), errors.Is(err, roborev.ErrRepositoryMoveConflict), errors.Is(err, roborev.ErrRepositoryMoveAmbiguous), errors.Is(err, repomove.ErrSourceTracked), errors.Is(err, repomove.ErrSourceExists), errors.Is(err, repomove.ErrSourceStale), errors.Is(err, repomove.ErrDestinationConflict), errors.Is(err, repomove.ErrFallbackAmbiguous), errors.Is(err, repomove.ErrSourceDestinationSame), errors.Is(err, repomove.ErrReadSource):
+		message = "Repository move preview is stale or conflicting; refresh and try again."
+	case errors.Is(err, repomove.ErrInvalidRequest), errors.Is(err, repomove.ErrSourcePathRequired), errors.Is(err, repomove.ErrDestinationPathRequired), errors.Is(err, repomove.ErrSourcePathNotAbsolute), errors.Is(err, repomove.ErrDestinationNotAbsolute):
+		message = "Repository move request is invalid."
+	}
+	writeError(w, status, message, "repository-move")
 }

@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	proc "github.com/froze/roborev-dashboard/internal/process"
@@ -66,6 +67,9 @@ func (c *Client) ReviewPanel(ctx context.Context, request ReviewRequest) (PanelE
 }
 
 func DecodePanelEnqueueResponse(raw json.RawMessage, request ReviewRequest) (PanelEnqueueResponse, error) {
+	if err := validateUniqueJSON(raw); err != nil {
+		return PanelEnqueueResponse{}, fmt.Errorf("%w: invalid JSON", ErrMalformedPanelEnqueueResponse)
+	}
 	var receipt PanelEnqueueResponse
 	if err := json.Unmarshal(raw, &receipt); err != nil {
 		return PanelEnqueueResponse{}, fmt.Errorf("%w: invalid JSON", ErrMalformedPanelEnqueueResponse)
@@ -353,7 +357,10 @@ func decodeRaw(output string) (json.RawMessage, error) {
 
 func capabilities(version string) Capabilities {
 	v64 := roborevcompat.IsSupportedVersion(version)
-	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: v64, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, RepositoryMove: v64, RepositoryMerge: v64, PromptLazyLoad: v64, RawLog: v64}
+	// `roborev stream` invokes ensureDaemon in v0.64 and is consequently not
+	// a safe transport for this long-lived dashboard process. Keep the
+	// capability disabled so callers retain the bounded polling fallback.
+	return Capabilities{ReviewEnqueueAPI: v64, FrozenRerunAPI: v64, JobListAPI: v64, JobOutputStatusAPI: v64, PanelReview: v64, FixCommand: v64, PanelMembersAPI: v64, StreamEvents: false, AnalyzeIntrospection: v64, ConfigIntrospection: v64, ConfigMutation: v64, SummaryStats: v64, CostStats: v64, GuidelineInsights: v64, RepositoryInventory: v64, RepositoryRename: v64, RepositoryMove: v64, RepositoryMerge: v64, PromptLazyLoad: v64, RawLog: v64}
 }
 
 func (c *Client) Installation(ctx context.Context) Installation {
@@ -525,8 +532,10 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 	if err := validateJobID(id); err != nil {
 		return JobMetadata{}, err
 	}
-	_, _, generation := c.snapshot()
-	version, err := c.detectVersion(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return JobMetadata{}, ctx.Err()
@@ -536,17 +545,17 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 		}
 		return JobMetadata{}, fmt.Errorf("%w: version could not be verified", ErrUnsupportedJobMetadata)
 	}
-	if !capabilities(version).JobListAPI {
-		return JobMetadata{}, fmt.Errorf("%w: %s", ErrUnsupportedJobMetadata, version)
-	}
 	query := url.Values{}
 	query.Set("id", strconv.FormatInt(id, 10))
 	query.Set("limit", "1")
 	query.Set("omit_prompt", "true")
-	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 64<<20)
+	data, err := c.daemonHTTPGet(ctx, binding, "/api/jobs?"+query.Encode(), http.StatusOK, 256<<10)
 	if err != nil {
 		if ctx.Err() != nil {
 			return JobMetadata{}, ctx.Err()
+		}
+		if errors.Is(err, ErrBindingChanged) {
+			return JobMetadata{}, ErrBindingChanged
 		}
 		if isUnreachableHealthError(err) {
 			return JobMetadata{}, fmt.Errorf("%w: metadata request failed", ErrDaemonOffline)
@@ -556,7 +565,7 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 	var response struct {
 		Jobs []JobMetadata `json:"jobs"`
 	}
-	if err := json.Unmarshal(raw, &response); err != nil {
+	if err := json.Unmarshal(data, &response); err != nil {
 		return JobMetadata{}, fmt.Errorf("%w: invalid JSON", ErrMalformedJobMetadata)
 	}
 	if len(response.Jobs) != 1 || response.Jobs[0].ID != id {
@@ -565,7 +574,7 @@ func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error)
 		}
 		return JobMetadata{}, fmt.Errorf("%w: job identity mismatch", ErrMalformedJobMetadata)
 	}
-	if !c.generationCurrent(generation) {
+	if !c.daemonHTTPBindingCurrent(binding) {
 		return JobMetadata{}, ErrBindingChanged
 	}
 	return response.Jobs[0], nil
@@ -827,15 +836,24 @@ func (c *Client) SynthesisStatus(ctx context.Context, id int64) (SynthesisStatus
 }
 
 func (c *Client) Show(ctx context.Context, id int64) (json.RawMessage, error) {
-	args, err := ShowArgs(id)
+	if err := validateJobID(id); err != nil {
+		return nil, err
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
 		return nil, err
 	}
-	result, err := c.run(ctx, args, 10*time.Second, 8<<20)
+	query := url.Values{}
+	query.Set("job_id", strconv.FormatInt(id, 10))
+	data, err := c.daemonHTTPGet(ctx, binding, "/api/review?"+query.Encode(), http.StatusOK, daemonHTTPShowLimit)
 	if err != nil {
 		return nil, err
 	}
-	return decodeRaw(result.Stdout)
+	clean, err := sanitizeReviewPayload(data)
+	if err != nil {
+		return nil, errors.New("RoboRev review response is malformed")
+	}
+	return clean, nil
 }
 
 func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMessage, error) {
@@ -870,21 +888,401 @@ func stripHeavyJobFields(raw json.RawMessage) (json.RawMessage, error) {
 	if err := json.Unmarshal(response["jobs"], &jobs); err != nil {
 		return nil, errors.New("invalid jobs payload")
 	}
+	cleanJobs := make([]json.RawMessage, 0, len(jobs))
 	for _, job := range jobs {
-		for _, field := range []string{"prompt", "diff_content", "patch", "review", "output", "log", "raw_log"} {
-			delete(job, field)
+		jobRaw, err := json.Marshal(job)
+		if err != nil {
+			return nil, errors.New("invalid job list response")
 		}
+		clean, err := sanitizeJobObject(jobRaw)
+		if err != nil {
+			return nil, errors.New("invalid job list response")
+		}
+		cleanJobs = append(cleanJobs, clean)
 	}
-	jobsJSON, err := json.Marshal(jobs)
+	jobsJSON, err := json.Marshal(cleanJobs)
 	if err != nil {
 		return nil, err
 	}
-	response["jobs"] = jobsJSON
-	clean, err := json.Marshal(response)
+	cleanResponse := map[string]json.RawMessage{"jobs": jobsJSON}
+	if value, ok := response["has_more"]; ok {
+		cleanResponse["has_more"] = value
+	}
+	clean, err := json.Marshal(cleanResponse)
 	if err != nil {
 		return nil, err
 	}
 	return json.RawMessage(clean), nil
+}
+
+// reviewPublicFields is deliberately an allowlist. The daemon review object
+// contains storage, worker, command, and machine/session fields that must not
+// cross the dashboard boundary, even if a future endpoint adds them under an
+// otherwise familiar object.
+var reviewPublicFields = map[string]struct{}{
+	"id": {}, "job_id": {}, "review_id": {}, "status": {}, "state": {},
+	"closed": {}, "skipped": {}, "verdict": {}, "verdict_bool": {},
+	"repo_path": {}, "git_ref": {}, "branch": {}, "commit_subject": {},
+	"job_type": {}, "agent": {}, "model": {}, "reasoning": {},
+	"panel_name": {}, "panel_run_uuid": {}, "panel_role": {},
+	"panel_member_name": {}, "panel_member_index": {},
+	"enqueued_at": {}, "started_at": {}, "finished_at": {}, "created_at": {},
+	"output": {}, "job": {}, "review": {}, "members": {}, "text": {}, "markdown": {},
+	"result": {},
+}
+
+var jobPublicFields = map[string]struct{}{
+	"id": {}, "job_id": {}, "review_id": {}, "uuid": {}, "status": {}, "state": {},
+	"closed": {}, "skipped": {}, "verdict": {}, "verdict_bool": {},
+	"repo_path": {}, "repo_name": {}, "git_ref": {}, "branch": {}, "commit_subject": {},
+	"job_type": {}, "agent": {}, "model": {}, "reasoning": {},
+	"panel_name": {}, "panel_run_uuid": {}, "panel_role": {},
+	"panel_member_name": {}, "panel_member_index": {}, "parent_job_id": {}, "member_job_ids": {},
+	"enqueued_at": {}, "started_at": {}, "finished_at": {},
+}
+
+func sanitizeReviewPayload(raw []byte) (json.RawMessage, error) {
+	return sanitizeReviewObject(raw)
+}
+
+func sanitizeReviewObject(raw []byte) (json.RawMessage, error) {
+	return sanitizeObjectWithFields(raw, reviewPublicFields)
+}
+
+func sanitizeJobObject(raw []byte) (json.RawMessage, error) {
+	return sanitizeObjectWithFields(raw, jobPublicFields)
+}
+
+func sanitizeObjectWithFields(raw []byte, allowed map[string]struct{}) (json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, errors.New("review payload is not an object")
+	}
+	clean := make(map[string]json.RawMessage, len(object))
+	for key, value := range object {
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		switch key {
+		case "job":
+			nested, err := sanitizeJobObject(value)
+			if err != nil {
+				return nil, err
+			}
+			clean[key] = nested
+		case "review":
+			nested, err := sanitizeReviewObject(value)
+			if err != nil {
+				return nil, err
+			}
+			clean[key] = nested
+		case "members":
+			var members []json.RawMessage
+			if err := json.Unmarshal(value, &members); err != nil {
+				return nil, errors.New("review members are malformed")
+			}
+			cleanMembers := make([]json.RawMessage, 0, len(members))
+			for _, member := range members {
+				nested, err := sanitizeReviewObject(member)
+				if err != nil {
+					return nil, err
+				}
+				cleanMembers = append(cleanMembers, nested)
+			}
+			encoded, err := json.Marshal(cleanMembers)
+			if err != nil {
+				return nil, err
+			}
+			clean[key] = encoded
+		default:
+			trimmed := bytes.TrimSpace(value)
+			if len(trimmed) > 0 && trimmed[0] == '{' {
+				nested, err := sanitizeObjectWithFields(value, allowed)
+				if err != nil {
+					return nil, err
+				}
+				clean[key] = nested
+			} else {
+				clean[key] = append(json.RawMessage(nil), value...)
+			}
+		}
+	}
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+// daemonHTTPBinding is the immutable binding captured for one direct daemon
+// request.  These lifecycle-free endpoints must never trigger a CLI version
+// probe or daemon start; an already verified cached CLI version and a fresh
+// daemon health/version match are therefore required instead.
+type daemonHTTPBinding struct {
+	daemonURL  string
+	generation uint64
+	version    string
+}
+
+func (c *Client) daemonHTTPPreflight(ctx context.Context) (daemonHTTPBinding, error) {
+	if c == nil {
+		return daemonHTTPBinding{}, errors.New("RoboRev daemon binding is unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binary, daemonURL, generation := c.snapshot()
+	if strings.TrimSpace(binary) == "" || strings.TrimSpace(daemonURL) == "" {
+		return daemonHTTPBinding{}, errors.New("RoboRev daemon binding is unavailable")
+	}
+	c.versionMu.RLock()
+	version := c.version
+	versionGeneration := c.versionGeneration
+	versionAt := c.versionAt
+	c.versionMu.RUnlock()
+	if versionGeneration != generation || versionAt.IsZero() || time.Since(versionAt) >= 30*time.Second || !roborevcompat.IsSupportedVersion(version) {
+		return daemonHTTPBinding{}, errors.New("RoboRev executable version is unavailable")
+	}
+	health, err := c.healthStatus(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return daemonHTTPBinding{}, ctxErr
+		}
+		// Preserve transport classification for authority-bearing callers while
+		// retaining the health parser's sanitized, body-free error text.
+		return daemonHTTPBinding{}, fmt.Errorf("RoboRev daemon binding could not be verified: %w", err)
+	}
+	if !roborevcompat.IsMatchingSupportedVersion(version, health.Version) {
+		return daemonHTTPBinding{}, fmt.Errorf("%w: executable and daemon versions differ", ErrBindingChanged)
+	}
+	if !c.generationCurrent(generation) {
+		return daemonHTTPBinding{}, ErrBindingChanged
+	}
+	return daemonHTTPBinding{daemonURL: daemonURL, generation: generation, version: version}, nil
+}
+
+func (c *Client) daemonHTTPBindingCurrent(binding daemonHTTPBinding) bool {
+	if c == nil {
+		return false
+	}
+	binary, daemonURL, generation := c.snapshot()
+	return strings.TrimSpace(binary) != "" && daemonURL == binding.daemonURL && generation == binding.generation
+}
+
+const daemonHTTPShowLimit int64 = 8 << 20
+const daemonHTTPMutationLimit int64 = 1 << 20
+
+// daemonHTTPGet reads only successful response bodies. Error bodies are
+// intentionally left unread and never included in returned errors because a
+// daemon can put sensitive review data in them.
+func (c *Client) daemonHTTPGet(ctx context.Context, binding daemonHTTPBinding, path string, expectedStatus int, limit int64) ([]byte, error) {
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+path, nil)
+	if err != nil {
+		return nil, errors.New("RoboRev daemon request could not be built")
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, errors.New("RoboRev daemon response could not be read")
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("RoboRev daemon response exceeds %d bytes", limit)
+	}
+	if err := validateDaemonJSON(resp.Header, data); err != nil {
+		return nil, errors.New("RoboRev daemon returned malformed JSON")
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	return data, nil
+}
+
+func (c *Client) postDaemonMutation(ctx context.Context, binding daemonHTTPBinding, path string, body any, expectedStatus int) error {
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return ErrBindingChanged
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return errors.New("RoboRev daemon request could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, binding.daemonURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return errors.New("RoboRev daemon request could not be built")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("RoboRev daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != expectedStatus {
+		return fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, daemonHTTPMutationLimit+1))
+	if err != nil {
+		return errors.New("RoboRev daemon response could not be read")
+	}
+	if int64(len(data)) > daemonHTTPMutationLimit {
+		return fmt.Errorf("RoboRev daemon response exceeds %d bytes", daemonHTTPMutationLimit)
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return ErrBindingChanged
+	}
+	return nil
+}
+
+// postDaemonJSON is the exact-status JSON-returning variant used by enqueue.
+// Unlike postJSON it is tied to an already verified binding and does not
+// accept arbitrary 2xx responses.
+func (c *Client) postDaemonJSON(ctx context.Context, binding daemonHTTPBinding, path string, body any, expectedStatuses map[int]struct{}, limit int64) (json.RawMessage, error) {
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, errors.New("RoboRev daemon request could not be encoded")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, binding.daemonURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, errors.New("RoboRev daemon request could not be built")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if _, ok := expectedStatuses[resp.StatusCode]; !ok {
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, errors.New("RoboRev daemon response could not be read")
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("RoboRev daemon response exceeds %d bytes", limit)
+	}
+	if err := validateDaemonJSON(resp.Header, data); err != nil {
+		return nil, errors.New("RoboRev daemon returned malformed JSON")
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	return json.RawMessage(data), nil
+}
+
+func validateDaemonJSON(header http.Header, data []byte) error {
+	mediaType, _, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return errors.New("unexpected daemon response media type")
+	}
+	if len(bytes.TrimSpace(data)) == 0 || !utf8.Valid(data) {
+		return errors.New("invalid daemon JSON encoding")
+	}
+	return validateUniqueJSON(data)
+}
+
+func validateUniqueJSON(data []byte) error {
+	if len(bytes.TrimSpace(data)) == 0 || !utf8.Valid(data) {
+		return errors.New("invalid JSON encoding")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := scanUniqueJSONValue(decoder, 0); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return errors.New("trailing daemon JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
+const maxDaemonJSONDepth = 64
+
+func scanUniqueJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > maxDaemonJSONDepth {
+		return errors.New("daemon JSON nesting is too deep")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return errors.New("daemon JSON object key is malformed")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return errors.New("daemon JSON contains duplicate fields")
+			}
+			seen[key] = struct{}{}
+			if err := scanUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("daemon JSON object is malformed")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanUniqueJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("daemon JSON array is malformed")
+		}
+	default:
+		return errors.New("daemon JSON delimiter is malformed")
+	}
+	return nil
 }
 
 func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (json.RawMessage, error) {
@@ -893,17 +1291,21 @@ func (c *Client) getDaemonJSON(ctx context.Context, path string, limit int64) (j
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("RoboRev daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("RoboRev daemon response exceeds %d bytes", limit)
 	}
 	return decodeRaw(string(data))
 }
@@ -920,18 +1322,18 @@ func (c *Client) getDaemonJSONBounded(ctx context.Context, path string, limit in
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, fmt.Errorf("%w: daemon returned %d", ErrUnsupportedJobMetadata, resp.StatusCode)
+		}
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
 		return nil, fmt.Errorf("%w: response exceeds %d bytes", ErrMalformedJobMetadata, limit)
-	}
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return nil, fmt.Errorf("%w: daemon returned %d", ErrUnsupportedJobMetadata, resp.StatusCode)
-		}
-		return nil, fmt.Errorf("RoboRev daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if raw, err := decodeRaw(string(data)); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrMalformedJobMetadata, err)
@@ -951,17 +1353,21 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) (json.RawM
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.HTTP.Do(req)
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("RoboRev daemon returned %d", resp.StatusCode)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if readErr != nil {
 		return nil, readErr
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("RoboRev daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	if len(data) > 8<<20 {
+		return nil, errors.New("RoboRev daemon response exceeds 8388608 bytes")
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
 		return json.RawMessage(`{}`), nil
@@ -973,21 +1379,18 @@ func (c *Client) postJSON(ctx context.Context, path string, body any) (json.RawM
 }
 
 func (c *Client) Review(ctx context.Context, request ReviewRequest) (json.RawMessage, error) {
-	installation := c.Installation(ctx)
-	if !installation.Installed {
-		return nil, errors.New("RoboRev is not installed or version detection failed")
-	}
-	if !installation.Capabilities.ReviewEnqueueAPI {
-		return nil, fmt.Errorf("RoboRev %s does not support the version-gated enqueue API", installation.Version)
-	}
 	if err := ValidateReviewRequest(request); err != nil {
+		return nil, err
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
+	if err != nil {
 		return nil, err
 	}
 	body := map[string]any{"repo_path": request.RepoPath, "git_ref": request.GitRef, "branch": request.Branch}
 	if request.Panel != "" {
 		body["panel"] = request.Panel
 	}
-	return c.postJSON(ctx, "/api/enqueue", body)
+	return c.postDaemonJSON(ctx, binding, "/api/enqueue", body, map[int]struct{}{http.StatusOK: {}, http.StatusCreated: {}}, daemonHTTPMutationLimit)
 }
 
 // Fix executes RoboRev's v0.64 fix command. It is deliberately a typed
@@ -1027,12 +1430,11 @@ func (c *Client) Rerun(ctx context.Context, id int64) error {
 	if err := validateJobID(id); err != nil {
 		return err
 	}
-	installation := c.Installation(ctx)
-	if !installation.Installed || !installation.Capabilities.FrozenRerunAPI {
-		return fmt.Errorf("RoboRev %s does not support frozen-target rerun", installation.Version)
+	binding, err := c.daemonHTTPPreflight(ctx)
+	if err != nil {
+		return err
 	}
-	_, err := c.postJSON(ctx, "/api/job/rerun", map[string]int64{"job_id": id})
-	return err
+	return c.postDaemonMutation(ctx, binding, "/api/job/rerun", map[string]int64{"job_id": id}, http.StatusOK)
 }
 
 func (c *Client) Comment(ctx context.Context, id int64, comment string) error {
@@ -1040,8 +1442,16 @@ func (c *Client) Comment(ctx context.Context, id int64, comment string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, args, 15*time.Second, 1<<20)
-	return err
+	_ = args // retain the public command contract's validation rules without invoking the CLI.
+	binding, err := c.daemonHTTPPreflight(ctx)
+	if err != nil {
+		return err
+	}
+	return c.postDaemonMutation(ctx, binding, "/api/comment", map[string]any{
+		"job_id":    id,
+		"commenter": "roborev-dashboard",
+		"comment":   comment,
+	}, http.StatusCreated)
 }
 
 func (c *Client) Close(ctx context.Context, id int64, reopen bool) error {
@@ -1049,8 +1459,15 @@ func (c *Client) Close(ctx context.Context, id int64, reopen bool) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, args, 10*time.Second, 1<<20)
-	return err
+	_ = args
+	binding, err := c.daemonHTTPPreflight(ctx)
+	if err != nil {
+		return err
+	}
+	return c.postDaemonMutation(ctx, binding, "/api/review/close", map[string]any{
+		"job_id": id,
+		"closed": !reopen,
+	}, http.StatusOK)
 }
 
 func (c *Client) Cancel(ctx context.Context, id int64) error {
@@ -1058,8 +1475,12 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.run(ctx, args, 10*time.Second, 1<<20)
-	return err
+	_ = args
+	binding, err := c.daemonHTTPPreflight(ctx)
+	if err != nil {
+		return err
+	}
+	return c.postDaemonMutation(ctx, binding, "/api/job/cancel", map[string]any{"job_id": id}, http.StatusOK)
 }
 
 func (c *Client) StartDaemon(ctx context.Context) error {

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeSetupState, type AgentsResponse, type RuntimeControlState, type SetupState } from './api'
+import { BACKEND_COMMAND_SENTINEL, normalizeSetupState, type AgentsResponse, type RuntimeControlState, type SetupState } from './api'
 import { Setup, SetupBanner } from './Setup'
 import { App } from './App'
 import { I18nProvider, LANGUAGE_STORAGE_KEY } from './i18n'
@@ -24,8 +24,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); window.localStorage.clear() }
 
 describe('RoboRev setup', () => {
   const readySetup = { ...baseState, status: 'ready' as const, phase: 'ready' as const, operationActive: false, installed: true, canInstall: false, installAvailable: false, canStartDaemon: false, daemonRunning: true, compatible: true, panelRefineCompatible: true }
-  const runningRuntime: RuntimeControlState = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
-  const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', repositoryIdentity: 'repo-1', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
+  const runningRuntime: RuntimeControlState = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'roborev', args: ['daemon', 'start'] }, stop: { executable: 'roborev', args: ['daemon', 'stop'] }, restart: { executable: 'roborev', args: ['daemon', 'restart'] } } }
+  const configuredAgents: AgentsResponse = { roborevVersion: 'v0.64.0', repositoryIdentity: 'repo-1', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', command: BACKEND_COMMAND_SENTINEL, commandSource: 'config', detected: true, detectionReason: 'Found in PATH', health: 'not_checked' }] }
 
   it('wires setup theme surfaces and controls to their selectors in rendered DOM', async () => {
     const activeState = { ...readySetup, operationActive: true, phase: 'checking' as const, status: 'checking' as const, downloadedBytes: 512, totalBytes: 1024 }
@@ -136,7 +136,7 @@ describe('RoboRev setup', () => {
 
   it('fails closed when a daemon command preview is missing or mismatched', async () => {
     const onDaemonAction = vi.fn().mockResolvedValue(undefined)
-    const invalid = { ...runningRuntime, daemonCommands: { ...runningRuntime.daemonCommands!, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
+    const invalid: RuntimeControlState = { ...runningRuntime, daemonCommands: { ...runningRuntime.daemonCommands!, stop: { executable: 'roborev', args: ['daemon', 'restart'] as ['daemon', 'restart'] } } }
     render(<Setup state={readySetup} runtimeControl={invalid} onDaemonAction={onDaemonAction} />)
     expect(screen.getByRole('button', { name: 'Stop daemon' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Restart daemon' })).toBeEnabled()
@@ -149,7 +149,7 @@ describe('RoboRev setup', () => {
     const { rerender } = render(<Setup state={readySetup} runtimeControl={runningRuntime} onDaemonAction={onDaemonAction} />)
     await userEvent.click(screen.getByRole('button', { name: 'Stop daemon' }))
     expect(screen.getByRole('dialog')).toHaveTextContent('Active jobs may be interrupted; queued jobs remain queued.')
-    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['C:\\Tools\\roborev.exe', 'daemon', 'stop']))
+    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['roborev', 'daemon', 'stop']))
     expect(onDaemonAction).not.toHaveBeenCalled()
     const confirmStop = screen.getByRole('dialog').querySelector('button.button.danger')!
     fireEvent.click(confirmStop)

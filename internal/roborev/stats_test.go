@@ -68,6 +68,22 @@ func statsHealthBodyServer(body string) *httptest.Server {
 	}))
 }
 
+func statsDaemonServer(healthy bool, version string, summaryBody, costBody string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/health":
+			_, _ = w.Write([]byte(`{"healthy":` + map[bool]string{true: "true", false: "false"}[healthy] + `,"version":"` + version + `"}`))
+		case "/api/summary":
+			_, _ = w.Write([]byte(summaryBody))
+		case "/api/cost":
+			_, _ = w.Write([]byte(costBody))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
 func (r *statsRecordingRunner) snapshot() []proc.Command {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -92,7 +108,7 @@ func TestStatsArgsUseExactV064OrderAndAllowlist(t *testing.T) {
 }
 
 func TestClientStatsPreflightsAndUsesCanonicalDir(t *testing.T) {
-	health := statsHealthServer(true, "v0.64.0")
+	health := statsDaemonServer(true, "v0.64.0", statsSummaryFixture, `{"total_usd":0,"jobs_with_cost":0,"jobs_total":0,"complete":false}`)
 	defer health.Close()
 	runner := &statsRecordingRunner{version: "v0.64.0"}
 	client, err := NewClient(`C:\tools\roborev.exe`, runner, health.URL)
@@ -106,22 +122,13 @@ func TestClientStatsPreflightsAndUsesCanonicalDir(t *testing.T) {
 	if _, err := client.Cost(context.Background(), repo, ""); err != nil {
 		t.Fatal(err)
 	}
-	commands := runner.snapshot()
-	if len(commands) != 3 { // version, summary, cost; health is HTTP, not a process.
-		t.Fatalf("commands=%d: %#v", len(commands), commands)
-	}
-	wantSummary := []string{"summary", "--repo", repo, "--branch", "main", "--since", "30d", "--json"}
-	if !reflect.DeepEqual(commands[1].Args, wantSummary) || commands[1].Dir != repo || commands[1].OutputLimit != stats.SummaryOutputLimit || commands[1].Timeout.Seconds() != 15 {
-		t.Fatalf("summary command=%#v", commands[1])
-	}
-	wantCost := []string{"cost", "--repo", repo, "--json"}
-	if !reflect.DeepEqual(commands[2].Args, wantCost) || commands[2].Dir != repo || commands[2].OutputLimit != stats.CostOutputLimit {
-		t.Fatalf("cost command=%#v", commands[2])
+	if commands := runner.snapshot(); len(commands) != 1 || commands[0].Args[0] != "version" {
+		t.Fatalf("stats unexpectedly used CLI transport: %#v", commands)
 	}
 }
 
 func TestClientStatsRejectsUnsupportedAndOfflineBeforeStatsCommand(t *testing.T) {
-	unsupportedHealth := statsHealthServer(true, "v0.65.0")
+	unsupportedHealth := statsDaemonServer(true, "v0.65.0", statsSummaryFixture, `{"total_usd":0,"jobs_with_cost":0,"jobs_total":0,"complete":false}`)
 	defer unsupportedHealth.Close()
 	unsupportedRunner := &statsRecordingRunner{version: "v0.65.0"}
 	unsupported, err := NewClient("roborev", unsupportedRunner, unsupportedHealth.URL)
@@ -191,51 +198,35 @@ func TestClientStatsRejectsHealthFailuresOutputBoundsBindingAndIdentity(t *testi
 		health    bool
 		healthVer string
 		want      error
-		wantStats bool
-		mutate    func(*statsRecordingRunner, *Client)
+		summary   string
 	}{
 		{name: "unhealthy daemon", health: false, healthVer: "v0.64.0", want: ErrStatsUnhealthy},
 		{name: "daemon version mismatch", health: true, healthVer: "v0.65.0", want: ErrUnsupportedStats},
 		{name: "daemon version whitespace is not canonical", health: true, healthVer: " v0.64.0 ", want: ErrUnsupportedStats},
-		{name: "stdout truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stdoutTruncated = true }},
-		{name: "stderr truncated", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) { r.stderrTruncated = true }},
-		{name: "response repository mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) {
-			r.summaryOutput = strings.Replace(statsSummaryFixture, `E:\\한글 프로젝트\\repo`, `E:\\other`, 1)
-		}},
-		{name: "response branch mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, wantStats: true, mutate: func(r *statsRecordingRunner, _ *Client) {
-			r.summaryOutput = strings.Replace(statsSummaryFixture, `"branch":"main"`, `"branch":"other"`, 1)
-		}},
-		{name: "binding changed", health: true, healthVer: "v0.64.0", want: ErrBindingChanged, wantStats: true, mutate: func(r *statsRecordingRunner, client *Client) {
-			r.onSummary = func() { client.bindingMu.Lock(); client.binding.generation++; client.bindingMu.Unlock() }
-		}},
+		{name: "response repository mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, summary: strings.Replace(statsSummaryFixture, `E:\\한글 프로젝트\\repo`, `E:\\other`, 1)},
+		{name: "response branch mismatch", health: true, healthVer: "v0.64.0", want: stats.ErrMalformedSummary, summary: strings.Replace(statsSummaryFixture, `"branch":"main"`, `"branch":"other"`, 1)},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			health := statsHealthServer(test.health, test.healthVer)
+			summary := test.summary
+			if summary == "" {
+				summary = statsSummaryFixture
+			}
+			health := statsDaemonServer(test.health, test.healthVer, summary, `{"total_usd":0,"jobs_with_cost":0,"jobs_total":0,"complete":false}`)
 			defer health.Close()
 			runner := &statsRecordingRunner{version: "v0.64.0"}
 			client, err := NewClient("roborev", runner, health.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.mutate != nil {
-				test.mutate(runner, client)
-			}
 			_, err = client.Summary(context.Background(), `E:\한글 프로젝트\repo`, "main", "7d")
 			if err == nil || !errors.Is(err, test.want) {
 				t.Fatalf("error=%v want=%v", err, test.want)
 			}
-			statsCommands := 0
 			for _, command := range runner.snapshot() {
 				if len(command.Args) > 0 && command.Args[0] == "summary" {
-					statsCommands++
+					t.Fatal("summary CLI command was executed")
 				}
-			}
-			if test.wantStats && statsCommands != 1 {
-				t.Fatalf("stats commands=%d want one", statsCommands)
-			}
-			if !test.wantStats && statsCommands != 0 {
-				t.Fatalf("stats command ran before gate: %d", statsCommands)
 			}
 		})
 	}

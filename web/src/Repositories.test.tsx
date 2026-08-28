@@ -22,8 +22,8 @@ const moveNotInstalledBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...m
 const moveOfflineBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, status: { running: false }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: true, repositoryRename: true, repositoryMove: true } } }
 const moveDefensiveMixedBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, status: { running: true }, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryInventory: true, repositoryRename: true, repositoryMove: false } } }
 
-const renamePreview = { path: 'E:\\tracked', currentName: 'tracked', newName: 'Renamed 저장소', jobCount: 3, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\tracked', 'Renamed 저장소'] }, token: 'rename-token', expiresAt: '2026-08-23T01:02:03Z' }
-const movePreview = { sourcePath: 'E:/stale', sourceName: 'stale', jobCount: 2, destinationRepositoryIdentity: 'repo-1', destinationPath: 'E:\\repo', destinationName: 'registered', command: { executable: 'roborev.exe', args: ['repo', 'move', 'E:/stale', '.'], workingDirectory: 'E:\\repo' }, token: 'move-token', expiresAt: '2026-08-23T01:02:03Z' }
+const renamePreview = { path: 'E:\\tracked', currentName: 'tracked', newName: 'Renamed 저장소', jobCount: 3, dashboardRegistered: false, command: { executable: 'roborev', args: ['repo', 'rename', 'E:\\tracked', 'Renamed 저장소'] }, token: 'rename-token', expiresAt: '2026-08-23T01:02:03Z' }
+const movePreview = { sourcePath: 'E:/stale', sourceName: 'stale', jobCount: 2, destinationRepositoryIdentity: 'repo-1', destinationPath: 'E:\\repo', destinationName: 'registered', command: { executable: 'roborev', args: ['repo', 'move', 'E:/stale', '.'], workingDirectory: 'E:\\repo' }, token: 'move-token', expiresAt: '2026-08-23T01:02:03Z' }
 
 function response(value: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }))
@@ -192,7 +192,7 @@ describe('Repositories v2 inventory', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ input: String(input), init })
       if (calls.length === 1) return response({ repositories: [{ name: 'tracked', path: 'E:\\tracked', jobCount: 3, dashboardRegistered: false }, { name: 'tracked', path: 'E:\\other', jobCount: 1, dashboardRegistered: true }], repositoryCount: 2, totalJobCount: 4 })
-      return response({ ...renamePreview, path: 'E:\\other', currentName: 'tracked', newName: '새 이름', jobCount: 9, dashboardRegistered: false, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\other', '새 이름'] } })
+      return response({ ...renamePreview, path: 'E:\\other', currentName: 'tracked', newName: '새 이름', jobCount: 9, dashboardRegistered: false, command: { executable: 'roborev', args: ['repo', 'rename', 'E:\\other', '새 이름'] } })
     }))
     render(<I18nProvider><Repositories bootstrap={renameBootstrap} registerRepository={async () => true} busy={false} /></I18nProvider>)
     expect(await screen.findAllByRole('button', { name: 'Rename' })).toHaveLength(2)
@@ -955,7 +955,7 @@ describe('Repositories v3C safe merge', () => {
   const mergeBootstrap: Bootstrap = { ...moveBootstrap, roborev: { ...moveBootstrap.roborev, capabilities: { ...moveBootstrap.roborev.capabilities, repositoryMerge: true } } }
   const inventory = { repositories: [{ name: 'stale', path: 'E:/stale', jobCount: 7, dashboardRegistered: false }, { name: 'target', path: 'E:\\target', jobCount: 3, dashboardRegistered: true }], repositoryCount: 2, totalJobCount: 10 }
   const eligibility = { eligible: true, source: { path: 'E:/stale', name: 'stale', jobCount: 7 }, targets: [{ repositoryIdentity: 'repo-1', name: 'target', path: 'E:\\target', jobCount: 3 }] }
-  const preview = { source: eligibility.source, target: { repositoryIdentity: 'repo-1', name: 'target', path: 'E:\\target', jobCount: 3 }, command: { executable: 'roborev.exe', args: ['repo', 'merge', '--yes', 'E:/stale', 'E:\\target'], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
+  const preview = { source: eligibility.source, target: { repositoryIdentity: 'repo-1', name: 'target', path: 'E:\\target', jobCount: 3 }, command: { executable: 'roborev', args: ['repo', 'merge', '--yes', 'E:/stale', 'E:\\target'], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
 
   it.each([
     ['binary/install absent', { ...mergeBootstrap, roborev: { ...mergeBootstrap.roborev, installed: false, status: { running: false }, capabilities: { ...mergeBootstrap.roborev.capabilities, repositoryInventory: false, repositoryRename: false, repositoryMove: false, repositoryMerge: false } } }, false, 'runtime-unavailable'],

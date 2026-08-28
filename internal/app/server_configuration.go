@@ -13,6 +13,8 @@ import (
 
 	"github.com/froze/roborev-dashboard/internal/configuration"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/operation"
+	"github.com/froze/roborev-dashboard/internal/pathsafety"
 	"github.com/froze/roborev-dashboard/internal/roborev"
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
@@ -20,20 +22,23 @@ import (
 // configPreviewTTL bounds how long a prepared configuration change stays
 // valid. Every bound field is reverified fresh at set time regardless.
 const configPreviewTTL = 10 * time.Minute
+const configPreviewMax = 64
+const configVerificationTimeout = 10 * time.Second
 
 // configPreviewRecord binds one prepared change to the exact repository,
 // checkout state, binary, and configuration snapshot it was validated against.
 type configPreviewRecord struct {
-	Identity  string
-	Path      string
-	Head      string
-	Branch    string
-	BinaryGen string
-	Key       string
-	Scope     configuration.Scope
-	Value     string
-	Snapshot  string
-	ExpiresAt time.Time
+	Identity     string
+	Path         string
+	Head         string
+	Branch       string
+	RootSnapshot pathsafety.Snapshot
+	Binding      roborev.ConfigurationBinding
+	Key          string
+	Scope        configuration.Scope
+	Value        string
+	Snapshot     string
+	ExpiresAt    time.Time
 }
 
 // configPreviewStore is a single-use token store. Tokens are 256-bit random
@@ -55,7 +60,21 @@ func (s *configPreviewStore) put(record configPreviewRecord) (string, error) {
 	token := hex.EncodeToString(tokenBytes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireLocked(time.Now())
+	now := time.Now()
+	s.expireLocked(now)
+	for len(s.pending) >= configPreviewMax {
+		oldest := ""
+		var oldestExpiry time.Time
+		for token, pending := range s.pending {
+			if oldest == "" || pending.ExpiresAt.Before(oldestExpiry) || (pending.ExpiresAt.Equal(oldestExpiry) && token < oldest) {
+				oldest, oldestExpiry = token, pending.ExpiresAt
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(s.pending, oldest)
+	}
 	s.pending[token] = record
 	return token, nil
 }
@@ -69,29 +88,15 @@ func (s *configPreviewStore) take(token string) (configPreviewRecord, bool) {
 		return configPreviewRecord{}, false
 	}
 	delete(s.pending, token)
-	if now.After(record.ExpiresAt) {
+	if !now.Before(record.ExpiresAt) {
 		return configPreviewRecord{}, false
 	}
 	return record, true
 }
 
-// restore returns an unconsumed record to the store after a failed set
-// attempt (for example a busy operation gate) so the user does not have to
-// re-prepare an unchanged change. Expired records are dropped instead.
-func (s *configPreviewStore) restore(token string, record configPreviewRecord) {
-	if time.Now().After(record.ExpiresAt) {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.pending[token]; !exists {
-		s.pending[token] = record
-	}
-}
-
 func (s *configPreviewStore) expireLocked(now time.Time) {
 	for token, record := range s.pending {
-		if now.After(record.ExpiresAt) {
+		if !now.Before(record.ExpiresAt) {
 			delete(s.pending, token)
 		}
 	}
@@ -100,6 +105,11 @@ func (s *configPreviewStore) expireLocked(now time.Time) {
 func configService(service roborev.Service) (roborev.ConfigService, bool) {
 	configSvc, ok := service.(roborev.ConfigService)
 	return configSvc, ok
+}
+
+func configurationMutationTransport(service roborev.Service) (roborev.ConfigurationMutationTransport, bool) {
+	transport, ok := service.(roborev.ConfigurationMutationTransport)
+	return transport, ok
 }
 
 func requireConfigCapability(installation roborev.Installation, mutation bool) error {
@@ -137,7 +147,7 @@ func (s *Server) configurationSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := requireConfigCapability(s.RoboRev.Installation(r.Context()), false); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "configuration introspection is unavailable"), "configuration")
 		return
 	}
 	configSvc, ok := configService(s.RoboRev)
@@ -147,7 +157,7 @@ func (s *Server) configurationSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := configSvc.ConfigList(r.Context(), repo.Path)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "configuration is unavailable"), "configuration")
 		return
 	}
 	writeJSON(w, http.StatusOK, configurationSnapshotDTO{
@@ -188,29 +198,38 @@ func (s *Server) configurationPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "request")
 		return
 	}
-	repo, ok := s.inspectAuthorizedRepository(w, r.Context(), strings.TrimSpace(body.RepositoryIdentity))
+	identity := strings.TrimSpace(body.RepositoryIdentity)
+	transport, ok := configurationMutationTransport(s.RoboRev)
 	if !ok {
+		writeError(w, http.StatusNotImplemented, "configuration mutation is unavailable", "configuration")
+		return
+	}
+	releaseSelected, root, err := s.Registry.AcquireSelected(identity)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
+		return
+	}
+	defer releaseSelected()
+	repo, err := s.Registry.InspectIdentity(r.Context(), identity)
+	if err != nil || !gitx.SameRepositoryPath(repo.Path, root) {
+		writeError(w, http.StatusConflict, "repository selection changed", "repository")
 		return
 	}
 	if scope == configuration.ScopeLocal && repo.Dirty {
 		writeError(w, http.StatusConflict, "repository must be clean before local configuration changes", "dirty")
 		return
 	}
-	installation := s.RoboRev.Installation(r.Context())
-	if err := requireConfigCapability(installation, true); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
-		return
-	}
-	configSvc, ok := configService(s.RoboRev)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "configuration mutation is unavailable", "configuration")
-		return
-	}
-	rows, err := configSvc.ConfigList(r.Context(), repo.Path)
+	rootSnapshot, err := s.captureConfigurationRoot(root)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
+		writeError(w, http.StatusConflict, "repository state changed; refresh and retry", "repository")
 		return
 	}
+	preflight, err := transport.ConfigurationPreflight(r.Context(), root)
+	if err != nil || !preflight.Binding.Valid() {
+		writeError(w, http.StatusBadGateway, "configuration mutation is unavailable", "configuration")
+		return
+	}
+	rows := preflight.Rows
 	args, err := roborev.ConfigSetArgs(spec.Key, canonical, toRoboRevScope(scope))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "request")
@@ -226,16 +245,17 @@ func (s *Server) configurationPreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	record := configPreviewRecord{
-		Identity:  strings.TrimSpace(body.RepositoryIdentity),
-		Path:      repo.Path,
-		Head:      repo.Head,
-		Branch:    repo.Branch,
-		BinaryGen: bindingGeneration(s.RoboRev),
-		Key:       spec.Key,
-		Scope:     scope,
-		Value:     canonical,
-		Snapshot:  configuration.SnapshotDigest(rows),
-		ExpiresAt: time.Now().Add(configPreviewTTL),
+		Identity:     identity,
+		Path:         root,
+		Head:         repo.Head,
+		Branch:       repo.Branch,
+		RootSnapshot: rootSnapshot,
+		Binding:      preflight.Binding,
+		Key:          spec.Key,
+		Scope:        scope,
+		Value:        canonical,
+		Snapshot:     configuration.SnapshotDigest(rows),
+		ExpiresAt:    time.Now().Add(configPreviewTTL),
 	}
 	token, err := s.configPreviews.put(record)
 	if err != nil {
@@ -249,7 +269,7 @@ func (s *Server) configurationPreview(w http.ResponseWriter, r *http.Request) {
 		CurrentValue:  currentValue,
 		CurrentOrigin: currentOrigin,
 		NewValue:      canonical,
-		Command:       commandPreviewDTO{Executable: serviceBinary(s.RoboRev), Args: args},
+		Command:       commandPreviewDTO{Executable: "roborev", Args: args},
 		Warnings:      configurationWarnings(scope),
 	})
 }
@@ -297,6 +317,7 @@ type configurationSetRequest struct {
 
 type configurationSetDTO struct {
 	Status          string              `json:"status"`
+	ErrorCode       string              `json:"errorCode,omitempty"`
 	Message         string              `json:"message,omitempty"`
 	Key             string              `json:"key,omitempty"`
 	Scope           string              `json:"scope,omitempty"`
@@ -318,40 +339,46 @@ func (s *Server) configurationSet(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	// The exclusive operation slot keeps a config write from overlapping
-	// setup, runtime control, Panel Refine, agentic fixes, or other mutations.
-	// It is acquired BEFORE the preview token is consumed so a busy system
-	// rejects with 409 without burning a prepared change.
-	releaseFix, err := s.Gate.AcquireFix()
-	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "operation")
-		return
-	}
-	defer releaseFix()
 	token := strings.TrimSpace(body.PreviewToken)
 	record, ok := s.configPreviews.take(token)
 	if !ok {
 		writeError(w, http.StatusConflict, "prepared configuration change is missing or expired; refresh and prepare again", "stale")
 		return
 	}
+	transport, ok := configurationMutationTransport(s.RoboRev)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "configuration mutation is unavailable", "configuration")
+		return
+	}
+	if s.Gate == nil {
+		writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
+		return
+	}
+	releaseGlobal, err := s.Gate.AcquireFix()
+	if err != nil {
+		writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
+		return
+	}
+	defer releaseGlobal()
 	if record.Scope == configuration.ScopeLocal {
-		releaseRepo, repoErr := s.Gate.AcquireRepository(record.Identity)
+		releaseRepo, repoErr := s.Gate.AcquireRepository(gitx.RepositoryKey(record.Path))
 		if repoErr != nil {
-			// The change itself is still valid; give the token back so the
-			// user can retry without preparing again once the repository is
-			// free.
-			s.configPreviews.restore(token, record)
-			writeError(w, http.StatusConflict, repoErr.Error(), "operation")
+			writeError(w, http.StatusConflict, operation.ErrBusy.Error(), "operation")
 			return
 		}
 		defer releaseRepo()
 	}
-	inspect, err := s.Registry.InspectIdentity(r.Context(), record.Identity)
-	if err != nil {
-		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
+	releaseSelected, root, err := s.Registry.AcquireSelected(record.Identity)
+	if err != nil || !gitx.SameRepositoryPath(root, record.Path) {
+		if releaseSelected != nil {
+			releaseSelected()
+		}
+		writeError(w, http.StatusConflict, "repository selection changed", "repository")
 		return
 	}
-	if !gitx.SameRepositoryPath(inspect.Path, record.Path) || inspect.Head != record.Head || inspect.Branch != record.Branch {
+	defer releaseSelected()
+	inspect, err := s.Registry.InspectIdentity(r.Context(), record.Identity)
+	if err != nil || !gitx.SameRepositoryPath(inspect.Path, record.Path) || inspect.Head != record.Head || inspect.Branch != record.Branch {
 		writeError(w, http.StatusConflict, "repository changed after this change was prepared; refresh and prepare again", "stale")
 		return
 	}
@@ -359,65 +386,73 @@ func (s *Server) configurationSet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "repository must be clean before local configuration changes", "dirty")
 		return
 	}
-	if bindingGeneration(s.RoboRev) != record.BinaryGen {
-		writeError(w, http.StatusConflict, "the RoboRev binary changed after this change was prepared; refresh and prepare again", "stale")
+	rootSnapshot, err := s.captureConfigurationRoot(record.Path)
+	if err != nil || !rootSnapshot.Equal(record.RootSnapshot) {
+		writeError(w, http.StatusConflict, "repository changed after this change was prepared; refresh and prepare again", "stale")
 		return
 	}
-	installation := s.RoboRev.Installation(r.Context())
-	if err := requireConfigCapability(installation, true); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
+	preflight, err := transport.ConfigurationPreflight(r.Context(), record.Path)
+	if err != nil || !preflight.Binding.Equal(record.Binding) || configuration.SnapshotDigest(preflight.Rows) != record.Snapshot {
+		writeError(w, http.StatusConflict, "configuration changed after this change was prepared; refresh and prepare again", "stale")
 		return
 	}
-	configSvc, ok := configService(s.RoboRev)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "configuration mutation is unavailable", "configuration")
+	finalGuard := func(ctx context.Context) error {
+		snapshot, guardErr := s.captureConfigurationRoot(record.Path)
+		if guardErr != nil || !snapshot.Equal(record.RootSnapshot) {
+			return errors.New("configuration root changed")
+		}
+		return nil
+	}
+	result, setErr := transport.ConfigurationSet(r.Context(), record.Path, record.Key, record.Value, toRoboRevScope(record.Scope), record.Binding, finalGuard)
+	if !result.Started {
+		writeJSON(w, http.StatusOK, configurationSetDTO{Status: "unverified", ErrorCode: "process-not-started", Message: "configuration result could not be verified"})
 		return
 	}
-	freshRows, err := configSvc.ConfigList(r.Context(), inspect.Path)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "configuration")
+	verifyCtx, cancel := context.WithTimeout(context.Background(), configVerificationTimeout)
+	defer cancel()
+	readback, readErr := transport.ConfigurationReadback(verifyCtx, record.Path, record.Key, toRoboRevScope(record.Scope), record.Binding)
+	verified := readErr == nil && readback.Binding.Equal(record.Binding) && readback.Value == record.Value && configurationRowsVerify(readback.Rows, record.Key, record.Scope, record.Value)
+	postSnapshot, postRootErr := s.captureConfigurationRoot(record.Path)
+	verified = verified && postRootErr == nil && postSnapshot.Equal(record.RootSnapshot)
+	if !verified {
+		_ = setErr
+		writeJSON(w, http.StatusOK, configurationSetDTO{Status: "unverified", ErrorCode: configurationReadbackCode(readErr), Message: "configuration result could not be verified"})
 		return
 	}
-	if configuration.SnapshotDigest(freshRows) != record.Snapshot {
-		writeError(w, http.StatusConflict, "the effective configuration changed after this change was prepared; refresh and prepare again", "stale")
-		return
+	writeJSON(w, http.StatusOK, configurationSetDTO{Status: "succeeded", Key: record.Key, Scope: string(record.Scope), Value: record.Value, VerifiedValue: readback.Value, Rows: readback.Rows})
+}
+
+func configurationRowsVerify(rows []roborev.ConfigRow, key string, scope configuration.Scope, value string) bool {
+	expectedOrigin := "global"
+	if scope == configuration.ScopeLocal {
+		expectedOrigin = "local"
 	}
-	setErr := configSvc.ConfigSet(r.Context(), inspect.Path, record.Key, record.Value, toRoboRevScope(record.Scope))
-	verifiedValue := ""
-	verifyFailed := setErr != nil
-	if setErr == nil {
-		value, getErr := configSvc.ConfigGet(r.Context(), inspect.Path, record.Key, toRoboRevScope(record.Scope))
-		if getErr != nil || value != record.Value {
-			verifyFailed = true
-		} else {
-			verifiedValue = value
+	matched := 0
+	for _, row := range rows {
+		if row.Key != key {
+			continue
+		}
+		matched++
+		if row.Origin != expectedOrigin || row.Value != value {
+			return false
 		}
 	}
-	rows, listErr := configSvc.ConfigList(r.Context(), inspect.Path)
-	if listErr != nil {
-		verifyFailed = true
+	return matched == 1
+}
+
+func configurationReadbackCode(err error) string {
+	if errors.Is(err, roborev.ErrBindingChanged) {
+		return "binding-changed"
 	}
-	if verifyFailed {
-		detail := "configuration result could not be fully verified; refresh Configuration to check the current value."
-		if setErr != nil {
-			detail = setErr.Error() + "; the configuration result could not be verified."
-		} else if listErr != nil {
-			detail = listErr.Error() + "; the configuration result could not be verified."
-		}
-		writeJSON(w, http.StatusOK, configurationSetDTO{Status: "unverified", Message: detail, Key: record.Key, Scope: string(record.Scope), Value: record.Value, Rows: rows})
-		return
+	return "readback-unverified"
+}
+
+func (s *Server) captureConfigurationRoot(root string) (pathsafety.Snapshot, error) {
+	fs := s.ConfigurationFS
+	if fs == nil {
+		fs = pathsafety.OSFileSystem{}
 	}
-	afterInspect, err := s.Registry.InspectIdentity(r.Context(), record.Identity)
-	dirty := record.Scope == configuration.ScopeLocal && err == nil && afterInspect.Dirty
-	writeJSON(w, http.StatusOK, configurationSetDTO{
-		Status:          "succeeded",
-		Key:             record.Key,
-		Scope:           string(record.Scope),
-		Value:           record.Value,
-		VerifiedValue:   verifiedValue,
-		RepositoryDirty: dirty,
-		Rows:            rows,
-	})
+	return pathsafety.CaptureDirectory(fs, root)
 }
 
 // inspectAuthorizedRepository resolves an opaque identity into a freshly

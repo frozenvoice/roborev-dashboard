@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Activity, AlertTriangle, Bot, Check, ChevronRight, CircleStop, Clipboard, Clock3, Code2, GitBranch, GitCommit, LayoutDashboard, ListChecks, Menu, MessageSquareText, Play, RefreshCw, RotateCcw, Search, Server, Settings, ShieldCheck, SlidersHorizontal, TerminalSquare, X, XCircle } from 'lucide-react'
-import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeSetupState, normalizeRuntimeControl, parseReviewInvalidationEvent, reviewEventsURL, TASK_HISTORY_LIMIT, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
+import { APIError, normalizeAgentsResponse, normalizePanelRefineResponse, normalizeReviewDetail, normalizeSetupState, normalizeRuntimeControl, parseReviewInvalidationEvent, reviewEventsURL, TASK_HISTORY_LIMIT, type AgentsResponse, type Bootstrap, type FixPromptResponse, type Installation, type PanelConfiguration, type PanelInfo, type PanelRefineOptions, type PanelRefineRun, type Repository, type ReviewEnqueueResponse, type ReviewJob, type RuntimeControlState, type SetupState, jobsFromPayload, request, setCSRF } from './api'
 import { Markdown } from './Markdown'
 import { jobStatus, jobStatusLabel } from './jobStatus'
 import { FixRefine, PanelRefineSummary, isFixTarget } from './FixRefine'
@@ -69,17 +69,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 function validatePanelMemberDetail(value: unknown, expected: { id: number; panelRunUUID: string; panelName?: string }) {
-  if (!isRecord(value)) throw new Error('Panel member detail was not an object')
-  const job = value.job
-  if (!isRecord(job)) throw new Error('Panel member detail job identity is missing')
+  if (!isRecord(value) || !isRecord(value.job)) throw new Error('Panel member detail job identity is missing')
   const topLevelID = positiveJobId(value.job_id)
-  const nestedID = positiveJobId(job.id)
+  const nestedID = positiveJobId(value.job.id ?? value.job.job_id)
   if (topLevelID === null || nestedID === null || topLevelID !== expected.id || nestedID !== expected.id) throw new Error('Panel member detail job identity mismatch')
-  if (typeof job.repo_path !== 'string' || !job.repo_path.trim()) throw new Error('Panel member detail repository path mismatch')
-  if (job.panel_run_uuid !== expected.panelRunUUID) throw new Error('Panel member detail panel run mismatch')
-  if (job.panel_role !== 'member') throw new Error('Panel member detail role mismatch')
-  if (expected.panelName && job.panel_name !== expected.panelName) throw new Error('Panel member detail panel mismatch')
-  return value as ReviewJob
+  const normalized = normalizeReviewDetail(value, expected.id)
+  if (!normalized) throw new Error('Panel member detail contains unsafe fields')
+  if (normalized.panel_run_uuid !== expected.panelRunUUID) throw new Error('Panel member detail panel run mismatch')
+  if (normalized.panel_role !== 'member') throw new Error('Panel member detail role mismatch')
+  if (expected.panelName && normalized.panel_name !== expected.panelName) throw new Error('Panel member detail panel mismatch')
+  return normalized
+}
+function readReviewDetail(value: unknown, expectedID?: number): ReviewJob {
+  const job = normalizeReviewDetail(value, expectedID)
+  if (!job || (expectedID !== undefined && idOf(job) !== expectedID)) throw new Error('Review detail identity mismatch')
+  return job
 }
 function isRunning(job: ReviewJob) {
   const value = String(job.status || '').toLowerCase()
@@ -144,8 +148,12 @@ export function CommentBox({ jobId, mutate, busy }: { jobId: number; mutate: (pa
   </section>
 }
 
-export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoadMembers, canLoadPrompt = true, canLoadLog = true, repoPath, repoIdentity, toast, onPrepareFix }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean; canRerun: boolean; canLoadMembers: boolean; canLoadPrompt?: boolean; canLoadLog?: boolean; repoPath: string; repoIdentity: string; toast: (kind: Toast['kind'], message: string) => void; onPrepareFix?: (job: ReviewJob) => void }) {
+export function ReviewDetail({ job: inputJob, jobs, close, mutate, busy, canRerun, canLoadMembers, canLoadPrompt = true, canLoadLog = true, repoPath, repoIdentity, toast, onPrepareFix }: { job: ReviewJob; jobs: ReviewJob[]; close: () => void; mutate: (path: string, body?: unknown) => Promise<void>; busy: boolean; canRerun: boolean; canLoadMembers: boolean; canLoadPrompt?: boolean; canLoadLog?: boolean; repoPath: string; repoIdentity: string; toast: (kind: Toast['kind'], message: string) => void; onPrepareFix?: (job: ReviewJob) => void }) {
   const { t, locale } = useI18n()
+  // App tests and legacy callers may construct a ReviewJob directly. Apply the
+  // same server projection at this boundary so metadata/state cannot bypass
+  // the list normalizer and reintroduce paths or raw process fields.
+  const job = normalizeReviewDetail(inputJob, idOf(inputJob)) ?? { id: idOf(inputJob) } as ReviewJob
   const [tab, setTab] = useState<Tab>('review')
   const [detail, setDetail] = useState<ReviewJob | null>(null)
   const [lazy, setLazy] = useState<Record<string, string>>({})
@@ -230,7 +238,7 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     memberSnapshot.current = new Map()
     selectedMemberIdRef.current = null
     setDetail(null); setDetailError(''); setLazy({}); setLazyLoaded({}); setLazyError({}); setLazyLoading({}); setMemberJobs([]); setMemberLoadState('not-requested'); setMemberError(''); setSelectedMemberId(null); setMemberDetail(null); setMemberDetailError(''); setMemberDetailLoading(false); setMemberLoading(false); setTab(canLoadMembers && Boolean(job.panel_run_uuid) && isRunning(job) ? 'members' : 'review'); setDetailLoading(true)
-    request<ReviewJob>(`/api/reviews/${id}`).then(value => { if (generation === detailGeneration.current) setDetail({ ...value, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setDetailLoading(false) })
+    request<unknown>(`/api/reviews/${id}`).then(value => { const safe = readReviewDetail(value, id); if (generation === detailGeneration.current) setDetail({ ...safe, id, job_id: id }) }).catch(error => { if (generation === detailGeneration.current) { setDetail(null); setDetailError((error as Error).message) } }).finally(() => { if (generation === detailGeneration.current) setDetailLoading(false) })
     return () => { detailGeneration.current++; detailPollGeneration.current++; cancelLazy('prompt'); cancelLazy('log') }
   }, [cancelLazy, id, repoIdentity])
   useEffect(() => () => { cancelLazy('prompt'); cancelLazy('log') }, [cancelLazy])
@@ -273,9 +281,10 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
     setDetailLoading(true)
     const refreshDetail = async (attempt: number): Promise<void> => {
       try {
-        const value = await request<ReviewJob>(`/api/reviews/${id}`)
+        const value = await request<unknown>(`/api/reviews/${id}`)
         if (detailRequest === detailGeneration.current) {
-          setDetail({ ...value, id, job_id: id })
+          const safe = readReviewDetail(value, id)
+          setDetail({ ...safe, id, job_id: id })
           setDetailError('')
         }
       } catch (error) {
@@ -417,9 +426,10 @@ export function ReviewDetail({ job, jobs, close, mutate, busy, canRerun, canLoad
       if (cancelled) return
       const generation = ++detailPollGeneration.current
       try {
-        const value = await request<ReviewJob>(`/api/reviews/${id}`)
+        const value = await request<unknown>(`/api/reviews/${id}`)
         if (!cancelled && generation === detailPollGeneration.current) {
-          setDetail({ ...value, id, job_id: id })
+            const safe = readReviewDetail(value, id)
+          setDetail({ ...safe, id, job_id: id })
           setDetailError('')
         }
       } catch {
@@ -1083,12 +1093,10 @@ export function App() {
         const existsInList = nextJobs.some(job => positiveJobId(job.id ?? job.job_id) === mutateSelectedId)
         if (!existsInList) {
           try {
-            const fresh = await request<ReviewJob>(`/api/reviews/${mutateSelectedId}?repositoryIdentity=${encodeURIComponent(mutateSelectedIdentity)}`)
-            const freshRaw = fresh as unknown as { id?: unknown; job_id?: unknown; job?: { id?: unknown } }
-            const freshId = positiveJobId(freshRaw.job_id ?? freshRaw.job?.id ?? freshRaw.id)
-            if (freshId !== mutateSelectedId) return
+            const fresh = await request<unknown>(`/api/reviews/${mutateSelectedId}?repositoryIdentity=${encodeURIComponent(mutateSelectedIdentity)}`)
+              const safeFresh = readReviewDetail(fresh, mutateSelectedId)
             if (mutateSelectedIdentity === currentRepositoryIdentity.current && selectedRef.current && positiveJobId(selectedRef.current.id ?? selectedRef.current.job_id) === mutateSelectedId) {
-              setSelected({ ...fresh, id: mutateSelectedId, job_id: mutateSelectedId } as ReviewJob)
+              setSelected({ ...safeFresh, id: mutateSelectedId, job_id: mutateSelectedId })
             }
           } catch {
             // Fresh selected fetch is best effort for terminal out-of-window jobs; no subsequent self-healing poll exists, so stale selection persists until the user re-selects.
@@ -1291,8 +1299,9 @@ export function App() {
     if (existing) { setSelected(existing); return }
     const identity = selectedRepositoryIdentity
     const generation = ++panelRefineReviewGeneration.current
-    void request<ReviewJob>(`/api/reviews/${encodeURIComponent(id)}`).then(value => {
-      if (generation === panelRefineReviewGeneration.current && identity === currentRepositoryIdentity.current) setSelected({ ...value, id, job_id: id })
+    void request<unknown>(`/api/reviews/${encodeURIComponent(id)}`).then(value => {
+        const safe = readReviewDetail(value, id)
+      if (generation === panelRefineReviewGeneration.current && identity === currentRepositoryIdentity.current) setSelected({ ...safe, id, job_id: id })
     }).catch(error => { if (generation === panelRefineReviewGeneration.current && identity === currentRepositoryIdentity.current) toast('error', (error as Error).message) })
   }
   const switchRepo = async (identity: string) => {

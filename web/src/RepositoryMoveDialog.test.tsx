@@ -15,7 +15,7 @@ const available: RepositoryMoveAvailability = { canMove: true, reason: null }
 const preview = {
   sourcePath: '/fresh/path', sourceName: 'fresh-name', jobCount: 11,
   destinationRepositoryIdentity: 'destination-1', destinationPath: 'E:\\new\\project', destinationName: 'new-name',
-  command: { executable: 'C:\\bin\\roborev.exe', args: ['repo', 'move', '/fresh/path', '.'], workingDirectory: 'E:\\new\\project' },
+  command: { executable: 'roborev', args: ['repo', 'move', '/fresh/path', '.'], workingDirectory: 'E:\\new\\project' },
   token: 'move-token', expiresAt: '2026-08-23T01:02:03Z',
 }
 
@@ -84,7 +84,7 @@ describe('RepositoryMoveDialog', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe('/api/repository-moves/preview')
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({ sourcePath: source.path, destinationRepositoryIdentity: 'destination-1' })
-    expect(screen.getByText('C:\\bin\\roborev.exe')).toBeInTheDocument()
+    expect(screen.getByText('roborev')).toBeInTheDocument()
     expect(screen.getByText('Working directory: E:\\new\\project')).toBeInTheDocument()
     expect(screen.getByText('argv[0]')).toBeInTheDocument()
     expect(screen.getByText('repo')).toBeInTheDocument()

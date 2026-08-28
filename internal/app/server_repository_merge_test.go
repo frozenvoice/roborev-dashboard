@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -210,7 +211,7 @@ func TestRepositoryMergePreviewBindsAuthoritativeFactsAndCommand(t *testing.T) {
 	server := mergeTestServer(t, service, mergeTargetInventory(`E:\stale\repo`))
 	service.preflight.Source = repomerge.RepositorySnapshot{Path: `E:\stale\repo`, Name: "fresh source", JobCount: 9}
 	service.preflight.Target = repomerge.RepositorySnapshot{Path: `E:\target\repo`, Name: "fresh target", JobCount: 4}
-	service.preflight.Command = repomerge.Command{Executable: `C:\tools\roborev.exe`, Args: []string{"repo", "merge", "--yes", `E:\stale\repo`, `E:\target\repo`}, WorkingDirectory: ""}
+	service.preflight.Command = repomerge.Command{Executable: `C:\tools\roborev.exe`, Args: []string{"repo", "merge", "--yes", `E:\stale\repo`, `E:\target\repo`}, WorkingDirectory: `C:\private\cwd`}
 	response := mergePost(t, server, "/api/repository-merges/preview", mergePreviewBody(`E:\stale\repo`, gitx.RepositoryKey(`E:\target\repo`)))
 	if response.Code != http.StatusOK || service.preflightCalls != 1 {
 		t.Fatalf("status=%d preflight=%d body=%s", response.Code, service.preflightCalls, response.Body.String())
@@ -219,7 +220,7 @@ func TestRepositoryMergePreviewBindsAuthoritativeFactsAndCommand(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &dto); err != nil {
 		t.Fatal(err)
 	}
-	if dto.Source.Name != "fresh source" || dto.Source.JobCount != 9 || dto.Target.Name != "fresh target" || dto.Target.JobCount != 4 || dto.Command.Executable != `C:\tools\roborev.exe` || len(dto.Command.Args) != 5 || dto.Command.Args[2] != "--yes" || dto.Command.WorkingDirectory != "" || dto.Token == "" {
+	if dto.Source.Name != "fresh source" || dto.Source.JobCount != 9 || dto.Target.Name != "fresh target" || dto.Target.JobCount != 4 || dto.Command.Executable != "roborev" || service.preflight.Command.Executable != `C:\tools\roborev.exe` || service.preflight.Command.WorkingDirectory != `C:\private\cwd` || len(dto.Command.Args) != 5 || dto.Command.Args[2] != "--yes" || dto.Command.WorkingDirectory != "" || dto.Token == "" {
 		t.Fatalf("authoritative preview dto=%#v body=%s", dto, response.Body.String())
 	}
 }
@@ -380,7 +381,7 @@ func TestRepositoryMergeConfirmStartedOutcomeTaxonomy(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{name: "start failure", err: errors.New("start failed"), wantStatus: http.StatusBadGateway},
+		{name: "start failure", err: errors.New("private stderr marker C:\\private\\roborev.exe"), wantStatus: http.StatusBadGateway},
 		{name: "started unverified", result: repomerge.ExecutionResult{Started: true}, wantStatus: http.StatusOK, wantBody: `"status":"unverified"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -390,6 +391,9 @@ func TestRepositoryMergeConfirmStartedOutcomeTaxonomy(t *testing.T) {
 			response := mergePost(t, server, "/api/repository-merges", `{"token":"`+token+`"}`)
 			if response.Code != tc.wantStatus || service.mergeCalls != 1 || (tc.wantBody != "" && !strings.Contains(response.Body.String(), tc.wantBody)) {
 				t.Fatalf("status=%d want=%d calls=%d body=%s", response.Code, tc.wantStatus, service.mergeCalls, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "private stderr marker") || strings.Contains(response.Body.String(), `C:\private\roborev.exe`) {
+				t.Fatalf("private process detail leaked in response: %s", response.Body.String())
 			}
 		})
 	}
@@ -407,6 +411,37 @@ func TestRepositoryMergePreviewExpiresTokens(t *testing.T) {
 	response := mergePost(t, server, "/api/repository-merges", `{"token":"`+token+`"}`)
 	if response.Code != http.StatusConflict || service.mergeCalls != 0 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, service.mergeCalls, response.Body.String())
+	}
+}
+
+func TestRepositoryMergePreviewStoreExpiresBeforeCapacityAndEvictsDeterministically(t *testing.T) {
+	store := newRepositoryMergePreviewStore()
+	now := time.Now()
+	store.pending["expired"] = repositoryMergePreviewRecord{ExpiresAt: now.Add(-time.Second)}
+	for index := 0; index < repositoryMergePreviewMax-1; index++ {
+		store.pending[fmt.Sprintf("live-%02d", index)] = repositoryMergePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryMergePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.pending) != repositoryMergePreviewMax {
+		t.Fatalf("expiry was not processed first: pending=%d", len(store.pending))
+	}
+	if _, ok := store.pending["expired"]; ok {
+		t.Fatal("expired preview was not removed before capacity eviction")
+	}
+	store = newRepositoryMergePreviewStore()
+	for index := 0; index < repositoryMergePreviewMax; index++ {
+		store.pending[fmt.Sprintf("token-%02d", index)] = repositoryMergePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryMergePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.pending["token-00"]; ok {
+		t.Fatal("lexicographically oldest token was not evicted on expiry tie")
+	}
+	if len(store.pending) != repositoryMergePreviewMax {
+		t.Fatalf("pending=%d want=%d", len(store.pending), repositoryMergePreviewMax)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -111,6 +112,123 @@ func TestQueueControlUsesExactHTTPContractsAndVerifiesResponse(t *testing.T) {
 		t.Fatalf("requests = %#v, want %#v", requests, want)
 	}
 }
+
+type runtimeTrackingBody struct {
+	reader *strings.Reader
+	reads  int
+	closed bool
+}
+
+func (b *runtimeTrackingBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.reads += n
+	return n, err
+}
+
+func (b *runtimeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestQueuePostUsesNoRedirectIdentityAndDoesNotExposeErrorBody(t *testing.T) {
+	destinationRequests := 0
+	destination := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		destinationRequests++
+	}))
+	defer destination.Close()
+
+	var sourceRequests int
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceRequests++
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Location", destination.URL+"/followed")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "queue-secret-marker")
+	}))
+	defer source.Close()
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, source.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.postEmptyJSON(context.Background(), "/api/queue/pause")
+	if err == nil || strings.Contains(err.Error(), "queue-secret-marker") {
+		t.Fatalf("redirect error = %v, want sanitized non-body error", err)
+	}
+	if sourceRequests != 1 || destinationRequests != 0 {
+		t.Fatalf("source requests = %d, destination requests = %d; want 1/0", sourceRequests, destinationRequests)
+	}
+}
+
+func TestQueuePostClosesNonSuccessBodyWithoutReadingOrRetrying(t *testing.T) {
+	body := &runtimeTrackingBody{reader: strings.NewReader("queue-secret-marker")}
+	transportCalls := 0
+	client, err := NewClient("roborev", &runtimeCommandRunner{}, "127.0.0.1:7373")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.HTTP = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		transportCalls++
+		if req.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("Accept-Encoding = %q, want identity", req.Header.Get("Accept-Encoding"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Status:     "502 Bad Gateway",
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    req,
+		}, nil
+	})}
+	_, err = client.postEmptyJSON(context.Background(), "/api/queue/pause")
+	if err == nil || strings.Contains(err.Error(), "queue-secret-marker") {
+		t.Fatalf("error = %v, want sanitized non-body error", err)
+	}
+	if transportCalls != 1 || body.reads != 0 || !body.closed {
+		t.Fatalf("transport calls = %d, body reads = %d, closed = %v; want 1/0/true", transportCalls, body.reads, body.closed)
+	}
+}
+
+func TestQueuePostAcceptsExactlyBoundedBodyAndRejectsOneByteOver(t *testing.T) {
+	makeBody := func(size int64) []byte {
+		prefix := `{"queue_paused":true,"padding":"`
+		suffix := `"}`
+		padding := int(size) - len(prefix) - len(suffix)
+		if padding < 0 {
+			t.Fatalf("test body target is too small")
+		}
+		return []byte(prefix + strings.Repeat("x", padding) + suffix)
+	}
+	for _, test := range []struct {
+		name string
+		size int64
+		want bool
+	}{
+		{name: "exact limit", size: runtimeControlResponseLimit, want: true},
+		{name: "one byte over", size: runtimeControlResponseLimit + 1, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(makeBody(test.size))
+			}))
+			defer server.Close()
+			client, err := NewClient("roborev", &runtimeCommandRunner{}, server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.postEmptyJSON(context.Background(), "/api/queue/pause")
+			if (err == nil) != test.want {
+				t.Fatalf("post error = %v, accepted = %v; want accepted = %v", err, err == nil, test.want)
+			}
+		})
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestQueueControlRejectsMismatchAndMalformedState(t *testing.T) {
 	for _, response := range []string{`{"queue_paused":false}`, `{"queue_paused":"true"}`, `{}`} {

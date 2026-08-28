@@ -18,7 +18,10 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborev"
 )
 
-const repositoryMergePreviewTTL = 3 * time.Minute
+const (
+	repositoryMergePreviewTTL = 3 * time.Minute
+	repositoryMergePreviewMax = 64
+)
 
 type repositoryMergePreviewBody struct {
 	SourcePath               *string `json:"sourcePath"`
@@ -57,7 +60,21 @@ func (s *repositoryMergePreviewStore) put(record repositoryMergePreviewRecord) (
 	token := hex.EncodeToString(bytes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireLocked(time.Now())
+	now := time.Now()
+	s.expireLocked(now)
+	for len(s.pending) >= repositoryMergePreviewMax {
+		oldest := ""
+		var oldestExpiry time.Time
+		for candidate, pending := range s.pending {
+			if oldest == "" || pending.ExpiresAt.Before(oldestExpiry) || (pending.ExpiresAt.Equal(oldestExpiry) && candidate < oldest) {
+				oldest, oldestExpiry = candidate, pending.ExpiresAt
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(s.pending, oldest)
+	}
 	s.pending[token] = record
 	return token, nil
 }
@@ -266,7 +283,7 @@ func (s *Server) repositoryMergePreview(w http.ResponseWriter, r *http.Request) 
 	targetIdentity := strings.TrimSpace(*body.TargetRepositoryIdentity)
 	target, err := s.Registry.InspectIdentity(r.Context(), targetIdentity)
 	if err != nil {
-		writeError(w, http.StatusConflict, "target repository is unavailable: "+err.Error(), "repository-merge")
+		writeError(w, http.StatusConflict, "target repository is unavailable", "repository-merge")
 		return
 	}
 	if s.Registry.Contains(sourcePath) {
@@ -303,7 +320,7 @@ func (s *Server) repositoryMergePreview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	targetSnapshot := mergeCandidateDTO(preflight.Target, targetIdentity)
-	writeJSON(w, http.StatusOK, repositoryMergePreviewDTO{Source: mergeSnapshotDTO(preflight.Source), Target: targetSnapshot, Command: repositoryMergeCommandDTO{Executable: preflight.Command.Executable, Args: append([]string(nil), preflight.Command.Args...), WorkingDirectory: preflight.Command.WorkingDirectory}, Token: token, ExpiresAt: expires})
+	writeJSON(w, http.StatusOK, repositoryMergePreviewDTO{Source: mergeSnapshotDTO(preflight.Source), Target: targetSnapshot, Command: repositoryMergeCommandDTO{Executable: "roborev", Args: append([]string(nil), preflight.Command.Args...), WorkingDirectory: ""}, Token: token, ExpiresAt: expires})
 }
 
 func (s *Server) repositoryMergeConfirm(w http.ResponseWriter, r *http.Request) {
@@ -406,5 +423,18 @@ func writeRepositoryMergeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, repomerge.ErrInvalidRequest), errors.Is(err, repomerge.ErrSourcePathRequired), errors.Is(err, repomerge.ErrTargetPathRequired), errors.Is(err, repomerge.ErrSourcePathNotAbsolute), errors.Is(err, repomerge.ErrTargetPathNotAbsolute):
 		status = http.StatusBadRequest
 	}
-	writeError(w, status, err.Error(), "repository-merge")
+	message := "Repository merge process failed."
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		message = "Repository merge timed out."
+	case errors.Is(err, roborev.ErrRepositoryMergeOffline), errors.Is(err, roborev.ErrRepositoryMergeUnhealthy), errors.Is(err, roborev.ErrUnsupportedRepositoryMerge):
+		message = "Repository merge is unavailable."
+	case errors.Is(err, roborev.ErrBindingChanged):
+		message = "Repository merge binding changed; refresh and try again."
+	case errors.Is(err, roborev.ErrRepositoryMergeActiveJobs), errors.Is(err, repomerge.ErrSourceEmpty), errors.Is(err, repomerge.ErrSourceStale), errors.Is(err, repomerge.ErrTargetStale), errors.Is(err, repomerge.ErrSourceTargetSame), errors.Is(err, repomerge.ErrSourceFallbackAmbiguous), errors.Is(err, repomerge.ErrTargetFallbackAmbiguous), errors.Is(err, repomerge.ErrActiveSourceJobs), errors.Is(err, repomerge.ErrSourceJobMismatch), errors.Is(err, repomove.ErrSourceExists):
+		message = "Repository merge preview is stale or conflicting; refresh and try again."
+	case errors.Is(err, repomerge.ErrInvalidRequest), errors.Is(err, repomerge.ErrSourcePathRequired), errors.Is(err, repomerge.ErrTargetPathRequired), errors.Is(err, repomerge.ErrSourcePathNotAbsolute), errors.Is(err, repomerge.ErrTargetPathNotAbsolute):
+		message = "Repository merge request is invalid."
+	}
+	writeError(w, status, message, "repository-merge")
 }

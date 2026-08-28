@@ -25,9 +25,10 @@ type configuredAgentDTO struct {
 	CommandSource   string `json:"commandSource,omitempty"`
 	Detected        bool   `json:"detected"`
 	DetectionReason string `json:"detectionReason,omitempty"`
-	ResolvedPath    string `json:"resolvedPath,omitempty"`
 	Health          string `json:"health"`
 }
+
+const backendAgentCommandSentinel = "__roborev_backend_command__"
 
 type agentsDTO struct {
 	RoboRevVersion     string               `json:"roborevVersion,omitempty"`
@@ -48,27 +49,38 @@ func (s *Server) currentAgentScope(_ context.Context) (agentstatus.RepositorySco
 }
 
 func (s *Server) agentStatuses(w http.ResponseWriter, r *http.Request) {
+	// This read can inspect global/repository configuration and executable
+	// discovery. Authenticate and validate its query before touching any of
+	// those sources so an unauthorised request has zero downstream effects.
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
+		return
+	}
 	if s.Agents == nil {
 		writeError(w, http.StatusServiceUnavailable, "agent status is unavailable", "agents")
 		return
 	}
 	if err := requireV064(s.RoboRev, r.Context(), "agent discovery"); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error(), "agents")
+		writeError(w, http.StatusServiceUnavailable, safeExternalError(err, "RoboRev v0.64.0 is required for agent discovery"), "agents")
 		return
 	}
 	scope, err := s.currentAgentScope(r.Context())
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "repository")
+		writeError(w, http.StatusConflict, "selected repository is unavailable", "repository")
 		return
 	}
 	statuses, err := s.Agents.Discover(r.Context(), scope)
 	if err != nil {
-		writeError(w, http.StatusConflict, "agent configuration is unavailable: "+err.Error(), "agents")
+		writeError(w, http.StatusConflict, "agent configuration is unavailable", "agents")
 		return
 	}
 	response := agentsDTO{Configured: []configuredAgentDTO{}, RepositoryIdentity: scope.Identity}
-	installation := s.RoboRev.Installation(r.Context())
-	response.RoboRevVersion = installation.Version
+	// requireV064 above proves the only version we expose; do not copy an
+	// arbitrary adapter-provided version string into the browser response.
+	response.RoboRevVersion = "v0.64.0"
 	for _, status := range statuses {
 		for _, configured := range status.Subagents {
 			health := string(status.Health)
@@ -83,9 +95,9 @@ func (s *Server) agentStatuses(w http.ResponseWriter, r *http.Request) {
 			}
 			response.Configured = append(response.Configured, configuredAgentDTO{
 				Name: configured.Name, Agent: configured.CanonicalAgent, Model: configured.Model,
-				Reasoning: configured.Reasoning, Command: status.Command,
+				Reasoning: configured.Reasoning, Command: backendAgentCommandSentinel,
 				CommandSource: configured.Origin, Detected: status.Available,
-				DetectionReason: reason, ResolvedPath: status.Path, Health: health,
+				DetectionReason: reason, Health: health,
 			})
 		}
 		for _, configured := range status.UnresolvedSubagents {
@@ -116,12 +128,8 @@ type agentCheckBody struct {
 }
 
 func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
-	if s.Agents == nil {
-		writeError(w, http.StatusServiceUnavailable, "agent health check is unavailable", "agents")
-		return
-	}
-	if err := requireV064(s.RoboRev, r.Context(), "agent health check"); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error(), "agents")
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "agent health check does not accept query parameters", "query")
 		return
 	}
 	var body agentCheckBody
@@ -136,13 +144,21 @@ func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "repositoryIdentity is required", "repository")
 		return
 	}
+	if s.Agents == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent health check is unavailable", "agents")
+		return
+	}
+	if err := requireV064(s.RoboRev, r.Context(), "agent health check"); err != nil {
+		writeError(w, http.StatusServiceUnavailable, safeExternalError(err, "RoboRev v0.64.0 is required for agent health checks"), "agents")
+		return
+	}
 	if s.Registry == nil {
 		writeError(w, http.StatusConflict, "repository registry is unavailable", "repository")
 		return
 	}
 	lease, err := s.Registry.acquireSelected(body.RepositoryIdentity)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "repository")
+		writeError(w, http.StatusConflict, "selected repository is unavailable", "repository")
 		return
 	}
 	defer lease.Release()
@@ -154,10 +170,14 @@ func (s *Server) checkAgent(w http.ResponseWriter, r *http.Request) {
 	result, err := s.Agents.CheckInRepo(r.Context(), scope, canonical)
 	if err != nil {
 		if errors.Is(err, errAgentRepositoryChanged) || errors.Is(err, agentstatus.ErrDiscovery) || errors.Is(err, agentstatus.ErrIneligible) {
-			writeError(w, http.StatusConflict, err.Error(), "repository")
+			message := "agent is not eligible for this repository"
+			if errors.Is(err, errAgentRepositoryChanged) {
+				message = "selected repository changed; refresh agent status and retry"
+			}
+			writeError(w, http.StatusConflict, message, "repository")
 			return
 		}
-		writeError(w, http.StatusBadGateway, err.Error(), "agent-check")
+		writeError(w, http.StatusBadGateway, "agent health check failed", "agent-check")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -169,11 +189,7 @@ func requireV064(service roborev.Service, ctx context.Context, action string) er
 	}
 	installation := service.Installation(ctx)
 	if !installation.Installed || !roborevcompat.IsSupportedVersion(installation.Version) {
-		version := strings.TrimSpace(installation.Version)
-		if version == "" {
-			version = "unknown"
-		}
-		return fmt.Errorf("%s requires RoboRev v0.64.0 (detected %s)", action, version)
+		return fmt.Errorf("%s requires RoboRev v0.64.0", action)
 	}
 	return nil
 }

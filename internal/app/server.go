@@ -92,10 +92,13 @@ type Server struct {
 	// agent-setting root-race tests. It is deliberately separate from the
 	// repository tracking filesystem seam.
 	RepositoryAgentConfigurationFS pathsafety.FileSystem
-	snapshotIgnoreKey              [32]byte
-	snapshotIgnoreWrites           *snapshotIgnoreWriteStore
-	repositoryTracking             *repositorytracking.Store
-	agentConfiguration             *agentconfiguration.Store
+	// ConfigurationFS is injectable only for deterministic selected-root race
+	// tests. Production uses pathsafety.OSFileSystem.
+	ConfigurationFS      pathsafety.FileSystem
+	snapshotIgnoreKey    [32]byte
+	snapshotIgnoreWrites *snapshotIgnoreWriteStore
+	repositoryTracking   *repositorytracking.Store
+	agentConfiguration   *agentconfiguration.Store
 }
 
 // EventRelay is the narrow HTTP-facing surface of the stream manager. The
@@ -197,7 +200,7 @@ func NewServerWithSetup(service roborev.Service, registry *Registry, allowedHost
 		ciWorkflow = ciworkflowpreview.NewService(transport)
 	}
 	hookStatus := hookstatus.New(versionProbe, registry, nil)
-	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), snapshotIgnoreKey: snapshotIgnoreKey, snapshotIgnoreWrites: newSnapshotIgnoreWriteStore(), repositoryTracking: repositorytracking.NewStore(), agentConfiguration: agentconfiguration.NewStore(), RepositoryTrackingFS: pathsafety.OSFileSystem{}, RepositoryAgentConfigurationFS: pathsafety.OSFileSystem{}, SnapshotIgnore: snapshotignoremanagement.New(snapshotignoremanagement.OSFileSystem{}), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
+	s := &Server{RoboRev: service, Registry: registry, Panels: panels, Refines: refines, Fixes: fixes, Analyses: analyses, Insights: guidelineInsights, Setup: setupManager, Agents: agentstatus.NewService(panels, checker), Runtime: runtimeManager, Events: events, Gate: gate, AllowedHost: allowedHost, csrfToken: base64.RawURLEncoding.EncodeToString(tokenBytes), snapshotIgnoreKey: snapshotIgnoreKey, snapshotIgnoreWrites: newSnapshotIgnoreWriteStore(), repositoryTracking: repositorytracking.NewStore(), agentConfiguration: agentconfiguration.NewStore(), RepositoryTrackingFS: pathsafety.OSFileSystem{}, RepositoryAgentConfigurationFS: pathsafety.OSFileSystem{}, ConfigurationFS: pathsafety.OSFileSystem{}, SnapshotIgnore: snapshotignoremanagement.New(snapshotignoremanagement.OSFileSystem{}), mux: http.NewServeMux(), configPreviews: newConfigPreviewStore(), renamePreviews: newRepositoryRenamePreviewStore(), movePreviews: newRepositoryMovePreviewStore(), mergePreviews: newRepositoryMergePreviewStore(), HookStatus: hookStatus, HookManagement: management, hookPreviews: newHookManagementPreviewStore(), AgentHookConfigFS: agenthookmanagement.OSFileSystem{}, agentHookPreviews: newAgentHookPreviewStore(), SkillsManagementFS: pathsafety.OSFileSystem{}, SkillsManagementEnv: roborev.SkillsTargetEnvFromProcess, skillsPreviews: newSkillsPreviewStore(), CIWorkflowPreview: ciWorkflow, CIWorkflowManagement: ciworkflowmanagement.New(ciworkflowmanagement.OSFileSystem{}), ciWorkflowWrites: newCIWorkflowWriteStore()}
 	s.SetupReadiness = newSetupReadinessChecker(service, registry, hookStatus)
 	if tracking, ok := service.(roborev.RepositoryTrackingTransport); ok {
 		s.RepositoryTracking = tracking
@@ -213,8 +216,10 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
-		if strings.HasPrefix(r.URL.Path, "/api/") && s.AllowedHost != "" && !strings.EqualFold(r.Host, s.AllowedHost) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'")
+		isAPIPath := r.URL != nil && (r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/"))
+		if isAPIPath && s.AllowedHost != "" && !strings.EqualFold(r.Host, s.AllowedHost) {
 			writeError(w, http.StatusForbidden, "invalid host", "host")
 			return
 		}
@@ -389,8 +394,70 @@ func serviceBinary(service roborev.Service) string {
 	return "roborev"
 }
 
+// installationDTO is the deliberately narrow browser projection of the
+// service's installation record. Binary and Error are server-side details:
+// returning the roborev.Installation value directly would expose an absolute
+// executable path and untrusted probe text through both runtime and bootstrap.
+type installationDTO struct {
+	Installed    bool                  `json:"installed"`
+	Version      string                `json:"version,omitempty"`
+	Status       installationStatusDTO `json:"status"`
+	FailureCode  string                `json:"failureCode,omitempty"`
+	Capabilities roborev.Capabilities  `json:"capabilities"`
+}
+
+type installationStatusDTO struct {
+	Running bool `json:"running"`
+	Known   bool `json:"known"`
+}
+
+func projectInstallation(value roborev.Installation) installationDTO {
+	status := installationStatusDTO{}
+	// Installation.Status is an internal raw health envelope. Only the two
+	// browser-required booleans are copied, and an unexpectedly large or
+	// malformed value is reduced to the safe zero status.
+	if len(value.Status) <= 4096 {
+		var raw struct {
+			Running bool `json:"running"`
+			Known   bool `json:"known"`
+		}
+		if json.Unmarshal(value.Status, &raw) == nil {
+			status = installationStatusDTO{Running: raw.Running, Known: raw.Known}
+		}
+	}
+	return installationDTO{
+		Installed:    value.Installed,
+		Version:      boundedInstallationVersion(value.Version),
+		Status:       status,
+		FailureCode:  safeInstallationFailureCode(value.FailureCode),
+		Capabilities: value.Capabilities,
+	}
+}
+
+func boundedInstallationVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 64 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return value
+}
+
+func safeInstallationFailureCode(value string) string {
+	switch value {
+	case "application_control", "permission_denied", "canceled", "invalid_binary":
+		return value
+	default:
+		return ""
+	}
+}
+
 func (s *Server) runtime(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.RoboRev.Installation(r.Context()))
+	writeJSON(w, http.StatusOK, projectInstallation(s.RoboRev.Installation(r.Context())))
 }
 
 // events relays only a repository-scoped jobs-changed invalidation signal.
@@ -472,7 +539,25 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "RoboRev setup manager is unavailable", "setup")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Setup.Status(r.Context()))
+	writeJSON(w, http.StatusOK, projectSetupState(s.Setup.Status(r.Context())))
+}
+
+// Setup State is intentionally richer than the browser needs and its Error
+// field may contain installer/daemon stderr. Keep the existing typed state and
+// progress contract, but replace that one diagnostic with a stable message.
+func projectSetupState(state setup.State) setup.State {
+	if state.Error == "" {
+		return state
+	}
+	switch state.FailureCode {
+	case "application_control":
+		state.Error = "Windows Application Control blocked RoboRev installation"
+	case "daemon_start_failed", "daemon_unhealthy", "daemon_version_mismatch":
+		state.Error = "RoboRev daemon is not ready"
+	default:
+		state.Error = "RoboRev setup is unavailable"
+	}
+	return state
 }
 
 func requireEmptyBody(w http.ResponseWriter, r *http.Request) bool {
@@ -495,13 +580,13 @@ func (s *Server) installRoboRev(w http.ResponseWriter, r *http.Request) {
 	state, err := s.Setup.StartInstall(r.Context())
 	if err != nil {
 		if errors.Is(err, setup.ErrBusy) || errors.Is(err, setup.ErrIneligible) {
-			writeJSON(w, http.StatusConflict, state)
+			writeJSON(w, http.StatusConflict, projectSetupState(state))
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error(), "setup")
+		writeError(w, http.StatusInternalServerError, safeExternalError(err, "RoboRev setup could not be started"), "setup")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, state)
+	writeJSON(w, http.StatusAccepted, projectSetupState(state))
 }
 
 func (s *Server) retryRoboRev(w http.ResponseWriter, r *http.Request) {
@@ -515,13 +600,13 @@ func (s *Server) retryRoboRev(w http.ResponseWriter, r *http.Request) {
 	state, err := s.Setup.Retry(r.Context())
 	if err != nil {
 		if errors.Is(err, setup.ErrBusy) || errors.Is(err, setup.ErrIneligible) || errors.Is(err, operation.ErrBusy) {
-			writeJSON(w, http.StatusConflict, state)
+			writeJSON(w, http.StatusConflict, projectSetupState(state))
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error(), "setup")
+		writeError(w, http.StatusInternalServerError, safeExternalError(err, "RoboRev setup could not be retried"), "setup")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, state)
+	writeJSON(w, http.StatusAccepted, projectSetupState(state))
 }
 
 func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
@@ -531,7 +616,7 @@ func (s *Server) mutation(next http.HandlerFunc) http.HandlerFunc {
 		}
 		release, err := s.Gate.AcquireMutation()
 		if err != nil {
-			writeError(w, http.StatusConflict, err.Error(), "operation")
+			writeError(w, http.StatusConflict, safeExternalError(err, "another Dashboard operation is active"), "operation")
 			return
 		}
 		defer release()
@@ -651,6 +736,36 @@ func writeError(w http.ResponseWriter, status int, message, phase string) {
 	writeJSON(w, status, map[string]any{"error": message, "phase": phase})
 }
 
+// safeExternalError turns failures from Git, the daemon, and process-backed
+// adapters into a small browser-safe vocabulary.  Adapter errors are allowed
+// to retain private paths, command lines, and stderr, so handlers must never
+// serialize err.Error() directly.  Typed policy sentinels remain useful to
+// callers; all other diagnostics collapse to the handler's fixed fallback.
+func safeExternalError(err error, fallback string) string {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "request timed out"
+	case errors.Is(err, operation.ErrBusy):
+		return operation.ErrBusy.Error()
+	case errors.Is(err, roborev.ErrBindingChanged):
+		return "RoboRev binding changed; refresh and retry"
+	case errors.Is(err, roborev.ErrDaemonOffline):
+		return "RoboRev daemon is unavailable"
+	case errors.Is(err, roborev.ErrStatsOffline), errors.Is(err, roborev.ErrStatsUnhealthy):
+		return "RoboRev stats are temporarily unavailable"
+	case errors.Is(err, roborev.ErrUnsupportedAnalyze):
+		return "Analyze capability is unavailable"
+	case errors.Is(err, roborev.ErrUnsupportedJobMetadata):
+		return "RoboRev job metadata is unavailable"
+	case errors.Is(err, roborev.ErrMalformedJobMetadata):
+		return "RoboRev job metadata response is invalid"
+	case errors.Is(err, roborev.ErrJobMetadataNotFound):
+		return "job not found"
+	default:
+		return fallback
+	}
+}
+
 func decodeBody(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
@@ -711,7 +826,7 @@ func parseLazyContentID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 func (s *Server) repoForRequest(w http.ResponseWriter, path string) (string, bool) {
 	repo, err := s.Registry.Resolve(path)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
 		return "", false
 	}
 	return repo, true
@@ -726,7 +841,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	selectedIdentity, _ := s.Registry.Identity("")
-	installation := s.RoboRev.Installation(r.Context())
+	installation := projectInstallation(s.RoboRev.Installation(r.Context()))
 	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": s.csrfToken, "repositories": repositoryDTOs, "selectedRepository": s.Registry.Selected(), "selectedRepositoryIdentity": selectedIdentity, "roborev": installation})
 }
 
@@ -761,10 +876,15 @@ func (s *Server) listReviews(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.RoboRev.List(r.Context(), repo, limit)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "list")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review list is unavailable"), "list")
 		return
 	}
-	writeRawJSON(w, http.StatusOK, raw)
+	projected, err := projectReviewListForBrowser(raw)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "review list response is invalid", "list")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, projected)
 }
 
 func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
@@ -800,10 +920,15 @@ func (s *Server) showReview(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.RoboRev.Show(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "detail")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review detail is unavailable"), "detail")
 		return
 	}
-	writeRawJSON(w, http.StatusOK, raw)
+	projected, err := projectReviewDetailForBrowser(raw)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "review detail response is invalid", "detail")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, projected)
 }
 
 const lazyContentRequestTimeout = 15 * time.Second
@@ -912,7 +1037,7 @@ func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	resolved, err := s.Registry.Resolve(requestedRepo)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
 		return
 	}
 	metadata, err := s.RoboRev.JobMetadata(r.Context(), id)
@@ -926,17 +1051,17 @@ func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, err := s.Registry.Inspect(r.Context(), resolved)
 	if err != nil {
-		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		writeError(w, http.StatusConflict, safeExternalError(err, "repository state is unavailable"), "repository")
 		return
 	}
 	raw, err := s.RoboRev.Show(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "fix-prompt")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "Fix Prompt is unavailable"), "fix-prompt")
 		return
 	}
 	review, err := fixprompt.DecodeShow(raw)
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "fix-prompt")
+		writeError(w, http.StatusConflict, safeExternalError(err, "Fix Prompt response is invalid"), "fix-prompt")
 		return
 	}
 	if review.JobID != id || !gitx.SameRepositoryPath(review.RepositoryPath, metadata.RepoPath) || !gitx.SameRepositoryPath(review.RepositoryPath, repo.Path) {
@@ -949,7 +1074,7 @@ func (s *Server) showFixPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := fixprompt.Generate(review, fixprompt.RepositoryState{Path: repo.Path, Head: repo.Head})
 	if err != nil {
-		writeError(w, http.StatusConflict, err.Error(), "fix-prompt")
+		writeError(w, http.StatusConflict, safeExternalError(err, "Fix Prompt could not be generated"), "fix-prompt")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -976,14 +1101,25 @@ type panelMemberShow struct {
 }
 
 func (s *Server) panelMembers(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
 	_, _, raw, ok := s.loadPanelMembers(w, r)
 	if !ok {
 		return
 	}
-	writeRawJSON(w, http.StatusOK, raw)
+	projected, err := projectReviewListForBrowser(raw)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "panel members response is invalid", "panel-members")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, projected)
 }
 
 func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
 	id, ok := parseID(w, r)
 	if !ok {
 		return
@@ -1007,7 +1143,7 @@ func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.RoboRev.Show(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "panel-member-detail")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "panel member detail is unavailable"), "panel-member-detail")
 		return
 	}
 	if err := validatePanelMemberShow(raw, request, member); err != nil {
@@ -1015,10 +1151,15 @@ func (s *Server) panelMember(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errPanelDetailMalformed) {
 			status = http.StatusBadGateway
 		}
-		writeError(w, status, err.Error(), "panel-member-detail")
+		writeError(w, status, safeExternalError(err, "panel member detail is invalid"), "panel-member-detail")
 		return
 	}
-	writeRawJSON(w, http.StatusOK, raw)
+	projected, err := projectReviewDetailForBrowser(raw)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "panel member detail response is invalid", "panel-member-detail")
+		return
+	}
+	writeRawJSON(w, http.StatusOK, projected)
 }
 
 func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panelMembersRequest, []roborev.JobMetadata, json.RawMessage, bool) {
@@ -1028,7 +1169,7 @@ func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panel
 	}
 	raw, err := s.RoboRev.PanelMembers(r.Context(), request.run)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "panel members are unavailable"), "panel-members")
 		return panelMembersRequest{}, nil, nil, false
 	}
 	jobs, err := decodePanelMemberList(raw)
@@ -1036,7 +1177,7 @@ func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panel
 		if errors.Is(err, errPanelRunNotFound) {
 			writeError(w, http.StatusNotFound, "panel run not found", "panel-members")
 		} else {
-			writeError(w, http.StatusBadGateway, err.Error(), "panel-members")
+			writeError(w, http.StatusBadGateway, safeExternalError(err, "panel members response is invalid"), "panel-members")
 		}
 		return panelMembersRequest{}, nil, nil, false
 	}
@@ -1048,7 +1189,11 @@ func (s *Server) loadPanelMembers(w http.ResponseWriter, r *http.Request) (panel
 		case errors.Is(err, errPanelMalformed):
 			status = http.StatusBadGateway
 		}
-		writeError(w, status, err.Error(), "panel-members")
+		message := "panel members response is invalid"
+		if errors.Is(err, errPanelForeignRepository) {
+			message = "panel belongs to an unauthorized repository"
+		}
+		writeError(w, status, safeExternalError(err, message), "panel-members")
 		return panelMembersRequest{}, nil, nil, false
 	}
 	return request, jobs, raw, true
@@ -1080,7 +1225,7 @@ func (s *Server) panelMembersRequest(w http.ResponseWriter, r *http.Request) (pa
 	repositoryID := strings.TrimSpace(values.Get("repositoryIdentity"))
 	repositoryPath, err := s.Registry.ResolveIdentity(repositoryID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
 		return panelMembersRequest{}, false
 	}
 	return panelMembersRequest{run: run, parentJobID: parentJobID, repositoryPath: repositoryPath}, true
@@ -1362,6 +1507,19 @@ func analysisErrorStatus(err error) int {
 	}
 }
 
+func analysisErrorMessage(err error) string {
+	var typed *analysis.Error
+	if errors.As(err, &typed) {
+		switch typed.Kind {
+		case analysis.ErrorInvalid:
+			return "invalid analysis request"
+		case analysis.ErrorUnavailable:
+			return "Analyze capability is unavailable"
+		}
+	}
+	return safeExternalError(err, "Analyze request failed")
+}
+
 func (s *Server) analysisTypes(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeStrictBrowserRead(w, r) {
 		return
@@ -1376,7 +1534,7 @@ func (s *Server) analysisTypes(w http.ResponseWriter, r *http.Request) {
 	}
 	types, err := s.Analyses.Types(r.Context())
 	if err != nil {
-		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-types")
+		writeError(w, analysisErrorStatus(err), analysisErrorMessage(err), "analysis-types")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -1403,7 +1561,7 @@ func (s *Server) analysisPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	prompt, err := s.Analyses.Prompt(r.Context(), query["type"])
 	if err != nil {
-		writeError(w, analysisErrorStatus(err), err.Error(), "analysis-prompt")
+		writeError(w, analysisErrorStatus(err), analysisErrorMessage(err), "analysis-prompt")
 		return
 	}
 	writeJSON(w, http.StatusOK, struct {
@@ -1501,7 +1659,7 @@ func (s *Server) cancelFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.Registry.ResolveIdentity(item.RepositoryIdentity); err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not authorized", "repository")
 		return
 	}
 	if err := s.Fixes.Cancel(item.ID); err != nil {
@@ -1530,14 +1688,14 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 		var leaseErr error
 		releaseReviewLease, leaseErr = s.Refines.AcquireReviewLease(path)
 		if leaseErr != nil {
-			writeError(w, http.StatusConflict, leaseErr.Error(), "repository")
+			writeError(w, http.StatusConflict, safeExternalError(leaseErr, "repository is busy"), "repository")
 			return
 		}
 		defer releaseReviewLease()
 	}
 	repo, err := s.Registry.Inspect(r.Context(), path)
 	if err != nil {
-		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		writeError(w, http.StatusConflict, safeExternalError(err, "repository state is unavailable"), "repository")
 		return
 	}
 	if strings.TrimSpace(body.Panel) == "" {
@@ -1546,7 +1704,7 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	}
 	catalog, err := s.Panels.Resolve(r.Context(), repo.Path)
 	if err != nil {
-		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
+		writeError(w, http.StatusConflict, safeExternalError(err, "panel configuration is unavailable"), "panel")
 		return
 	}
 	if _, ok := catalog.Find(body.Panel); !ok {
@@ -1556,20 +1714,25 @@ func (s *Server) createReview(w http.ResponseWriter, r *http.Request) {
 	request := roborev.ReviewRequest{RepoPath: repo.Path, GitRef: repo.Head, Branch: repo.Branch, Panel: body.Panel}
 	target, err := s.repositoryDTO(repo)
 	if err != nil {
-		writeError(w, http.StatusConflict, "repository identity is unavailable: "+err.Error(), "repository")
+		writeError(w, http.StatusConflict, "repository identity is unavailable", "repository")
 		return
 	}
 	ctx, cancel := mutationContext()
 	defer cancel()
 	receipt, err := s.RoboRev.Review(ctx, request)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "enqueue")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review could not be enqueued"), "enqueue")
+		return
+	}
+	projectedReceipt, err := projectReviewReceiptForBrowser(receipt)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "review enqueue receipt is invalid", "enqueue")
 		return
 	}
 	writeJSON(w, http.StatusCreated, struct {
 		Receipt json.RawMessage `json:"receipt"`
 		Target  RepositoryDTO   `json:"target"`
-	}{Receipt: receipt, Target: target})
+	}{Receipt: projectedReceipt, Target: target})
 }
 
 func (s *Server) startPanelRefine(w http.ResponseWriter, r *http.Request) {
@@ -1593,27 +1756,46 @@ func (s *Server) startPanelRefine(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listPanelRefines(w http.ResponseWriter, r *http.Request) {
-	if s.Refines == nil {
-		writeJSON(w, http.StatusOK, []*refine.PanelRefineRun{})
+	if !s.authorizeStrictBrowserRead(w, r) {
 		return
 	}
-	path := r.URL.Query().Get("repo")
-	if path == "" {
-		path = r.URL.Query().Get("repoPath")
+	query := r.URL.Query()
+	var path string
+	for _, key := range []string{"repo", "repoPath"} {
+		values, ok := query[key]
+		if !ok {
+			continue
+		}
+		if len(query) != 1 || len(values) != 1 {
+			writeError(w, http.StatusBadRequest, "exactly one repository query is required", "request")
+			return
+		}
+		path = strings.TrimSpace(values[0])
 	}
-	if strings.TrimSpace(path) == "" {
+	if len(query) != 1 || path == "" {
 		writeError(w, http.StatusBadRequest, "registered repository is required", "repository")
 		return
 	}
 	resolved, err := s.Registry.Resolve(path)
 	if err != nil {
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.Refines.ListResponse(resolved))
+	if s.Refines == nil {
+		writeJSON(w, http.StatusOK, panelRefineResponseDTO{Runs: []*panelRefineRunDTO{}, Options: panelRefineOptionsDTOFrom(refine.Options{})})
+		return
+	}
+	writeJSON(w, http.StatusOK, panelRefineResponseDTOFrom(s.Refines.ListResponse(resolved)))
 }
 
 func (s *Server) getPanelRefine(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStrictBrowserRead(w, r) {
+		return
+	}
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
+		return
+	}
 	if s.Refines == nil {
 		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
 		return
@@ -1627,10 +1809,17 @@ func (s *Server) getPanelRefine(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	writeJSON(w, http.StatusOK, panelRefineRunDTOFrom(run))
 }
 
 func (s *Server) cancelPanelRefine(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" {
+		writeError(w, http.StatusBadRequest, "query parameters are not accepted", "request")
+		return
+	}
+	if !requireEmptyBody(w, r) {
+		return
+	}
 	if s.Refines == nil {
 		writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
 		return
@@ -1646,14 +1835,14 @@ func (s *Server) cancelPanelRefine(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Refines.Cancel(r.PathValue("id")); err != nil {
 		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, err.Error(), "panel-refine")
+			writeError(w, http.StatusNotFound, "Panel Refine run not found", "panel-refine")
 		} else {
-			writeError(w, http.StatusConflict, err.Error(), "panel-refine")
+			writeError(w, http.StatusConflict, "Panel Refine cancellation could not be completed", "panel-refine")
 		}
 		return
 	}
 	run, _ = s.Refines.Get(r.PathValue("id"))
-	writeJSON(w, http.StatusAccepted, run)
+	writeJSON(w, http.StatusAccepted, panelRefineRunDTOFrom(run))
 }
 
 func resolvePanelState(identity string, catalog roborev.PanelCatalog, saved string, hasSaved bool) RepositoryPanels {
@@ -1693,7 +1882,7 @@ func (s *Server) panelState(ctx context.Context, path string) (RepositoryPanels,
 	}
 	catalog, err := s.Panels.Resolve(ctx, repo.Path)
 	if err != nil {
-		return RepositoryPanels{RepositoryIdentity: identity, Panels: []roborev.PanelInfo{}, Error: err.Error()}, nil
+		return RepositoryPanels{RepositoryIdentity: identity, Panels: []roborev.PanelInfo{}, Error: "panel configuration is unavailable"}, nil
 	}
 	saved, hasSaved, err := s.Registry.PanelSelection(repo.Path)
 	if err != nil {
@@ -1709,7 +1898,7 @@ func (s *Server) repositoryPanels(w http.ResponseWriter, r *http.Request) {
 	}
 	state, err := s.panelState(r.Context(), path)
 	if err != nil {
-		writeError(w, http.StatusConflict, "repository panels are unavailable: "+err.Error(), "panel")
+		writeError(w, http.StatusConflict, safeExternalError(err, "repository panels are unavailable"), "panel")
 		return
 	}
 	writeJSON(w, http.StatusOK, state)
@@ -1726,12 +1915,12 @@ func (s *Server) selectRepositoryPanel(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, err := s.Registry.Inspect(r.Context(), path)
 	if err != nil {
-		writeError(w, http.StatusConflict, "repository state is unavailable: "+err.Error(), "repository")
+		writeError(w, http.StatusConflict, safeExternalError(err, "repository state is unavailable"), "repository")
 		return
 	}
 	catalog, err := s.Panels.Resolve(r.Context(), repo.Path)
 	if err != nil {
-		writeError(w, http.StatusConflict, "panel configuration is unavailable: "+err.Error(), "panel")
+		writeError(w, http.StatusConflict, safeExternalError(err, "panel configuration is unavailable"), "panel")
 		return
 	}
 	if _, exists := catalog.Find(body.Panel); !exists {
@@ -1739,7 +1928,7 @@ func (s *Server) selectRepositoryPanel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Registry.SetPanelSelection(repo.Path, body.Panel); err != nil {
-		writeError(w, http.StatusInternalServerError, "save panel selection: "+err.Error(), "panel")
+		writeError(w, http.StatusInternalServerError, "panel selection could not be saved", "panel")
 		return
 	}
 	identity, _ := s.Registry.Identity(repo.Path)
@@ -1761,7 +1950,7 @@ func (s *Server) comment(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := mutationContext()
 	defer cancel()
 	if err := s.RoboRev.Comment(ctx, id, body.Comment); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "comment")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "comment could not be saved"), "comment")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -1782,11 +1971,11 @@ func (s *Server) commentClose(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := mutationContext()
 	defer cancel()
 	if err := s.RoboRev.Comment(ctx, id, body.Comment); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "comment")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "comment could not be saved"), "comment")
 		return
 	}
 	if err := s.RoboRev.Close(ctx, id, false); err != nil {
-		writeError(w, http.StatusBadGateway, "comment succeeded but close failed: "+err.Error(), "close")
+		writeError(w, http.StatusBadGateway, "comment succeeded but close could not be completed", "close")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -1805,7 +1994,7 @@ func (s *Server) closeOrReopen(w http.ResponseWriter, r *http.Request, reopen bo
 	ctx, cancel := mutationContext()
 	defer cancel()
 	if err := s.RoboRev.Close(ctx, id, reopen); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "close")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review could not be closed"), "close")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -1821,7 +2010,7 @@ func (s *Server) cancelReview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := mutationContext()
 	defer cancel()
 	if err := s.RoboRev.Cancel(ctx, id); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "cancel")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review could not be canceled"), "cancel")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -1856,11 +2045,22 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "Guideline Insights requires a fresh preview and explicit confirmation; generic rerun is unavailable", "insights-rerun-unsupported")
 		return
 	}
+	// The generic endpoint is a frozen review replay surface.  Keep the
+	// historical empty type for old rows, but do not let newly introduced job
+	// kinds (Fix, Compact, Analyze, Classify, or arbitrary tasks) inherit this
+	// authority by accident.
+	switch strings.TrimSpace(job.JobType) {
+	case "", "review", "range", "dirty", "synthesis":
+		// supported historical review-like rows
+	default:
+		writeError(w, http.StatusConflict, "generic rerun is unavailable for this job type", "rerun-unsupported")
+		return
+	}
 	var releaseReviewLease func()
 	if s.Refines != nil {
 		releaseReviewLease, err = s.Refines.AcquireReviewLease(job.RepoPath)
 		if err != nil {
-			writeError(w, http.StatusConflict, err.Error(), "repository")
+			writeError(w, http.StatusConflict, safeExternalError(err, "repository is busy"), "repository")
 			return
 		}
 		defer releaseReviewLease()
@@ -1868,7 +2068,7 @@ func (s *Server) rerunReview(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := mutationContext()
 	defer cancel()
 	if err := s.RoboRev.Rerun(ctx, id); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error(), "rerun")
+		writeError(w, http.StatusBadGateway, safeExternalError(err, "review rerun could not be started"), "rerun")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]bool{"success": true})
@@ -1881,12 +2081,12 @@ func (s *Server) addRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	repo, err := s.Registry.Add(r.Context(), body.RepoPath)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "repository")
+		writeError(w, http.StatusBadRequest, safeExternalError(err, "repository could not be registered"), "repository")
 		return
 	}
 	dto, err := s.repositoryDTO(repo)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "repository identity is unavailable: "+err.Error(), "repository")
+		writeError(w, http.StatusInternalServerError, "repository identity is unavailable", "repository")
 		return
 	}
 	writeJSON(w, http.StatusCreated, dto)
@@ -1898,10 +2098,10 @@ func (s *Server) selectRepository(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Registry.SelectContext(r.Context(), body.RepoPath); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			writeError(w, http.StatusRequestTimeout, err.Error(), "repository")
+			writeError(w, http.StatusRequestTimeout, "repository selection timed out", "repository")
 			return
 		}
-		writeError(w, http.StatusForbidden, err.Error(), "repository")
+		writeError(w, http.StatusForbidden, "repository is not registered", "repository")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
@@ -1922,6 +2122,13 @@ func spaHandler() http.Handler {
 		_, _ = w.Write(data)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The SPA fallback is only for browser routes. An unknown API path must
+		// never be turned into a successful HTML document: callers need a
+		// machine-readable, path-free 404 instead.
+		if r.URL != nil && (r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")) {
+			writeError(w, http.StatusNotFound, "API route not found", "not-found")
+			return
+		}
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" || path == "index.html" {
 			serveIndex(w)

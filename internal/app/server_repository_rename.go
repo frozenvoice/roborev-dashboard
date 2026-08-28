@@ -17,7 +17,10 @@ import (
 	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
-const repositoryRenamePreviewTTL = 3 * time.Minute
+const (
+	repositoryRenamePreviewTTL = 3 * time.Minute
+	repositoryRenamePreviewMax = 64
+)
 
 type repositoryRenamePreviewBody struct {
 	Path    *string `json:"path"`
@@ -54,7 +57,21 @@ func (s *repositoryRenamePreviewStore) put(record repositoryRenamePreviewRecord)
 	token := hex.EncodeToString(bytes)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expireLocked(time.Now())
+	now := time.Now()
+	s.expireLocked(now)
+	for len(s.pending) >= repositoryRenamePreviewMax {
+		oldest := ""
+		var oldestExpiry time.Time
+		for candidate, pending := range s.pending {
+			if oldest == "" || pending.ExpiresAt.Before(oldestExpiry) || (pending.ExpiresAt.Equal(oldestExpiry) && candidate < oldest) {
+				oldest, oldestExpiry = candidate, pending.ExpiresAt
+			}
+		}
+		if oldest == "" {
+			break
+		}
+		delete(s.pending, oldest)
+	}
 	s.pending[token] = record
 	return token, nil
 }
@@ -98,7 +115,7 @@ func (s *repositoryRenamePreviewStore) release(path string) {
 
 func (s *repositoryRenamePreviewStore) expireLocked(now time.Time) {
 	for token, record := range s.pending {
-		if now.After(record.ExpiresAt) {
+		if !now.Before(record.ExpiresAt) {
 			delete(s.pending, token)
 		}
 	}
@@ -172,7 +189,7 @@ func (s *Server) repositoryRenamePreview(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "prepare repository rename", "rename")
 		return
 	}
-	writeJSON(w, http.StatusOK, repositoryRenamePreviewDTO{Path: target.RootPath, CurrentName: target.Name, NewName: newName, JobCount: target.Count, DashboardRegistered: s.Registry.Contains(target.RootPath), Command: repositoryRenameCommandDTO{Executable: preflight.Command.Executable, Args: append([]string(nil), preflight.Command.Args...)}, Token: token, ExpiresAt: expires})
+	writeJSON(w, http.StatusOK, repositoryRenamePreviewDTO{Path: target.RootPath, CurrentName: target.Name, NewName: newName, JobCount: target.Count, DashboardRegistered: s.Registry.Contains(target.RootPath), Command: repositoryRenameCommandDTO{Executable: "roborev", Args: append([]string(nil), preflight.Command.Args...)}, Token: token, ExpiresAt: expires})
 }
 
 func (s *Server) repositoryRenameConfirm(w http.ResponseWriter, r *http.Request) {
@@ -305,5 +322,20 @@ func writeRepositoryRenameError(w http.ResponseWriter, err error) {
 	case errors.Is(err, reporename.ErrInvalidName), errors.Is(err, reporename.ErrSameName):
 		status = http.StatusBadRequest
 	}
-	writeError(w, status, err.Error(), "repository-rename")
+	message := "Repository rename process failed."
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		message = "Repository rename timed out."
+	case errors.Is(err, roborev.ErrRepositoryRenameOffline), errors.Is(err, roborev.ErrRepositoryRenameUnhealthy), errors.Is(err, roborev.ErrUnsupportedRepositoryRename):
+		message = "Repository rename is unavailable."
+	case errors.Is(err, roborev.ErrBindingChanged):
+		message = "Repository rename binding changed; refresh and try again."
+	case errors.Is(err, roborev.ErrRepositoryRenameStale), errors.Is(err, roborev.ErrRepositoryRenameAmbiguous):
+		message = "Repository rename preview is stale; refresh and try again."
+	case errors.Is(err, reporename.ErrInvalidName):
+		message = "Repository name is invalid."
+	case errors.Is(err, reporename.ErrSameName):
+		message = "Repository already has that name."
+	}
+	writeError(w, status, message, "repository-rename")
 }

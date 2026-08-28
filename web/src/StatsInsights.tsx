@@ -1,6 +1,6 @@
 import { RefreshCw, TriangleAlert } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { request, type StatsBranchScope, type StatsCostResponse, type StatsSummaryResponse, type StatsWindow } from './api'
+import { normalizeStatsCostResponse, normalizeStatsSummaryResponse, request, type StatsBranchScope, type StatsCostResponse, type StatsSummaryResponse, type StatsWindow } from './api'
 import { useI18n } from './i18n'
 import { GuidelineInsights } from './GuidelineInsights'
 
@@ -64,12 +64,14 @@ export function StatsInsights({ selectedRepositoryIdentity, repositoryName, capa
     if (fetchUnavailable || !summarySupported) { setSummary({ status: 'unavailable', data: null, error: '' }); return }
     setSummary(old => ({ ...old, status: 'loading', error: '' }))
     const path = `/api/stats/summary?repositoryIdentity=${encodeURIComponent(selectedRepositoryIdentity)}&window=${windowValue}&branchScope=${branchScope}`
-    void request<StatsSummaryResponse>(path, { signal: controller.signal }).then(data => {
-      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, summaryGeneration.current) || data.repositoryIdentity !== selectedRepositoryIdentity || data.window !== windowValue || data.branchScope !== branchScope) return
+    void request<unknown>(path, { signal: controller.signal }).then(value => {
+      const data = normalizeStatsSummaryResponse(value, selectedRepositoryIdentity)
+      if (!data) throw new Error('Invalid Stats summary response')
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, summaryGeneration.current) || data.window !== windowValue || data.branchScope !== branchScope) return
       setSummary({ status: 'success', data, error: '' })
     }).catch(error => {
       if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, summaryGeneration.current)) return
-      setSummary({ status: 'error', data: null, error: (error as Error).message })
+      setSummary({ status: 'error', data: null, error: safeStatsError(error, 'Stats summary could not be loaded') })
     })
   }, [branchScope, fetchUnavailable, selectedRepositoryIdentity, summarySupported, windowValue])
 
@@ -82,12 +84,14 @@ export function StatsInsights({ selectedRepositoryIdentity, repositoryName, capa
     if (fetchUnavailable || !costSupported) { setCost({ status: 'unavailable', data: null, error: '' }); return }
     setCost(old => ({ ...old, status: 'loading', error: '' }))
     const path = `/api/stats/cost?repositoryIdentity=${encodeURIComponent(selectedRepositoryIdentity)}&branchScope=${branchScope}`
-    void request<StatsCostResponse>(path, { signal: controller.signal }).then(data => {
-      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, costGeneration.current) || data.repositoryIdentity !== selectedRepositoryIdentity || data.branchScope !== branchScope) return
+    void request<unknown>(path, { signal: controller.signal }).then(value => {
+      const data = normalizeStatsCostResponse(value, selectedRepositoryIdentity)
+      if (!data) throw new Error('Invalid Stats cost response')
+      if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, costGeneration.current) || data.branchScope !== branchScope) return
       setCost({ status: 'success', data, error: '' })
     }).catch(error => {
       if (!statsCompletionAllowed(suspendedRef.current, controller.signal.aborted, generation, costGeneration.current)) return
-      setCost({ status: 'error', data: null, error: (error as Error).message })
+      setCost({ status: 'error', data: null, error: safeStatsError(error, 'Stats cost could not be loaded') })
     })
   }, [branchScope, costSupported, fetchUnavailable, selectedRepositoryIdentity])
 
@@ -134,6 +138,12 @@ export function StatsInsights({ selectedRepositoryIdentity, repositoryName, capa
     </>}
     {totalJobs === 0 && summary.status === 'success' && <p className="stats-empty">{t('stats.empty')}</p>}
   </section>
+}
+
+function safeStatsError(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message : ''
+  if (!message || message.length > 256 || /[\\/]/.test(message) || /(?:repo_path|repository_path|private|secret)/i.test(message)) return fallback
+  return message
 }
 
 export { formatDuration }

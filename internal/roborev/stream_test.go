@@ -67,17 +67,11 @@ func TestOpenStreamCapabilityAndHealthyDaemonGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.StreamRunner = streams
-	if _, err := client.OpenStream(context.Background(), `C:\registered repo`); err != nil {
-		t.Fatal(err)
+	if _, err := client.OpenStream(context.Background(), `C:\registered repo`); !errors.Is(err, ErrStreamUnsupported) {
+		t.Fatalf("err=%v, want unsupported", err)
 	}
-	streams.mu.Lock()
-	command := streams.command
-	streams.mu.Unlock()
-	if !equalStrings(command.Args, []string{"stream", "--repo", `C:\registered repo`}) || command.Executable != `C:\trusted\roborev.exe` || command.Dir != "" {
-		t.Fatalf("command=%#v", command)
-	}
-	if streams.calls != 1 {
-		t.Fatalf("stream calls=%d", streams.calls)
+	if streams.calls != 0 {
+		t.Fatalf("stream calls=%d, want zero", streams.calls)
 	}
 }
 
@@ -101,7 +95,7 @@ func TestOpenStreamUnsupportedAndOfflineNeverSpawns(t *testing.T) {
 		t.Fatal(err)
 	}
 	offlineClient.StreamRunner = streamRunner
-	if _, err := offlineClient.OpenStream(context.Background(), `C:\repo`); !errors.Is(err, ErrStreamOffline) {
+	if _, err := offlineClient.OpenStream(context.Background(), `C:\repo`); !errors.Is(err, ErrStreamUnsupported) {
 		t.Fatalf("offline err=%v", err)
 	}
 	if streamRunner.calls != 0 {
@@ -121,7 +115,7 @@ func TestOpenStreamRequiresExactMatchingSupportedDaemonVersion(t *testing.T) {
 		{name: "daemon empty", cliVersion: "v0.64.0", daemonVersion: "", healthy: true, want: ErrStreamUnsupported},
 		{name: "daemon malformed", cliVersion: "v0.64.0", daemonVersion: "64", healthy: true, want: ErrStreamUnsupported},
 		{name: "daemon whitespace is not canonical", cliVersion: "v0.64.0", daemonVersion: " v0.64.0 ", healthy: true, want: ErrStreamUnsupported},
-		{name: "daemon unhealthy", cliVersion: "v0.64.0", daemonVersion: "v0.64.0", healthy: false, want: ErrStreamUnhealthy},
+		{name: "daemon unhealthy", cliVersion: "v0.64.0", daemonVersion: "v0.64.0", healthy: false, want: ErrStreamUnsupported},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

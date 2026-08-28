@@ -1,5 +1,5 @@
 import { Check, CircleStop, ShieldCheck, XCircle } from 'lucide-react'
-import { type PanelConfiguration, type PanelRefineIteration, type PanelRefineOptions, type PanelRefinePhase, type PanelRefineRun } from './api'
+import { type PanelConfiguration, type PanelRefineErrorCode, type PanelRefineIteration, type PanelRefineOptions, type PanelRefinePhase, type PanelRefineRun, type PanelRefineStopReason } from './api'
 import { useI18n } from './i18n'
 
 type RefineStart = { repoPath: string; panel: string; fixAgent: 'codex'; maxFixAttempts: number; finalPanel?: string }
@@ -66,18 +66,18 @@ function finalPanelResult(run: PanelRefineRun, t: ReturnType<typeof useI18n>['t'
   if (!run.finalPanel) return t('panel.notConfigured')
   const iteration = [...run.iterations].reverse().find(item => item.panel === run.finalPanel)
   if (!iteration) return t('panel.notRun')
-  return iteration.error ? t('panel.failed') : reviewResultLabel(reviewResult(iteration.reviewResult), t)
+  return iteration.errorCode ? t('panel.failed') : reviewResultLabel(reviewResult(iteration.reviewResult), t)
 }
 function PhasePill({ phase }: { phase: PanelRefinePhase }) {
   const { t } = useI18n()
   return <span className={`refine-phase ${phaseTone(phase)}`}><span className="status-dot" />{phaseLabel(phase, t)}</span>
 }
 
-function isCancellationError(error?: string) { return Boolean(error && /cancel(?:led|ed)|context (?:done|cancel)/i.test(error)) }
+function isCancellationError(errorCode?: PanelRefineErrorCode) { return errorCode === undefined ? false : errorCode === 'repository_state_unavailable' }
 function iterationResult(item: PanelRefineIteration) {
   if (item.reviewResult === 'P' || item.reviewResult === 'pass' || item.reviewResult === 'passed') return 'Pass'
   if (item.reviewResult === 'F' || item.reviewResult === 'fail' || item.reviewResult === 'failed') return 'Finding'
-  if (item.error) return isCancellationError(item.error) ? 'Cancelled' : 'Error'
+  if (item.errorCode) return isCancellationError(item.errorCode) ? 'Cancelled' : 'Error'
   return 'Pending'
 }
 function iterationTone(item: PanelRefineIteration) {
@@ -93,11 +93,17 @@ function IterationRow({ item, fixAttemptNumber, onOpenReview }: { item: PanelRef
   const result = iterationResult(item)
   return <li className="refine-timeline-item">
     <span className={'refine-timeline-mark ' + iterationTone(item)}>{result === 'Pass' ? <Check size={13} /> : result === 'Finding' || result === 'Error' ? <XCircle size={13} /> : result === 'Cancelled' ? <CircleStop size={13} /> : <span />}</span>
-    <div><strong>{item.panel}</strong><span>{t('panel.reviewAt', { head: item.targetHead ? head(item.targetHead) : '—' })} · {reviewResultLabel(result, t)}</span>{item.fixAttempted && <span>{t('panel.fixAt', { attempt: fixAttemptNumber ?? '—', agent: item.fixAgent || 'codex' })}{item.headAfterFix ? ' · ' + head(item.headAfterFix) : ''}</span>}{item.error && <small className="refine-error">{item.error}</small>}</div>
+    <div><strong>{item.panel}</strong><span>{t('panel.reviewAt', { head: item.targetHead ? head(item.targetHead) : '—' })} · {reviewResultLabel(result, t)}</span>{item.fixAttempted && <span>{t('panel.fixAt', { attempt: fixAttemptNumber ?? '—', agent: item.fixAgent || 'codex' })}{item.headAfterFix ? ' · ' + head(item.headAfterFix) : ''}</span>}{item.errorCode && <small className="refine-error">{result === 'Cancelled' ? t('status.canceled') : t('panel.failed')}</small>}</div>
     {item.reviewJobID && <button className="button ghost compact" onClick={() => onOpenReview?.(item.reviewJobID!)}>{t('panel.openReview')}</button>}
   </li>
 }
-function isActivePhase(item: PanelRefineIteration) { return !item.reviewResult && !item.error }
+function isActivePhase(item: PanelRefineIteration) { return !item.reviewResult && !item.errorCode }
+
+function runReasonLabel(run: PanelRefineRun, t: ReturnType<typeof useI18n>['t']) {
+  if (run.errorCode) return t('panel.failed')
+  if (run.stopReason === 'cancelled') return t('status.canceled')
+  return t('panel.needsAttention')
+}
 
 export function PanelRefine({ repoPath, panelConfiguration, options, run, available = true, disabledReason = '', loading = false, error = '', busy = false, onStart, onCancel, onOpenReview }: PanelRefineProps) {
   const { t } = useI18n()
@@ -108,13 +114,13 @@ export function PanelRefine({ repoPath, panelConfiguration, options, run, availa
     <p className="refine-disabled-reason" role="status" id="panel-refine-disabled-reason">{t('panel.executionDisabled')}</p>
     {!available && disabledReason && <p className="refine-disabled-reason" role="status">{t('panel.refineUnavailable', { reason: disabledReason })}</p>}
     <div className="section-heading refine-heading"><div><span className="eyebrow">{t('panel.automatedGate')}</span><h2>Panel Refine</h2><p>{t('panel.description')}</p></div><button className="button primary" type="button" disabled aria-describedby="panel-refine-disabled-reason"><ShieldCheck size={16} />{t('panel.executionDisabledCta')}</button></div>
-    {error && <p className="refine-inline-error" role="alert">{t('panel.refreshedError', { error })}</p>}
+    {error && <p className="refine-inline-error" role="alert">{t('panel.refreshedError', { error: t('panel.failed') })}</p>}
     {loading && !run && <div className="skeleton" />}
     {run && <article className={`refine-card ${phaseTone(run.phase)}`}>
       <header className="refine-card-header"><div><span className="eyebrow">{t('panel.run', { id: run.id })}</span><h3>{title}</h3></div><PhasePill phase={run.phase} /></header>
       <div className="refine-grid"><span><strong>{t('panel.totalReviews')}</strong>{run.iterations.length}</span><span><strong>{t('panel.fixAttempts')}</strong>{run.fixAttempts} / {run.maxFixAttempts}</span><span><strong>{t('panel.iterationPanel')}</strong>{run.iterationPanel}</span><span><strong>{t('panel.finalPanel')}</strong>{run.finalPanel || t('panel.none')}</span><span><strong>{t('panel.finalResult')}</strong>{finalPanelResult(run, t)}</span><span><strong>{t('panel.fixAgent')}</strong>{run.fixAgent}</span><span><strong>{t('panel.startedHead')}</strong><code>{head(run.startingHead)}</code></span><span><strong>{t('panel.currentHead')}</strong><code>{head(run.currentHead)}</code></span>{terminal && <span><strong>{t('panel.elapsed')}</strong>{durationLabel(run.startedAt, run.completedAt)}</span>}{run.currentReviewJobID && <span><strong>{t('panel.currentReview')}</strong><button className="link-button" onClick={() => onOpenReview?.(run.currentReviewJobID!)}>#{run.currentReviewJobID}</button></span>}</div>
-      {(run.error || run.stopReason) && <p className="refine-reason" role="alert">{run.error || run.stopReason}</p>}
-      {run.cancelState && <div className="refine-cancel-state" role="status"><strong>{t('panel.cancelState')}</strong>{run.cancelState.available ? <span>HEAD: {head(run.cancelState.head)} · {t('panel.branch')}: {run.cancelState.branch || '—'} · {run.cancelState.dirty ? t('panel.dirtyTree') : t('panel.cleanTree')}</span> : <span>{t('panel.branchStateUnavailable')}</span>}{run.cancelState.error && <small>{run.cancelState.error}</small>}{!run.cancelState.available ? <b>{t('panel.warningFinalState')}</b> : run.cancelState.dirty && <b>{t('panel.warningPartialChanges')}</b>}</div>}
+      {(run.errorCode || run.stopReason) && <p className="refine-reason" role="alert">{runReasonLabel(run, t)}</p>}
+      {run.cancelState && <div className="refine-cancel-state" role="status"><strong>{t('panel.cancelState')}</strong>{run.cancelState.available ? <span>HEAD: {head(run.cancelState.head)} · {t('panel.branch')}: {run.cancelState.branch || '—'} · {run.cancelState.dirty ? t('panel.dirtyTree') : t('panel.cleanTree')}</span> : <span>{t('panel.branchStateUnavailable')}</span>}{run.cancelState.errorCode && <small>{t('panel.branchStateUnavailable')}</small>}{!run.cancelState.available ? <b>{t('panel.warningFinalState')}</b> : run.cancelState.dirty && <b>{t('panel.warningPartialChanges')}</b>}</div>}
       <div className="refine-timeline"><strong>{t('panel.timeline')}</strong><ol>{run.iterations.map((item, index) => <IterationRow key={item.number + '-' + index} item={item} fixAttemptNumber={item.fixAttempted ? run.iterations.slice(0, index + 1).filter(candidate => candidate.fixAttempted).length : undefined} onOpenReview={onOpenReview} />)}</ol></div>
       <footer className="refine-card-actions">{terminal && run.currentReviewJobID && <button className="button" onClick={() => onOpenReview?.(run.currentReviewJobID!)}>{run.phase === 'passed' ? t('panel.openFinalReview') : t('panel.openLatestReview')}</button>}{active && <button className="button danger" disabled={busy} onClick={() => { void onCancel(run.id).catch(() => undefined) }}><CircleStop size={15} />{t('panel.cancel')}</button>}</footer>
     </article>}

@@ -229,3 +229,42 @@ func TestGenericRerunAuthorizesRepositoryBeforeTaskPolicy(t *testing.T) {
 		t.Fatalf("Rerun calls = %d", service.rerunCalls)
 	}
 }
+
+func TestGenericRerunRejectsNonReviewLikeJobTypes(t *testing.T) {
+	for _, jobType := range []string{"fix", "compact", "insights", "classify", "unknown", "REVIEW"} {
+		t.Run(jobType, func(t *testing.T) {
+			server, service := setupTaskServer(t)
+			service.fakeService.panelMetadata = map[int64]roborev.JobMetadata{
+				42: {ID: 42, RepoPath: `E:\repo`, GitRef: "abcdef", Branch: "main", JobType: jobType, Status: "done"},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/reviews/42/rerun", nil)
+			req.Header.Set("X-CSRF-Token", server.csrfToken)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusConflict || service.rerunCalls != 0 {
+				t.Fatalf("job type %q status=%d reruns=%d body=%s", jobType, recorder.Code, service.rerunCalls, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), "unsupported") {
+				t.Fatalf("unsupported policy missing: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestGenericRerunPreservesHistoricalReviewLikeTypes(t *testing.T) {
+	for _, jobType := range []string{"", " ", "review", "range", "dirty", "synthesis"} {
+		t.Run(strings.TrimSpace(jobType), func(t *testing.T) {
+			server, service := setupTaskServer(t)
+			service.fakeService.panelMetadata = map[int64]roborev.JobMetadata{
+				42: {ID: 42, RepoPath: `E:\repo`, GitRef: "abcdef", Branch: "main", JobType: jobType, Status: "done"},
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/reviews/42/rerun", nil)
+			req.Header.Set("X-CSRF-Token", server.csrfToken)
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusCreated || service.rerunCalls != 1 {
+				t.Fatalf("job type %q status=%d reruns=%d body=%s", jobType, recorder.Code, service.rerunCalls, recorder.Body.String())
+			}
+		})
+	}
+}

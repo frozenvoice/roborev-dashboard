@@ -78,7 +78,7 @@ func agentCheckRequestBody(t *testing.T, agent, identity string) string {
 
 func TestAgentsEndpointIsZeroQuotaAndReturnsOnlySafeConfiguredSubset(t *testing.T) {
 	server, checker := agentTestServer(t)
-	request := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/agents")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -87,7 +87,7 @@ func TestAgentsEndpointIsZeroQuotaAndReturnsOnlySafeConfiguredSubset(t *testing.
 	if checker.calls != 0 {
 		t.Fatalf("GET agents ran a quota-consuming health check %d times", checker.calls)
 	}
-	if strings.Contains(recorder.Body.String(), "SECRET_") || strings.Contains(recorder.Body.String(), "anthropic") || strings.Contains(recorder.Body.String(), "instructions") {
+	if strings.Contains(recorder.Body.String(), "SECRET_") || strings.Contains(recorder.Body.String(), "anthropic") || strings.Contains(recorder.Body.String(), "instructions") || strings.Contains(recorder.Body.String(), "claude-custom") || strings.Contains(recorder.Body.String(), `C:\\fake\\claude.exe`) {
 		t.Fatalf("agent response exposed secret config: %s", recorder.Body.String())
 	}
 	var response agentsDTO
@@ -98,19 +98,20 @@ func TestAgentsEndpointIsZeroQuotaAndReturnsOnlySafeConfiguredSubset(t *testing.
 		t.Fatalf("agents response = %#v", response)
 	}
 	agent := response.Configured[0]
-	if agent.Name != "claude" || agent.Agent != "claude-code" || agent.Command != "claude-custom" || !agent.Detected || agent.ResolvedPath == "" || agent.Health != "not_checked" {
+	if agent.Name != "claude" || agent.Agent != "claude-code" || agent.Command != backendAgentCommandSentinel || !agent.Detected || agent.Health != "not_checked" {
 		t.Fatalf("configured agent = %#v", agent)
 	}
 }
 
 func TestAgentHealthRequiresMutationAuthorizationAndStrictCanonicalBody(t *testing.T) {
 	server, checker := agentTestServer(t)
+	service := server.RoboRev.(*fakeService)
 
 	request := httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(`{"agent":"claude-code"}`))
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusForbidden || checker.calls != 0 {
-		t.Fatalf("missing CSRF = %d, calls=%d", recorder.Code, checker.calls)
+	if recorder.Code != http.StatusForbidden || checker.calls != 0 || service.installationCalls != 0 {
+		t.Fatalf("missing CSRF = %d, calls=%d installation=%d", recorder.Code, checker.calls, service.installationCalls)
 	}
 
 	for _, body := range []string{`{"agent":"claude"}`, `{"agent":"unknown","repositoryIdentity":"repo"}`, `{"agent":"claude-code","repositoryIdentity":"repo","command":"evil"}`, `{"agent":"claude-code","repositoryIdentity":"repo","prompt":"evil"}`} {
@@ -118,17 +119,25 @@ func TestAgentHealthRequiresMutationAuthorizationAndStrictCanonicalBody(t *testi
 		request.Header.Set("X-CSRF-Token", server.csrfToken)
 		recorder = httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusBadRequest || checker.calls != 0 {
-			t.Fatalf("unsafe health body %s = %d, calls=%d", body, recorder.Code, checker.calls)
+		if recorder.Code != http.StatusBadRequest || checker.calls != 0 || service.installationCalls != 0 {
+			t.Fatalf("unsafe health body %s = %d, calls=%d installation=%d", body, recorder.Code, checker.calls, service.installationCalls)
 		}
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/agents/check?unexpected=1", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo`))))
+	request.Header.Set("X-CSRF-Token", server.csrfToken)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || checker.calls != 0 || service.installationCalls != 0 {
+		t.Fatalf("queryful health = %d, calls=%d installation=%d", recorder.Code, checker.calls, service.installationCalls)
 	}
 
 	request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo`))))
 	request.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK || checker.calls != 1 || checker.agent != "claude-code" || checker.repo != `E:\repo` {
-		t.Fatalf("authorized health = %d, calls=%d agent=%q repo=%q body=%s", recorder.Code, checker.calls, checker.agent, checker.repo, recorder.Body.String())
+	if recorder.Code != http.StatusOK || checker.calls != 1 || service.installationCalls != 1 || checker.agent != "claude-code" || checker.repo != `E:\repo` {
+		t.Fatalf("authorized health = %d, calls=%d installation=%d agent=%q repo=%q body=%s", recorder.Code, checker.calls, service.installationCalls, checker.agent, checker.repo, recorder.Body.String())
 	}
 }
 
@@ -424,13 +433,13 @@ func TestAgentEndpointsFailClosedOutsidePinnedRoboRevVersion(t *testing.T) {
 	}
 	checker := &appHealthChecker{}
 	server.Agents = agentstatus.NewServiceWithSeams(nil, checker, appAgentResolver{}, appIdentityProbe{})
-	request := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	request := strictBrowserReadRequest(http.MethodGet, "/api/agents")
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusServiceUnavailable || checker.calls != 0 {
 		t.Fatalf("unsupported GET agents = %d calls=%d", recorder.Code, checker.calls)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(`{"agent":"claude"}`))
+	request = httptest.NewRequest(http.MethodPost, "/api/agents/check", strings.NewReader(agentCheckRequestBody(t, "claude", gitx.RepositoryKey(`E:\repo`))))
 	request.Header.Set("X-CSRF-Token", server.csrfToken)
 	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)

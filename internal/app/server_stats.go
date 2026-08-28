@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -21,10 +22,51 @@ const (
 var errStatsUnavailable = errors.New("Stats are unavailable")
 
 type statsSummaryResponse struct {
-	RepositoryIdentity string        `json:"repositoryIdentity"`
-	Window             string        `json:"window"`
-	BranchScope        string        `json:"branchScope"`
-	Summary            stats.Summary `json:"summary"`
+	RepositoryIdentity string                 `json:"repositoryIdentity"`
+	Window             string                 `json:"window"`
+	BranchScope        string                 `json:"branchScope"`
+	Summary            statsSummaryBrowserDTO `json:"summary"`
+}
+
+// statsSummaryBrowserDTO is an explicit browser projection. RoboRev's
+// summary includes repo_path and per-repository path fields even when the
+// request is already scoped to one authorized repository; those paths stay
+// server-side. Aggregate names and counts remain useful to the dashboard,
+// but no upstream path-bearing DTO crosses this boundary.
+type statsSummaryBrowserDTO struct {
+	Schema   string             `json:"$schema,omitempty"`
+	Since    time.Time          `json:"since"`
+	Branch   string             `json:"branch,omitempty"`
+	Overview stats.Overview     `json:"overview"`
+	Verdicts stats.Verdicts     `json:"verdicts"`
+	Agents   []stats.Agent      `json:"agents"`
+	Duration stats.Duration     `json:"duration"`
+	JobTypes []stats.JobType    `json:"job_types"`
+	Failures stats.Failures     `json:"failures"`
+	Repos    []statsBrowserRepo `json:"repos,omitempty"`
+	Cost     stats.Cost         `json:"cost"`
+}
+
+type statsBrowserRepo struct {
+	Name      string `json:"name"`
+	Total     int    `json:"total"`
+	Passed    int    `json:"passed"`
+	Failed    int    `json:"failed"`
+	Addressed int    `json:"addressed"`
+}
+
+func browserStatsSummary(summary stats.Summary) statsSummaryBrowserDTO {
+	repos := make([]statsBrowserRepo, 0, len(summary.Repos))
+	for _, repo := range summary.Repos {
+		repos = append(repos, statsBrowserRepo{Name: repo.Name, Total: repo.Total, Passed: repo.Passed, Failed: repo.Failed, Addressed: repo.Addressed})
+	}
+	return statsSummaryBrowserDTO{
+		Schema: summary.Schema, Since: summary.Since, Branch: summary.Branch,
+		Overview: summary.Overview, Verdicts: summary.Verdicts,
+		Agents: append([]stats.Agent(nil), summary.Agents...), Duration: summary.Duration,
+		JobTypes: append([]stats.JobType(nil), summary.JobTypes...), Failures: summary.Failures,
+		Repos: repos, Cost: summary.Cost,
+	}
 }
 
 type statsCostResponse struct {
@@ -62,7 +104,7 @@ func (s *Server) statsSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, errStatsUnavailable.Error(), "stats")
 		return
 	}
-	writeJSON(w, http.StatusOK, statsSummaryResponse{RepositoryIdentity: identity, Window: window, BranchScope: branchScope, Summary: summary})
+	writeJSON(w, http.StatusOK, statsSummaryResponse{RepositoryIdentity: identity, Window: window, BranchScope: branchScope, Summary: browserStatsSummary(summary)})
 }
 
 func (s *Server) statsCost(w http.ResponseWriter, r *http.Request) {

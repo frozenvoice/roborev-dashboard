@@ -46,7 +46,11 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 				t.Error("job list did not omit prompts")
 			}
 			query := request.URL.Query()
-			job := map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "status": "running", "verdict": "F", "commit_subject": "Observed metadata", "enqueued_at": "2026-08-17T00:00:00Z", "started_at": "2026-08-17T00:00:05Z", "prompt": strings.Repeat("large-active-prompt", 140_000), "diff_content": "secret diff"}
+			job := map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "status": "running", "verdict": "F", "commit_subject": "Observed metadata", "enqueued_at": "2026-08-17T00:00:00Z", "started_at": "2026-08-17T00:00:05Z", "prompt": strings.Repeat("large-active-prompt", 140_000), "diff_content": "secret diff", "session_id": "PRIVATE_SESSION_MARKER", "worker_id": "PRIVATE_WORKER_MARKER", "command_line": "PRIVATE_COMMAND_MARKER", "token_usage": "PRIVATE_TOKEN_MARKER"}
+			if query.Get("omit_prompt") == "true" {
+				delete(job, "prompt")
+				delete(job, "diff_content")
+			}
 			jobs := []any{job}
 			switch {
 			case query.Get("id") == "42":
@@ -74,6 +78,26 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs, "has_more": false})
+		case "/api/review":
+			if request.URL.Query().Get("job_id") != "42" {
+				t.Error("show did not request job_id=42")
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"job_id": 42,
+				"job":    map[string]any{"id": 42, "repo_path": `E:\한글 프로젝트\repo`, "status": "running", "verdict": "F"},
+				"review": map[string]any{"output": "# Finding"},
+				"prompt": "PRIVATE_PROMPT_MARKER",
+			})
+		case "/api/comment":
+			if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
+				t.Error("comment request contract mismatch")
+			}
+			w.WriteHeader(http.StatusCreated)
+		case "/api/review/close", "/api/job/cancel":
+			if request.Method != http.MethodPost {
+				t.Error("mutation request contract mismatch")
+			}
+			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, request)
 		}
@@ -115,7 +139,7 @@ func TestClientUsesFakeExecutableMachineContracts(t *testing.T) {
 	if err != nil || len(jobs) == 0 {
 		t.Fatalf("list failed: %v %s", err, jobs)
 	}
-	if bytes.Contains(jobs, []byte(`"prompt"`)) || bytes.Contains(jobs, []byte(`"diff_content"`)) {
+	if bytes.Contains(jobs, []byte(`"prompt"`)) || bytes.Contains(jobs, []byte(`"diff_content"`)) || bytes.Contains(jobs, []byte(`PRIVATE_`)) {
 		t.Fatalf("metadata list leaked heavy fields: %s", jobs)
 	}
 	metadata, err := client.JobMetadata(ctx, 42)

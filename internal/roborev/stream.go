@@ -3,11 +3,8 @@ package roborev
 import (
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
-	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
 var (
@@ -23,59 +20,10 @@ type StreamSource interface {
 	OpenStream(context.Context, string) (proc.Stream, error)
 }
 
-// OpenStream performs all capability and daemon gates before spawning a child.
-// The command uses an immutable binary snapshot and an exact typed argv array;
-// no shell, stdin, environment, or working directory is involved.
+// OpenStream is deliberately disabled. The v0.64 CLI stream command invokes
+// ensureDaemon, which is a lifecycle mutation unsuitable for a dashboard
+// request. Returning before any capability probe or runner call preserves the
+// polling fallback and guarantees that no process is started.
 func (c *Client) OpenStream(ctx context.Context, repoPath string) (proc.Stream, error) {
-	if c == nil {
-		return nil, ErrStreamUnsupported
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	args, err := StreamArgs(repoPath)
-	if err != nil {
-		return nil, err
-	}
-	binary, _, generation := c.snapshot()
-	if strings.TrimSpace(binary) == "" {
-		return nil, ErrStreamUnsupported
-	}
-	installation := c.Installation(ctx)
-	cliVersion := installation.Version
-	if !installation.Installed || !installation.Capabilities.StreamEvents || !roborevcompat.IsSupportedVersion(cliVersion) {
-		return nil, fmt.Errorf("%w: %s", ErrStreamUnsupported, installation.Version)
-	}
-	health, healthErr := c.healthStatus(ctx)
-	if healthErr != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		if isUnreachableHealthError(healthErr) {
-			return nil, ErrStreamOffline
-		}
-		return nil, healthErr
-	}
-	if !health.Healthy {
-		return nil, ErrStreamUnhealthy
-	}
-	if !roborevcompat.IsMatchingSupportedVersion(cliVersion, health.Version) {
-		return nil, fmt.Errorf("%w: daemon=%s cli=%s", ErrStreamUnsupported, health.Version, cliVersion)
-	}
-	binaryNow, _, generationNow := c.snapshot()
-	if generationNow != generation || binaryNow != binary {
-		return nil, ErrBindingChanged
-	}
-	runner := c.StreamRunner
-	if runner == nil {
-		runner = proc.ExecRunner{}
-	}
-	return runner.StartStream(ctx, proc.StreamCommand{
-		Executable:  binary,
-		Args:        append([]string(nil), args...),
-		Dir:         "",
-		LineLimit:   proc.DefaultStreamLineLimit,
-		StderrLimit: proc.DefaultStreamStderrLimit,
-		WaitDelay:   proc.DefaultStreamWaitDelay,
-	})
+	return nil, ErrStreamUnsupported
 }

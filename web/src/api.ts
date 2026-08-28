@@ -826,7 +826,7 @@ export type RepositoryInventoryResponse = {
   totalJobCount: number
 }
 
-export type RepositoryRenameCommand = { executable: string; args: string[] }
+export type RepositoryRenameCommand = { executable: 'roborev'; args: string[] }
 export type RepositoryRenamePreview = {
   path: string
   currentName: string
@@ -841,7 +841,7 @@ export type RepositoryRenameResult =
   | { status: 'renamed'; path: string; previousName: string; name: string }
   | { status: 'unverified'; path: string; message: string }
 
-export type RepositoryMoveCommand = { executable: string; args: string[]; workingDirectory: string }
+export type RepositoryMoveCommand = { executable: 'roborev'; args: string[]; workingDirectory: string }
 export type RepositoryMovePreview = {
   sourcePath: string
   sourceName: string
@@ -867,7 +867,7 @@ export type RepositoryMergeEligibility =
   | { eligible: true; source: RepositoryMergeSnapshot; targets: RepositoryMergeCandidate[] }
   | { eligible: false; reason: 'source-exists' | 'dashboard-registered' | 'source-empty' | 'active-source-jobs' | 'no-targets' }
 export type RepositoryMergeEligibilityReason = Exclude<RepositoryMergeEligibility, { eligible: true }>['reason']
-export type RepositoryMergeCommand = { executable: string; args: string[]; workingDirectory: string }
+export type RepositoryMergeCommand = { executable: 'roborev'; args: string[]; workingDirectory: string }
 export type RepositoryMergePreview = {
   source: RepositoryMergeSnapshot
   target: RepositoryMergeCandidate
@@ -880,7 +880,20 @@ export type RepositoryMergeResult =
   | { status: 'unverified'; message: string }
 
 function renameObject(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const seen = new Set<object>()
+  const forbidden = new Set(['binary', 'env', 'stdout', 'stderr', 'rawerror'])
+  const containsForbidden = (candidate: unknown): boolean => {
+    if (!candidate || typeof candidate !== 'object') return false
+    if (seen.has(candidate as object)) return false
+    seen.add(candidate as object)
+    if (Array.isArray(candidate)) return candidate.some(containsForbidden)
+    for (const [key, child] of Object.entries(candidate as Record<string, unknown>)) {
+      if (forbidden.has(key.replace(/[_-]/g, '').toLowerCase()) || containsForbidden(child)) return true
+    }
+    return false
+  }
+  return containsForbidden(value) ? null : value as Record<string, unknown>
 }
 
 function hasExactKeys(object: Record<string, unknown>, expected: readonly string[]): boolean {
@@ -890,23 +903,20 @@ function hasExactKeys(object: Record<string, unknown>, expected: readonly string
 
 function renameCommand(value: unknown): RepositoryRenameCommand | null {
   const command = renameObject(value)
-  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string')) return null
-  if (Object.keys(command).some(key => !['executable', 'args'].includes(key))) return null
-  return { executable: command.executable, args: command.args as string[] }
+  if (!command || !hasExactKeys(command, ['executable', 'args']) || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== 4 || !command.args.every(item => typeof item === 'string')) return null
+  return { executable: 'roborev', args: command.args as string[] }
 }
 
 function moveCommand(value: unknown): RepositoryMoveCommand | null {
   const command = renameObject(value)
-  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || typeof command.workingDirectory !== 'string' || !command.workingDirectory) return null
-  if (Object.keys(command).some(key => !['executable', 'args', 'workingDirectory'].includes(key))) return null
-  return { executable: command.executable, args: command.args as string[], workingDirectory: command.workingDirectory }
+  if (!command || !hasExactKeys(command, ['executable', 'args', 'workingDirectory']) || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== 4 || !command.args.every(item => typeof item === 'string') || typeof command.workingDirectory !== 'string' || !command.workingDirectory) return null
+  return { executable: 'roborev', args: command.args as string[], workingDirectory: command.workingDirectory }
 }
 
 function mergeCommand(value: unknown): RepositoryMergeCommand | null {
   const command = renameObject(value)
-  if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || command.args.length === 0 || !command.args.every(item => typeof item === 'string') || command.workingDirectory !== '') return null
-  if (Object.keys(command).some(key => !['executable', 'args', 'workingDirectory'].includes(key))) return null
-  return { executable: command.executable, args: command.args as string[], workingDirectory: command.workingDirectory }
+  if (!command || !hasExactKeys(command, ['executable', 'args', 'workingDirectory']) || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== 5 || !command.args.every(item => typeof item === 'string') || command.workingDirectory !== '') return null
+  return { executable: 'roborev', args: command.args as string[], workingDirectory: command.workingDirectory }
 }
 
 function mergeSnapshot(value: unknown): RepositoryMergeSnapshot | null {
@@ -968,9 +978,9 @@ export function normalizeRepositoryMergeResult(value: unknown): RepositoryMergeR
 /** Normalize the strict, server-owned repository move preview. */
 export function normalizeRepositoryMovePreview(value: unknown): RepositoryMovePreview | null {
   const object = renameObject(value)
-  if (!object || Object.keys(object).some(key => !['sourcePath', 'sourceName', 'jobCount', 'destinationRepositoryIdentity', 'destinationPath', 'destinationName', 'command', 'token', 'expiresAt'].includes(key))) return null
+  if (!object || !hasExactKeys(object, ['sourcePath', 'sourceName', 'jobCount', 'destinationRepositoryIdentity', 'destinationPath', 'destinationName', 'command', 'token', 'expiresAt'])) return null
   const command = moveCommand(object.command)
-  if (typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.sourceName !== 'string' || typeof object.destinationRepositoryIdentity !== 'string' || !object.destinationRepositoryIdentity.trim() || typeof object.destinationPath !== 'string' || object.destinationPath.length === 0 || typeof object.destinationName !== 'string' || !nonNegativeSafeInteger(object.jobCount) || !command || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  if (typeof object.sourcePath !== 'string' || object.sourcePath.length === 0 || typeof object.sourceName !== 'string' || typeof object.destinationRepositoryIdentity !== 'string' || !object.destinationRepositoryIdentity.trim() || typeof object.destinationPath !== 'string' || object.destinationPath.length === 0 || typeof object.destinationName !== 'string' || !nonNegativeSafeInteger(object.jobCount) || !command || command.args[0] !== 'repo' || command.args[1] !== 'move' || command.args[2] !== object.sourcePath || command.args[3] !== '.' || command.workingDirectory !== object.destinationPath || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
   return { sourcePath: object.sourcePath, sourceName: object.sourceName, jobCount: object.jobCount, destinationRepositoryIdentity: object.destinationRepositoryIdentity, destinationPath: object.destinationPath, destinationName: object.destinationName, command, token: object.token, expiresAt: object.expiresAt }
 }
 
@@ -1004,9 +1014,9 @@ export function normalizeRepositoryMoveEligibility(value: unknown): RepositoryMo
 /** Normalize the strict, server-owned repository rename preview. */
 export function normalizeRepositoryRenamePreview(value: unknown): RepositoryRenamePreview | null {
   const object = renameObject(value)
-  if (!object || Object.keys(object).some(key => !['path', 'currentName', 'newName', 'jobCount', 'dashboardRegistered', 'command', 'token', 'expiresAt'].includes(key))) return null
+  if (!object || !hasExactKeys(object, ['path', 'currentName', 'newName', 'jobCount', 'dashboardRegistered', 'command', 'token', 'expiresAt'])) return null
   const command = renameCommand(object.command)
-  if (typeof object.path !== 'string' || object.path.length === 0 || typeof object.currentName !== 'string' || typeof object.newName !== 'string' || object.newName.trim() === '' || !nonNegativeSafeInteger(object.jobCount) || typeof object.dashboardRegistered !== 'boolean' || !command || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
+  if (typeof object.path !== 'string' || object.path.length === 0 || typeof object.currentName !== 'string' || typeof object.newName !== 'string' || object.newName.trim() === '' || !nonNegativeSafeInteger(object.jobCount) || typeof object.dashboardRegistered !== 'boolean' || !command || command.args[0] !== 'repo' || command.args[1] !== 'rename' || command.args[2] !== object.path || command.args[3] !== object.newName || typeof object.token !== 'string' || !object.token.trim() || !rfc3339(object.expiresAt)) return null
   return { path: object.path, currentName: object.currentName, newName: object.newName, jobCount: object.jobCount, dashboardRegistered: object.dashboardRegistered, command, token: object.token, expiresAt: object.expiresAt }
 }
 
@@ -1124,6 +1134,7 @@ export function normalizeRepositoryInventoryResponse(value: unknown): Repository
 
 export type StatsWindow = '24h' | '7d' | '30d' | '90d'
 export type StatsBranchScope = 'all' | 'current'
+export type StatsRepositorySummary = { name: string; total: number; passed: number; failed: number; addressed: number }
 export type StatsSummaryResponse = {
   repositoryIdentity: string
   window: StatsWindow
@@ -1131,9 +1142,8 @@ export type StatsSummaryResponse = {
   summary: {
     $schema?: string
     since: string
-    repo_path?: string
     branch?: string
-    repos?: Array<{ name: string; path: string; total: number; passed: number; failed: number; addressed: number }>
+    repos?: StatsRepositorySummary[]
     overview: { total: number; queued: number; running: number; done: number; failed: number; canceled: number; applied: number; rebased: number }
     verdicts: { total: number; passed: number; failed: number; addressed: number; pass_rate: number; resolution_rate: number }
     duration: { review_p50_secs: number; review_p90_secs: number; review_p99_secs: number; queue_p50_secs: number; queue_p90_secs: number; queue_p99_secs: number }
@@ -1264,10 +1274,14 @@ export type SetupState = {
 /** The health result is deliberately separate from executable/config detection. */
 export type AgentHealth = 'not_checked' | 'passed' | 'failed' | 'skipped' | 'canceled'
 
-export type AgentCommand = string | { executable: string; args: string[] }
+export type AgentCommand = typeof BACKEND_COMMAND_SENTINEL | typeof BACKEND_UNRESOLVED_COMMAND_SENTINEL
 // API normalization must not embed a display-language string. The Setup UI
 // maps this stable sentinel to the active catalog language.
 export const BACKEND_COMMAND_SENTINEL = '__roborev_backend_command__'
+// The daemon can report an inherited/default agent whose executable cannot be
+// resolved. Keep that fact as a stable, content-free value; never forward the
+// source command or path to the browser.
+export const BACKEND_UNRESOLVED_COMMAND_SENTINEL = 'Detection unavailable'
 
 export type ConfiguredReviewAgent = {
   name: string
@@ -1278,7 +1292,6 @@ export type ConfiguredReviewAgent = {
   commandSource?: string
   detected: boolean
   detectionReason?: string
-  resolvedPath?: string
   health: AgentHealth
   lastCheckedAt?: string
 }
@@ -1292,7 +1305,7 @@ export type AgentsResponse = {
 export type QueueState = 'processing' | 'paused' | 'unknown'
 
 export type DaemonAction = 'start' | 'stop' | 'restart'
-export type DaemonCommandPreview = { executable: string; args: string[] }
+export type DaemonCommandPreview = { executable: 'roborev'; args: ['daemon', DaemonAction] }
 export type DaemonCommands = Record<DaemonAction, DaemonCommandPreview>
 
 export type RuntimeControlState = {
@@ -1320,15 +1333,37 @@ function objectValue(value: unknown) {
 function optionalString(value: unknown) { return typeof value === 'string' ? value : undefined }
 function readAlias(object: Record<string, unknown>, camel: string, snake: string) { return object[camel] ?? object[snake] }
 
-function normalizeDaemonCommands(value: unknown): DaemonCommands | undefined {
+const projectionForbiddenKeys = new Set(['repositorypath', 'path', 'binary', 'binarypath', 'cwd', 'workingdirectory', 'env', 'stdout', 'stderr', 'rawerror', 'resolvedpath', 'commandline', 'worktreepath', 'prompt', 'diff', 'patch'])
+function containsForbiddenProjectionKey(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== 'object') return false
+  const object = value as object
+  if (seen.has(object)) return false
+  seen.add(object)
+  if (Array.isArray(value)) return value.some(item => containsForbiddenProjectionKey(item, seen))
+  return Object.entries(value as Record<string, unknown>).some(([key, child]) => projectionForbiddenKeys.has(key.replace(/[_-]/g, '').toLowerCase()) || containsForbiddenProjectionKey(child, seen))
+}
+
+function strictProjectionText(value: unknown, maxLength = 256): value is string {
+  return typeof value === 'string' && value.length <= maxLength && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+function objectWithKeys(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> | null {
   const object = objectValue(value)
+  if (!object || containsForbiddenProjectionKey(object)) return null
+  const allowed = new Set([...required, ...optional])
+  if (Object.keys(object).some(key => !allowed.has(key)) || required.some(key => !Object.prototype.hasOwnProperty.call(object, key))) return null
+  return object
+}
+
+function normalizeDaemonCommands(value: unknown): DaemonCommands | undefined {
+  const object = objectWithKeys(value, ['start', 'stop', 'restart'])
   if (!object) return undefined
   const actions: DaemonAction[] = ['start', 'stop', 'restart']
   const result = {} as DaemonCommands
   for (const action of actions) {
-    const command = objectValue(object[action])
-    if (!command || typeof command.executable !== 'string' || !command.executable.trim() || !Array.isArray(command.args) || !command.args.every(item => typeof item === 'string')) return undefined
-    result[action] = { executable: command.executable, args: command.args as string[] }
+    const command = objectWithKeys(object[action], ['executable', 'args'])
+    if (!command || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== 2 || command.args[0] !== 'daemon' || command.args[1] !== action) return undefined
+    result[action] = { executable: 'roborev', args: ['daemon', action] }
   }
   return result
 }
@@ -1340,61 +1375,182 @@ function normalizeAgentHealth(value: unknown): AgentHealth {
 }
 
 function normalizeAgentCommand(value: unknown): AgentCommand {
-  if (typeof value === 'string') return value
-  const object = objectValue(value)
-  if (object && typeof object.executable === 'string' && Array.isArray(object.args) && object.args.every(item => typeof item === 'string')) return { executable: object.executable, args: object.args as string[] }
+  if (value === BACKEND_COMMAND_SENTINEL || value === BACKEND_UNRESOLVED_COMMAND_SENTINEL) return value
   return BACKEND_COMMAND_SENTINEL
 }
 
-/** Parse the machine-readable configured-agent response. Unknown fields are ignored. */
+/** Parse the machine-readable configured-agent response. Unknown/private fields fail closed. */
 export function normalizeAgentsResponse(value: unknown): AgentsResponse | null {
-  const object = objectValue(value)
-  if (!object || typeof object.repositoryIdentity !== 'string' || !object.repositoryIdentity.trim() || !Array.isArray(object.configured)) return null
+  const object = objectWithKeys(value, ['repositoryIdentity', 'configured'], ['roborevVersion'])
+  if (!object || !strictProjectionText(object.repositoryIdentity) || !object.repositoryIdentity.trim() || !Array.isArray(object.configured) || (object.roborevVersion !== undefined && object.roborevVersion !== 'v0.64.0')) return null
   const configured: ConfiguredReviewAgent[] = []
   for (const item of object.configured) {
-    const agent = objectValue(item)
-    if (!agent || typeof agent.name !== 'string' || typeof agent.agent !== 'string' || typeof agent.detected !== 'boolean') return null
+    const agent = objectWithKeys(item, ['name', 'agent', 'command', 'detected', 'health'], ['model', 'reasoning', 'commandSource', 'detectionReason', 'lastCheckedAt'])
+    if (!agent || !strictProjectionText(agent.name) || !agent.name.trim() || !strictProjectionText(agent.agent) || !agent.agent.trim() || typeof agent.detected !== 'boolean' || !agentHealthValues.includes(agent.health as AgentHealth) || (agent.model !== undefined && !strictProjectionText(agent.model)) || (agent.reasoning !== undefined && !strictProjectionText(agent.reasoning)) || (agent.commandSource !== undefined && !strictProjectionText(agent.commandSource)) || (agent.detectionReason !== undefined && !strictProjectionText(agent.detectionReason)) || (agent.lastCheckedAt !== undefined && !strictRfc3339(agent.lastCheckedAt))) return null
+    const command = normalizeAgentCommand(agent.command)
+    if (agent.command !== command) return null
     configured.push({
       name: agent.name,
       agent: agent.agent,
       model: optionalString(agent.model),
       reasoning: optionalString(agent.reasoning),
-      command: normalizeAgentCommand(agent.command),
+      command,
       commandSource: optionalString(readAlias(agent, 'commandSource', 'command_source')),
       detected: agent.detected,
       detectionReason: optionalString(readAlias(agent, 'detectionReason', 'detection_reason')),
-      resolvedPath: optionalString(readAlias(agent, 'resolvedPath', 'resolved_path')),
-      health: normalizeAgentHealth(agent.health),
+      health: agent.health as AgentHealth,
       lastCheckedAt: optionalString(readAlias(agent, 'lastCheckedAt', 'last_checked_at')),
     })
   }
-  return { repositoryIdentity: object.repositoryIdentity, roborevVersion: optionalString(readAlias(object, 'roborevVersion', 'roborev_version')), configured }
+  return { repositoryIdentity: object.repositoryIdentity, roborevVersion: optionalString(object.roborevVersion), configured }
 }
 
 /** Parse runtime/queue capabilities and fail closed to unknown queue controls. */
 export function normalizeRuntimeControl(value: unknown): RuntimeControlState | null {
-  const object = objectValue(value)
-  if (!object || typeof object.daemonRunning !== 'boolean') return null
-  const operation = readAlias(object, 'operationActive', 'operation_active')
-  const queue = readAlias(object, 'queueState', 'queue_state')
-  const operationActive = operation === undefined ? false : operation === true
-  const queueState = typeof queue === 'string' && queueStateValues.includes(queue as QueueState) ? queue as QueueState : 'unknown'
-  const readCapability = (camel: string, snake: string) => object[camel] === true || object[snake] === true
-  const daemonCommands = normalizeDaemonCommands(readAlias(object, 'daemonCommands', 'daemon_commands'))
+  const object = objectWithKeys(value, ['daemonRunning', 'operationActive', 'queueState', 'canPause', 'canResume', 'canStart', 'canStop', 'canRestart', 'startCommand', 'stopCommand', 'restartCommand', 'daemonCommands'], ['daemonOperation', 'disabledReason', 'error'])
+  if (!object || typeof object.daemonRunning !== 'boolean' || typeof object.operationActive !== 'boolean' || typeof object.queueState !== 'string' || !queueStateValues.includes(object.queueState as QueueState) || ![object.canPause, object.canResume, object.canStart, object.canStop, object.canRestart].every(item => typeof item === 'boolean')) return null
+  const operationActive = object.operationActive
+  const queueState = object.queueState as QueueState
+  const daemonCommands = normalizeDaemonCommands(object.daemonCommands)
+  const commandFor = (action: DaemonAction) => {
+    const command = objectWithKeys(object[`${action}Command`], ['executable', 'args'])
+    if (!command || command.executable !== 'roborev' || !Array.isArray(command.args) || command.args.length !== 2 || command.args[0] !== 'daemon' || command.args[1] !== action) return null
+    return { executable: 'roborev' as const, args: ['daemon', action] as ['daemon', DaemonAction] }
+  }
+  if (!daemonCommands || !commandFor('start') || !commandFor('stop') || !commandFor('restart')) return null
   return {
     daemonRunning: object.daemonRunning,
-    daemonOperation: optionalString(readAlias(object, 'daemonOperation', 'daemon_operation')),
+    daemonOperation: object.daemonOperation === undefined ? undefined : (typeof object.daemonOperation === 'string' && ['start', 'stop', 'restart', 'pause', 'resume'].includes(object.daemonOperation) ? object.daemonOperation : undefined),
     operationActive,
     queueState,
-    canPause: readCapability('canPause', 'can_pause'),
-    canResume: readCapability('canResume', 'can_resume'),
-    canStart: readCapability('canStart', 'can_start'),
-    canStop: readCapability('canStop', 'can_stop'),
-    canRestart: readCapability('canRestart', 'can_restart'),
+    canPause: object.canPause as boolean,
+    canResume: object.canResume as boolean,
+    canStart: object.canStart as boolean,
+    canStop: object.canStop as boolean,
+    canRestart: object.canRestart as boolean,
     daemonCommands,
-    disabledReason: optionalString(readAlias(object, 'disabledReason', 'disabled_reason')),
-    error: optionalString(object.error),
+    disabledReason: object.disabledReason === undefined ? undefined : (typeof object.disabledReason === 'string' && object.disabledReason.length <= 256 ? object.disabledReason : undefined),
+    error: object.error === undefined ? undefined : (typeof object.error === 'string' && object.error.length <= 256 ? object.error : undefined),
   }
+}
+
+function statsNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function statsCount(value: unknown): value is number {
+  return nonNegativeSafeInteger(value)
+}
+
+function statsText(value: unknown): value is string {
+  return strictProjectionText(value) && value.trim().length > 0
+}
+
+function statsRecord(value: unknown): Record<string, unknown> | null {
+  return objectValue(value)
+}
+
+function normalizeStatsOverview(value: unknown): StatsSummaryResponse['summary']['overview'] | null {
+  const object = exactObject(value, ['total', 'queued', 'running', 'done', 'failed', 'canceled', 'applied', 'rebased'])
+  if (!object || !Object.values(object).every(statsCount)) return null
+  return object as StatsSummaryResponse['summary']['overview']
+}
+
+function normalizeStatsVerdicts(value: unknown): StatsSummaryResponse['summary']['verdicts'] | null {
+  const object = exactObject(value, ['total', 'passed', 'failed', 'addressed', 'pass_rate', 'resolution_rate'])
+  if (!object || !statsCount(object.total) || !statsCount(object.passed) || !statsCount(object.failed) || !statsCount(object.addressed) || !statsNumber(object.pass_rate) || object.pass_rate > 1 || !statsNumber(object.resolution_rate) || object.resolution_rate > 1) return null
+  return object as StatsSummaryResponse['summary']['verdicts']
+}
+
+function normalizeStatsDuration(value: unknown): StatsSummaryResponse['summary']['duration'] | null {
+  const object = exactObject(value, ['review_p50_secs', 'review_p90_secs', 'review_p99_secs', 'queue_p50_secs', 'queue_p90_secs', 'queue_p99_secs'])
+  if (!object || !Object.values(object).every(statsNumber)) return null
+  return object as StatsSummaryResponse['summary']['duration']
+}
+
+function normalizeStatsAgents(value: unknown): StatsSummaryResponse['summary']['agents'] | null {
+  if (!Array.isArray(value)) return null
+  const agents: StatsSummaryResponse['summary']['agents'] = []
+  for (const item of value) {
+    const object = exactObject(item, ['agent', 'total', 'passed', 'failed', 'errors', 'pass_rate', 'median_duration_secs'])
+    if (!object || !statsText(object.agent) || !statsCount(object.total) || !statsCount(object.passed) || !statsCount(object.failed) || !statsCount(object.errors) || !statsNumber(object.pass_rate) || object.pass_rate > 1 || !statsNumber(object.median_duration_secs)) return null
+    agents.push({ agent: object.agent, total: object.total, passed: object.passed, failed: object.failed, errors: object.errors, pass_rate: object.pass_rate, median_duration_secs: object.median_duration_secs })
+  }
+  return agents
+}
+
+function normalizeStatsJobTypes(value: unknown): StatsSummaryResponse['summary']['job_types'] | null {
+  if (!Array.isArray(value)) return null
+  const jobTypes: StatsSummaryResponse['summary']['job_types'] = []
+  for (const item of value) {
+    const object = objectWithKeys(item, ['type', 'count'], ['applied', 'rebased'])
+    if (!object || !statsText(object.type) || !statsCount(object.count) || (object.applied !== undefined && !statsCount(object.applied)) || (object.rebased !== undefined && !statsCount(object.rebased))) return null
+    jobTypes.push({ type: object.type, count: object.count, ...(object.applied === undefined ? {} : { applied: object.applied }), ...(object.rebased === undefined ? {} : { rebased: object.rebased }) })
+  }
+  return jobTypes
+}
+
+function normalizeStatsFailures(value: unknown): StatsSummaryResponse['summary']['failures'] | null {
+  const object = exactObject(value, ['total', 'retries', 'errors'])
+  const errors = statsRecord(object?.errors)
+  if (!object || !statsCount(object.total) || !statsCount(object.retries) || !errors) return null
+  const safeErrors: Record<string, number> = {}
+  for (const [name, count] of Object.entries(errors)) {
+    if (!strictProjectionText(name, 128) || !statsCount(count)) return null
+    safeErrors[name] = count
+  }
+  return { total: object.total, retries: object.retries, errors: safeErrors }
+}
+
+function normalizeStatsCost(value: unknown): StatsSummaryResponse['summary']['cost'] | null {
+  const object = objectWithKeys(value, ['total_usd', 'jobs_with_cost', 'jobs_total', 'complete'], ['$schema'])
+  if (!object || (object.$schema !== undefined && !strictProjectionText(object.$schema)) || !statsNumber(object.total_usd) || !statsCount(object.jobs_with_cost) || !statsCount(object.jobs_total) || typeof object.complete !== 'boolean') return null
+  return { ...(object.$schema === undefined ? {} : { $schema: object.$schema }), total_usd: object.total_usd, jobs_with_cost: object.jobs_with_cost, jobs_total: object.jobs_total, complete: object.complete }
+}
+
+/** Normalize the path-free, server-owned Stats summary projection. */
+export function normalizeStatsSummaryResponse(value: unknown, expectedRepositoryIdentity?: string): StatsSummaryResponse | null {
+  const root = exactObject(value, ['repositoryIdentity', 'window', 'branchScope', 'summary'])
+  const summary = root ? objectWithKeys(root.summary, ['since', 'overview', 'verdicts', 'duration', 'agents', 'job_types', 'failures', 'cost'], ['$schema', 'branch', 'repos']) : null
+  if (!root || !statsText(root.repositoryIdentity) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity) || !['24h', '7d', '30d', '90d'].includes(String(root.window)) || !['all', 'current'].includes(String(root.branchScope)) || !summary || !strictRfc3339(summary.since) || (summary.$schema !== undefined && !strictProjectionText(summary.$schema)) || (summary.branch !== undefined && !strictProjectionText(summary.branch))) return null
+  const overview = normalizeStatsOverview(summary.overview)
+  const verdicts = normalizeStatsVerdicts(summary.verdicts)
+  const duration = normalizeStatsDuration(summary.duration)
+  const agents = normalizeStatsAgents(summary.agents)
+  const jobTypes = normalizeStatsJobTypes(summary.job_types)
+  const failures = normalizeStatsFailures(summary.failures)
+  const cost = normalizeStatsCost(summary.cost)
+  if (!overview || !verdicts || !duration || !agents || !jobTypes || !failures || !cost) return null
+  let repos: StatsRepositorySummary[] | undefined
+  if (summary.repos !== undefined) {
+    if (!Array.isArray(summary.repos)) return null
+    repos = []
+    for (const item of summary.repos) {
+      const object = exactObject(item, ['name', 'total', 'passed', 'failed', 'addressed'])
+      if (!object || !statsText(object.name) || !statsCount(object.total) || !statsCount(object.passed) || !statsCount(object.failed) || !statsCount(object.addressed)) return null
+      repos.push({ name: object.name, total: object.total, passed: object.passed, failed: object.failed, addressed: object.addressed })
+    }
+  }
+  return {
+    repositoryIdentity: root.repositoryIdentity,
+    window: root.window as StatsWindow,
+    branchScope: root.branchScope as StatsBranchScope,
+    summary: {
+      ...(summary.$schema === undefined ? {} : { $schema: summary.$schema }),
+      since: summary.since,
+      ...(summary.branch === undefined ? {} : { branch: summary.branch }),
+      overview, verdicts, duration, agents, job_types: jobTypes, failures,
+      ...(repos === undefined ? {} : { repos }), cost,
+    },
+  }
+}
+
+/** Normalize the path-free, server-owned Stats cost projection. */
+export function normalizeStatsCostResponse(value: unknown, expectedRepositoryIdentity?: string): StatsCostResponse | null {
+  const root = exactObject(value, ['repositoryIdentity', 'branchScope', 'cost'])
+  const cost = root ? objectWithKeys(root.cost, ['total_usd', 'jobs_with_cost', 'jobs_total', 'complete'], ['$schema']) : null
+  if (!root || !statsText(root.repositoryIdentity) || (expectedRepositoryIdentity !== undefined && root.repositoryIdentity !== expectedRepositoryIdentity) || !['all', 'current'].includes(String(root.branchScope)) || !cost || (cost.$schema !== undefined && !strictProjectionText(cost.$schema)) || !statsNumber(cost.total_usd) || !statsCount(cost.jobs_with_cost) || !statsCount(cost.jobs_total) || typeof cost.complete !== 'boolean') return null
+  return { repositoryIdentity: root.repositoryIdentity, branchScope: root.branchScope as StatsBranchScope, cost: { ...(cost.$schema === undefined ? {} : { $schema: cost.$schema }), total_usd: cost.total_usd, jobs_with_cost: cost.jobs_with_cost, jobs_total: cost.jobs_total, complete: cost.complete } }
 }
 
 const setupPhases: SetupPhase[] = ['idle', 'checking', 'downloading', 'verifying', 'extracting', 'installing', 'binding', 'starting_daemon', 'waiting_for_daemon', 'ready', 'failed', 'blocked', 'unsupported', 'canceled']
@@ -1514,6 +1670,9 @@ export function normalizeSetupState(value: unknown): SetupState | null {
 export type ReviewEnqueueResponse = { receipt: unknown; target: Repository }
 
 export type PanelRefinePhase = 'idle' | 'starting' | 'reviewing' | 'evaluating' | 'fixing' | 'final_reviewing' | 'passed' | 'needs_attention' | 'failed' | 'cancelled'
+export type PanelRefineErrorCode = 'panel_refine_error' | 'repository_state_unavailable'
+export type PanelRefineStopReason = 'maximum_fix_attempts' | 'repository_changed' | 'fix_did_not_commit' | 'fix_left_dirty' | 'review_failed' | 'fix_failed' | 'malformed_review_receipt' | 'malformed_review_status' | 'cancelled'
+export type PanelRefineCommand = { executable: 'roborev'; args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] }
 
 export type PanelRefineIteration = {
   number: number
@@ -1525,14 +1684,13 @@ export type PanelRefineIteration = {
   fixAttempted?: boolean
   fixAgent?: string
   headAfterFix?: string
-  error?: string
+  errorCode?: PanelRefineErrorCode
 }
 
 export type PanelRefineRun = {
   id: number | string
   repositoryIdentity: string
-  repositoryPath: string
-  branch?: string
+  branch: string
   iterationPanel: string
   finalPanel?: string
   fixAgent: string
@@ -1543,21 +1701,21 @@ export type PanelRefineRun = {
   currentHead?: string
   currentReviewJobID?: number
   currentPanelRunUUID?: string
-  startedAt?: string
-  updatedAt?: string
+  startedAt: string
+  updatedAt: string
   completedAt?: string
-  error?: string
-  stopReason?: string
-  command: { executable: string; args: string[] }
-  cancelState?: { available: boolean; head?: string; branch?: string; dirty?: boolean; error?: string }
+  errorCode?: PanelRefineErrorCode
+  stopReason?: PanelRefineStopReason
+  command: PanelRefineCommand
+  cancelState?: { available: boolean; head?: string; branch?: string; dirty?: boolean; errorCode?: 'repository_state_unavailable' }
   iterations: PanelRefineIteration[]
 }
 
 export type PanelRefineOptions = {
-  executable: string
-  args: string[]
-  allowedFixAgents: string[]
-  defaultFixAgent: string
+  executable: 'roborev'
+  args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>']
+  allowedFixAgents: ['codex']
+  defaultFixAgent: 'codex'
   defaultMaxFixAttempts: number
   minFixAttempts: number
   maxFixAttempts: number
@@ -1701,51 +1859,79 @@ export function normalizeFixOperationsResponse(value: unknown): FixOperationsRes
 }
 
 function numberValue(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+}
+const panelRefinePhases: readonly PanelRefinePhase[] = ['idle', 'starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing', 'passed', 'needs_attention', 'failed', 'cancelled']
+const panelRefineStopReasons: readonly PanelRefineStopReason[] = ['maximum_fix_attempts', 'repository_changed', 'fix_did_not_commit', 'fix_left_dirty', 'review_failed', 'fix_failed', 'malformed_review_receipt', 'malformed_review_status', 'cancelled']
+const panelRefineErrorCodes: readonly PanelRefineErrorCode[] = ['panel_refine_error', 'repository_state_unavailable']
+const panelRefineReviewResults = new Set(['', 'P', 'F', 'pass', 'fail', 'passed', 'failed'])
+const panelRefineCommandKeys = ['executable', 'args'] as const
+const panelRefineCommandArgs: PanelRefineCommand['args'] = ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>']
+const panelRefineRunRequiredKeys = ['id', 'repositoryIdentity', 'branch', 'iterationPanel', 'fixAgent', 'maxFixAttempts', 'fixAttempts', 'phase', 'startingHead', 'currentHead', 'startedAt', 'updatedAt', 'iterations', 'command'] as const
+const panelRefineRunOptionalKeys = ['finalPanel', 'currentReviewJobId', 'currentPanelRunUUID', 'completedAt', 'errorCode', 'stopReason', 'cancelState'] as const
+const panelRefineIterationRequiredKeys = ['number', 'targetHead', 'panel', 'reviewJobId', 'panelRunUUID', 'reviewResult', 'fixAttempted'] as const
+const panelRefineIterationOptionalKeys = ['fixAgent', 'headAfterFix', 'errorCode'] as const
+const panelRefineOptionsRequiredKeys = ['executable', 'args', 'allowedFixAgents', 'defaultFixAgent', 'defaultMaxFixAttempts', 'minFixAttempts', 'maxFixAttempts'] as const
+function panelText(value: unknown, maxLength = 512): value is string { return strictProjectionText(value, maxLength) }
+function panelCommand(value: unknown): PanelRefineCommand | null {
+  const object = exactObject(value, panelRefineCommandKeys)
+  if (!object || object.executable !== 'roborev' || !Array.isArray(object.args) || object.args.length !== panelRefineCommandArgs.length || object.args.some((item, index) => item !== panelRefineCommandArgs[index])) return null
+  return { executable: 'roborev', args: [...panelRefineCommandArgs] }
 }
 function parsePanelRefineOptions(value: unknown): PanelRefineOptions | null {
-  if (!value || typeof value !== 'object') return null
-  const object = value as Record<string, unknown>
-  if (typeof object.executable !== 'string' || !Array.isArray(object.args) || !object.args.every(item => typeof item === 'string') || !Array.isArray(object.allowedFixAgents) || !object.allowedFixAgents.every(item => typeof item === 'string') || typeof object.defaultFixAgent !== 'string') return null
+  const object = exactObject(value, panelRefineOptionsRequiredKeys)
+  if (!object || object.executable !== 'roborev' || !Array.isArray(object.args) || object.args.length !== panelRefineCommandArgs.length || object.args.some((item, index) => item !== panelRefineCommandArgs[index]) || !Array.isArray(object.allowedFixAgents) || object.allowedFixAgents.length !== 1 || object.allowedFixAgents[0] !== 'codex' || object.defaultFixAgent !== 'codex') return null
   const defaultMax = numberValue(object.defaultMaxFixAttempts)
   const min = numberValue(object.minFixAttempts)
   const max = numberValue(object.maxFixAttempts)
-  if (defaultMax === undefined || min === undefined || max === undefined || min < 1 || max > 10 || min > max || defaultMax < min || defaultMax > max) return null
-  return { executable: object.executable, args: object.args as string[], allowedFixAgents: object.allowedFixAgents as string[], defaultFixAgent: object.defaultFixAgent, defaultMaxFixAttempts: defaultMax, minFixAttempts: min, maxFixAttempts: max }
+  if (defaultMax === undefined || min === undefined || max === undefined || min !== 1 || max !== 10 || defaultMax !== 3) return null
+  return { executable: 'roborev', args: [...panelRefineCommandArgs], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: defaultMax, minFixAttempts: min, maxFixAttempts: max }
 }
 
 function parsePanelRefineRun(value: unknown): PanelRefineRun | null {
-  if (!value || typeof value !== 'object') return null
-  const object = value as Record<string, unknown>
-  const phases: PanelRefinePhase[] = ['idle', 'starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing', 'passed', 'needs_attention', 'failed', 'cancelled']
-  const phase = object.phase
-  const command = object.command
-  const commandObject = command && typeof command === 'object' ? command as Record<string, unknown> : null
-  const commandArgs = commandObject?.args
-  if ((typeof object.id !== 'string' && typeof object.id !== 'number') || typeof object.repositoryIdentity !== 'string' || typeof object.repositoryPath !== 'string' || typeof object.iterationPanel !== 'string' || typeof object.fixAgent !== 'string' || !phases.includes(phase as PanelRefinePhase) || numberValue(object.maxFixAttempts) === undefined || numberValue(object.fixAttempts) === undefined || !Array.isArray(object.iterations) || !commandObject || typeof commandObject.executable !== 'string' || !Array.isArray(commandArgs) || !commandArgs.every((item: unknown) => typeof item === 'string')) return null
+  const object = objectWithKeys(value, panelRefineRunRequiredKeys, panelRefineRunOptionalKeys)
+  if (!object || typeof object.id !== 'string' || !object.id || !panelText(object.repositoryIdentity) || !object.repositoryIdentity || !panelText(object.branch) || !panelText(object.iterationPanel) || !object.iterationPanel || !panelText(object.fixAgent) || object.fixAgent !== 'codex' || !panelText(object.startingHead) || !panelText(object.currentHead) || !panelRefinePhases.includes(object.phase as PanelRefinePhase) || !strictRfc3339(object.startedAt) || !strictRfc3339(object.updatedAt) || (object.completedAt !== undefined && !strictRfc3339(object.completedAt)) || !Array.isArray(object.iterations) || !panelCommand(object.command)) return null
+  const maxFixAttempts = numberValue(object.maxFixAttempts)
+  const fixAttempts = numberValue(object.fixAttempts)
+  if (maxFixAttempts === undefined || fixAttempts === undefined || maxFixAttempts < 1 || maxFixAttempts > 10 || fixAttempts > maxFixAttempts) return null
+  const command = panelCommand(object.command)
+  if (!command) return null
+  const currentReviewJobID = object.currentReviewJobId === undefined ? undefined : numberValue(object.currentReviewJobId)
+  if (object.finalPanel !== undefined && (!panelText(object.finalPanel) || !object.finalPanel) || object.currentReviewJobId !== undefined && (currentReviewJobID === undefined || currentReviewJobID <= 0) || object.currentPanelRunUUID !== undefined && (!panelText(object.currentPanelRunUUID) || !object.currentPanelRunUUID)) return null
+  if (object.errorCode !== undefined && !panelRefineErrorCodes.includes(object.errorCode as PanelRefineErrorCode)) return null
+  if (object.stopReason !== undefined && !panelRefineStopReasons.includes(object.stopReason as PanelRefineStopReason)) return null
   const iterations: PanelRefineIteration[] = []
   for (const item of object.iterations) {
-    if (!item || typeof item !== 'object') return null
-    const entry = item as Record<string, unknown>
-    if (numberValue(entry.number) === undefined || typeof entry.targetHead !== 'string' || typeof entry.panel !== 'string') return null
-    iterations.push({ number: entry.number as number, targetHead: entry.targetHead, panel: entry.panel, reviewJobID: numberValue(entry.reviewJobId), panelRunUUID: typeof entry.panelRunUUID === 'string' ? entry.panelRunUUID : undefined, reviewResult: typeof entry.reviewResult === 'string' ? entry.reviewResult : undefined, fixAttempted: entry.fixAttempted === true, fixAgent: typeof entry.fixAgent === 'string' ? entry.fixAgent : undefined, headAfterFix: typeof entry.headAfterFix === 'string' ? entry.headAfterFix : undefined, error: typeof entry.error === 'string' ? entry.error : undefined })
+    const entry = objectWithKeys(item, panelRefineIterationRequiredKeys, panelRefineIterationOptionalKeys)
+    const number = entry ? numberValue(entry.number) : undefined
+    const reviewJobID = entry ? numberValue(entry.reviewJobId) : undefined
+    if (!entry || number === undefined || number <= 0 || !panelText(entry.targetHead) || !panelText(entry.panel) || !entry.panel || reviewJobID === undefined || reviewJobID <= 0 || !panelText(entry.panelRunUUID) || !panelRefineReviewResults.has(entry.reviewResult as string) || typeof entry.fixAttempted !== 'boolean') return null
+    if (entry.fixAgent !== undefined && (entry.fixAgent !== 'codex' || !panelText(entry.fixAgent)) || entry.headAfterFix !== undefined && !panelText(entry.headAfterFix) || entry.errorCode !== undefined && !panelRefineErrorCodes.includes(entry.errorCode as PanelRefineErrorCode)) return null
+    iterations.push({ number, targetHead: entry.targetHead, panel: entry.panel, reviewJobID, panelRunUUID: entry.panelRunUUID as string, reviewResult: entry.reviewResult as string, fixAttempted: entry.fixAttempted, fixAgent: entry.fixAgent as string | undefined, headAfterFix: entry.headAfterFix as string | undefined, errorCode: entry.errorCode as PanelRefineErrorCode | undefined })
   }
   const cancel = object.cancelState
-  const cancelState = cancel && typeof cancel === 'object' ? { available: (cancel as Record<string, unknown>).available === true, head: typeof (cancel as Record<string, unknown>).head === 'string' ? (cancel as Record<string, unknown>).head as string : undefined, branch: typeof (cancel as Record<string, unknown>).branch === 'string' ? (cancel as Record<string, unknown>).branch as string : undefined, dirty: (cancel as Record<string, unknown>).dirty === true, error: typeof (cancel as Record<string, unknown>).error === 'string' ? (cancel as Record<string, unknown>).error as string : undefined } : undefined
-  return { id: object.id as number | string, repositoryIdentity: object.repositoryIdentity, repositoryPath: object.repositoryPath, branch: typeof object.branch === 'string' ? object.branch : undefined, iterationPanel: object.iterationPanel, finalPanel: typeof object.finalPanel === 'string' ? object.finalPanel : undefined, fixAgent: object.fixAgent, maxFixAttempts: object.maxFixAttempts as number, fixAttempts: object.fixAttempts as number, phase: phase as PanelRefinePhase, startingHead: typeof object.startingHead === 'string' ? object.startingHead : undefined, currentHead: typeof object.currentHead === 'string' ? object.currentHead : undefined, currentReviewJobID: numberValue(object.currentReviewJobId), currentPanelRunUUID: typeof object.currentPanelRunUUID === 'string' ? object.currentPanelRunUUID : undefined, startedAt: typeof object.startedAt === 'string' ? object.startedAt : undefined, updatedAt: typeof object.updatedAt === 'string' ? object.updatedAt : undefined, completedAt: typeof object.completedAt === 'string' ? object.completedAt : undefined, error: typeof object.error === 'string' ? object.error : undefined, stopReason: typeof object.stopReason === 'string' ? object.stopReason : undefined, command: { executable: commandObject.executable as string, args: commandArgs as string[] }, cancelState, iterations }
+  let cancelState: PanelRefineRun['cancelState']
+  if (cancel !== undefined) {
+    const cancelObject = objectWithKeys(cancel, ['available'], ['head', 'branch', 'dirty', 'errorCode'])
+    if (!cancelObject || typeof cancelObject.available !== 'boolean' || cancelObject.head !== undefined && !panelText(cancelObject.head) || cancelObject.branch !== undefined && !panelText(cancelObject.branch) || cancelObject.dirty !== undefined && typeof cancelObject.dirty !== 'boolean' || cancelObject.errorCode !== undefined && cancelObject.errorCode !== 'repository_state_unavailable') return null
+    cancelState = { available: cancelObject.available, head: cancelObject.head as string | undefined, branch: cancelObject.branch as string | undefined, dirty: cancelObject.dirty as boolean | undefined, errorCode: cancelObject.errorCode as 'repository_state_unavailable' | undefined }
+  }
+  return { id: object.id, repositoryIdentity: object.repositoryIdentity, branch: object.branch, iterationPanel: object.iterationPanel, finalPanel: object.finalPanel as string | undefined, fixAgent: object.fixAgent, maxFixAttempts, fixAttempts, phase: object.phase as PanelRefinePhase, startingHead: object.startingHead as string, currentHead: object.currentHead as string, currentReviewJobID, currentPanelRunUUID: object.currentPanelRunUUID as string | undefined, startedAt: object.startedAt as string, updatedAt: object.updatedAt as string, completedAt: object.completedAt as string | undefined, errorCode: object.errorCode as PanelRefineErrorCode | undefined, stopReason: object.stopReason as PanelRefineStopReason | undefined, command, cancelState, iterations }
 }
 
 export function normalizePanelRefineResponse(value: unknown): PanelRefineResponse {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return { runs: [], run: null, options: null }
-  const object = value as Record<string, unknown>
-  if (!Array.isArray(object.runs)) return { runs: [], run: null, options: null }
+  const object = objectWithKeys(value, ['runs', 'options'], ['run'])
+  if (!object || !Array.isArray(object.runs)) return { runs: [], run: null, options: null }
   const runs = object.runs.map(parsePanelRefineRun).filter((run): run is PanelRefineRun => Boolean(run))
+  const direct = object.run === undefined ? null : parsePanelRefineRun(object.run)
+  const options = parsePanelRefineOptions(object.options)
+  if (object.run !== undefined && !direct || !options) return { runs: [], run: null, options: null }
   const active = (phase: PanelRefinePhase) => ['starting', 'reviewing', 'evaluating', 'fixing', 'final_reviewing'].includes(phase)
   runs.sort((left, right) => {
     if (active(left.phase) !== active(right.phase)) return active(left.phase) ? -1 : 1
     return String(right.updatedAt ?? right.startedAt ?? '').localeCompare(String(left.updatedAt ?? left.startedAt ?? ''))
   })
-  return { runs, run: runs[0] ?? null, options: parsePanelRefineOptions(object.options) }
+  return { runs, run: direct ?? runs[0] ?? null, options }
 }
 
 export type PanelInfo = {
@@ -1772,6 +1958,10 @@ export type FixPromptResponse = { text: string; jobId: number; stale: boolean }
 export type ReviewJob = {
   id: number
   job_id?: number
+  // These fields are safe daemon state, retained only when the typed backend
+  // projection explicitly supplies them. Repository/process authority is
+  // intentionally absent from this browser model.
+  review_id?: number
   uuid?: string
   job_uuid?: string
   repo_path?: string
@@ -1786,7 +1976,10 @@ export type ReviewJob = {
   model?: string
   reasoning?: string
   status?: string
+  state?: string
   verdict?: string
+  verdict_bool?: boolean
+  skipped?: boolean
   review?: { output?: string; verdict?: string; [key: string]: unknown } | string
   output?: string
   addressed?: boolean
@@ -1805,6 +1998,158 @@ export type ReviewJob = {
   member_job_ids?: number[]
   duration_ms?: number
   [key: string]: unknown
+}
+
+const reviewJobKeys = new Set(['id', 'job_id', 'review_id', 'uuid', 'job_uuid', 'git_ref', 'commit_sha', 'branch', 'subject', 'commit_subject', 'job_type', 'agent', 'model', 'reasoning', 'status', 'state', 'verdict', 'verdict_bool', 'skipped', 'review', 'output', 'addressed', 'closed', 'created_at', 'completed_at', 'enqueued_at', 'started_at', 'finished_at', 'panel_name', 'panel_member_name', 'panel_run_uuid', 'panel_role', 'parent_job_id', 'panel_member_index', 'member_job_ids', 'duration_ms'])
+const reviewForbiddenKeys = new Set(['repo_path', 'repo_name', 'repository_path', 'path', 'binary', 'binary_path', 'cwd', 'working_directory', 'env', 'stdout', 'stderr', 'raw_error', 'error', 'prompt', 'diff', 'patch', 'log', 'command_line', 'session', 'worker', 'machine'])
+const reviewTextKeys = new Set(['uuid', 'job_uuid', 'git_ref', 'commit_sha', 'branch', 'subject', 'commit_subject', 'job_type', 'agent', 'model', 'reasoning', 'status', 'state', 'verdict', 'created_at', 'completed_at', 'enqueued_at', 'started_at', 'finished_at', 'panel_name', 'panel_member_name', 'panel_run_uuid', 'panel_role'])
+const reviewMaxOutput = 4 * 1024 * 1024
+
+function reviewJobNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? value : undefined
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+  }
+  return undefined
+}
+function reviewSafeText(value: unknown, maxLength = 1024): value is string {
+  return typeof value === 'string' && value.length <= maxLength && !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)
+}
+function normalizeReviewPayload(value: unknown): ReviewJob['review'] | undefined | null {
+  if (value === undefined) return undefined
+  if (typeof value === 'string') return reviewSafeText(value, reviewMaxOutput) ? value : null
+  const object = objectWithKeys(value, [], ['output', 'verdict'])
+  if (!object) return null
+  if (object.output !== undefined && !reviewSafeText(object.output, reviewMaxOutput)) return null
+  if (object.verdict !== undefined && !reviewSafeText(object.verdict, 128)) return null
+  return { ...(object.output === undefined ? {} : { output: object.output }), ...(object.verdict === undefined ? {} : { verdict: object.verdict }) }
+}
+
+/** Normalize a review/job projection before it enters browser state. Paths,
+ * process details, prompts, logs, and raw errors are deliberately dropped. */
+export function normalizeReviewJob(value: unknown): ReviewJob | null {
+  const object = objectValue(value)
+  if (!object) return null
+  const id = reviewJobNumber(object.id ?? object.job_id)
+  if (id === undefined) return null
+  const explicitID = object.id === undefined ? id : reviewJobNumber(object.id)
+  const explicitJobID = object.job_id === undefined ? id : reviewJobNumber(object.job_id)
+  if (explicitID === undefined || explicitJobID === undefined || explicitID !== explicitJobID) return null
+  if ([...Object.keys(object)].some(key => (reviewForbiddenKeys.has(key.toLowerCase()) && key !== 'repo_path' && key !== 'repo_name') || (!reviewJobKeys.has(key) && key !== 'repo_path' && key !== 'repo_name'))) return null
+  const normalized: ReviewJob = { id }
+  if (object.job_id !== undefined) normalized.job_id = id
+  for (const key of reviewTextKeys) {
+    if (object[key] !== undefined) {
+      if (!reviewSafeText(object[key])) return null
+      normalized[key as keyof ReviewJob] = object[key] as never
+    }
+  }
+  const review = normalizeReviewPayload(object.review)
+  if (review === null) return null
+  if (review !== undefined) normalized.review = review
+  if (object.output !== undefined) {
+    if (!reviewSafeText(object.output, reviewMaxOutput)) return null
+    normalized.output = object.output
+  }
+  for (const key of ['addressed', 'closed'] as const) {
+    if (object[key] !== undefined) {
+      if (typeof object[key] !== 'boolean') return null
+      normalized[key] = object[key]
+    }
+  }
+  for (const key of ['verdict_bool', 'skipped'] as const) {
+    if (object[key] !== undefined) {
+      if (typeof object[key] !== 'boolean') return null
+      normalized[key] = object[key]
+    }
+  }
+  if (object.review_id !== undefined) {
+    const reviewID = reviewJobNumber(object.review_id)
+    if (reviewID === undefined) return null
+    normalized.review_id = reviewID
+  }
+  for (const key of ['parent_job_id', 'panel_member_index'] as const) {
+    if (object[key] !== undefined) {
+      const number = key === 'panel_member_index'
+        ? (typeof object[key] === 'number' && Number.isSafeInteger(object[key]) && object[key] >= 0 ? object[key] : typeof object[key] === 'string' && /^\d+$/.test(object[key]) && Number.isSafeInteger(Number(object[key])) ? Number(object[key]) : undefined)
+        : reviewJobNumber(object[key])
+      if (number === undefined) return null
+      normalized[key] = number
+    }
+  }
+  if (object.member_job_ids !== undefined) {
+    if (!Array.isArray(object.member_job_ids) || object.member_job_ids.length > 256) return null
+    const ids = object.member_job_ids.map(reviewJobNumber)
+    if (ids.some(number => number === undefined)) return null
+    normalized.member_job_ids = ids as number[]
+  }
+  if (object.duration_ms !== undefined) {
+    if (typeof object.duration_ms !== 'number' || !Number.isSafeInteger(object.duration_ms) || object.duration_ms < 0) return null
+    normalized.duration_ms = object.duration_ms
+  }
+  return normalized
+}
+
+// `/api/review?job_id=` is not a job-shaped response. RoboRev's detail
+// envelope uses the storage review-row `id` at the top level and carries the
+// requested job identity in `job_id` plus the nested `job.id`. Keep that row
+// identity out of the browser job model and require all job identities to
+// agree before projecting any display data.
+const reviewDetailKeys = new Set([...reviewJobKeys, 'job', 'text', 'markdown', 'result'])
+const reviewDetailOverlayKeys = [...reviewJobKeys].filter(key => key !== 'id' && key !== 'job_id')
+
+function reviewDetailObject(value: unknown): Record<string, unknown> | null {
+  const object = objectValue(value)
+  if (!object) return null
+  // Do not run the recursive forbidden-key scanner here: the nested `job`
+  // object may still contain the server-side repo_path used for authorization.
+  // normalizeReviewJob below strips that field while rejecting all other
+  // unknown/private nested keys.
+  if (Object.keys(object).some(key => !reviewDetailKeys.has(key) || projectionForbiddenKeys.has(key.replace(/[_-]/g, '').toLowerCase()))) return null
+  return object
+}
+
+function reviewDetailOutput(value: unknown): string | undefined | null {
+  if (value === undefined) return undefined
+  return reviewSafeText(value, reviewMaxOutput) ? value : null
+}
+
+/** Normalize the review-row/job detail envelope without exposing row IDs or
+ * repository/process authority. Plain job-shaped fixtures remain supported
+ * for the list-compatible callers and tests. */
+export function normalizeReviewDetail(value: unknown, expectedJobID?: number): ReviewJob | null {
+  const object = reviewDetailObject(value)
+  if (!object) return null
+  const nestedValue = object.job
+  if (nestedValue !== undefined) {
+    const nested = normalizeReviewJob(nestedValue)
+    if (!nested) return null
+    const nestedID = reviewJobNumber(nested.id)
+    const wireJobID = object.job_id === undefined ? nestedID : reviewJobNumber(object.job_id)
+    if (nestedID === undefined || wireJobID === undefined || wireJobID !== nestedID) return null
+    const targetID = expectedJobID ?? wireJobID
+    if (!Number.isSafeInteger(targetID) || targetID <= 0 || targetID !== wireJobID) return null
+    if (object.id !== undefined && reviewJobNumber(object.id) === undefined) return null
+
+    const overlay: Record<string, unknown> = { id: targetID, job_id: targetID }
+    for (const key of reviewDetailOverlayKeys) if (object[key] !== undefined) overlay[key] = object[key]
+    const text = reviewDetailOutput(object.text)
+    const markdown = reviewDetailOutput(object.markdown)
+    const result = reviewDetailOutput(object.result)
+    if (text === null || markdown === null || result === null) return null
+    if (overlay.output === undefined && overlay.review === undefined) {
+      const displayOutput = text ?? markdown ?? result
+      if (displayOutput !== undefined) overlay.output = displayOutput
+    }
+    const normalizedOverlay = normalizeReviewJob(overlay)
+    if (!normalizedOverlay) return null
+    return { ...nested, ...normalizedOverlay, id: targetID, job_id: targetID }
+  }
+
+  const direct = normalizeReviewJob(object)
+  if (!direct || (expectedJobID !== undefined && direct.id !== expectedJobID)) return null
+  return direct
 }
 
 export type AnalysisType = {
@@ -2052,10 +2397,10 @@ export function normalizeCIWorkflowExecuteResult(value: unknown): CIWorkflowExec
 }
 
 export function jobsFromPayload(value: unknown): ReviewJob[] {
-  if (Array.isArray(value)) return value as ReviewJob[]
+  if (Array.isArray(value)) return value.map(normalizeReviewJob).filter((job): job is ReviewJob => Boolean(job))
   if (value && typeof value === 'object') {
     const object = value as Record<string, unknown>
-    for (const key of ['jobs', 'reviews', 'items']) if (Array.isArray(object[key])) return object[key] as ReviewJob[]
+    for (const key of ['jobs', 'reviews', 'items']) if (Array.isArray(object[key])) return object[key].map(normalizeReviewJob).filter((job): job is ReviewJob => Boolean(job))
   }
   return []
 }

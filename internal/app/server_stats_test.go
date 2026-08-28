@@ -491,3 +491,21 @@ func TestStatsMalformedProductionHealthReturns502BeforeStatsCommands(t *testing.
 		})
 	}
 }
+
+func TestStatsSummaryBrowserProjectionRedactsRepositoryPaths(t *testing.T) {
+	privatePath := `E:\private\stats-marker`
+	encoded, err := json.Marshal(browserStatsSummary(stats.Summary{
+		RepoPath: privatePath,
+		Repos:    []stats.Repo{{Name: "safe-name", Path: privatePath, Total: 2}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+	if strings.Contains(body, privatePath) || strings.Contains(body, "repo_path") || strings.Contains(body, `"path"`) {
+		t.Fatalf("stats browser projection leaked repository path: %s", body)
+	}
+	if !strings.Contains(body, "safe-name") || !strings.Contains(body, `"total":2`) {
+		t.Fatalf("path-free aggregate row missing: %s", body)
+	}
+}

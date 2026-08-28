@@ -13,7 +13,7 @@ const targets: RepositoryMergeCandidate[] = [
 const preview = {
   source: { path: 'E:/fresh/source', name: 'fresh-source', jobCount: 8 },
   target: { repositoryIdentity: 'target-b', path: 'E:\\fresh\\target', name: 'fresh-target', jobCount: 4 },
-  command: { executable: 'roborev.exe', args: ['repo', 'merge', '--yes', 'E:/fresh/source', 'E:\\fresh\\target'], workingDirectory: '' },
+  command: { executable: 'roborev', args: ['repo', 'merge', '--yes', 'E:/fresh/source', 'E:\\fresh\\target'], workingDirectory: '' },
   token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z',
 }
 
@@ -62,7 +62,7 @@ describe('RepositoryMergeDialog', () => {
     expect(targetFacts).toHaveTextContent('4')
     expect(targetFacts).not.toHaveTextContent('same-looking-path')
     const command = document.querySelector('.merge-command-preview')
-    expect(command).toHaveTextContent('roborev.exe')
+    expect(command).toHaveTextContent('roborev')
     expect(command).toHaveTextContent('repo')
     expect(command).toHaveTextContent('merge')
     expect(command).toHaveTextContent('--yes')

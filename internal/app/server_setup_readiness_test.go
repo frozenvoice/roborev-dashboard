@@ -278,7 +278,7 @@ func TestRepositorySetupReadinessMethodAndBodyFailuresDoNotMutateGate(t *testing
 	get := httptest.NewRequest(http.MethodGet, "/api/repositories/setup-readiness", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, get)
-	if response.Code != http.StatusOK || calls != 0 || !strings.Contains(response.Header().Get("Content-Type"), "text/html") {
+	if response.Code != http.StatusNotFound || calls != 0 || !strings.Contains(response.Header().Get("Content-Type"), "application/json") {
 		t.Fatalf("method status=%d calls=%d body=%s headers=%v", response.Code, calls, response.Body.String(), response.Header())
 	}
 	response = httptest.NewRecorder()

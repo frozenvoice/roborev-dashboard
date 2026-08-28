@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	proc "github.com/froze/roborev-dashboard/internal/process"
 )
@@ -30,6 +31,12 @@ func newMutationClient(t *testing.T, version, daemonURL string) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.versionMu.Lock()
+	_, _, generation := client.snapshot()
+	client.version = version
+	client.versionGeneration = generation
+	client.versionAt = time.Now()
+	client.versionMu.Unlock()
 	return client
 }
 
@@ -39,12 +46,13 @@ func TestReviewPostsPinnedTargetToEnqueue(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/health":
-			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 		case "/api/enqueue":
 			method, path = r.Method, r.URL.Path
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode body: %v", err)
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"job_id":49}`))
 		default:
@@ -82,7 +90,7 @@ func TestRerunPostsFrozenJobID(t *testing.T) {
 	var method, path string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 			return
 		}
 		method, path = r.Method, r.URL.Path
@@ -134,7 +142,7 @@ func TestReviewRejectsMalformedAndNon2xxDaemonResponses(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/health" {
-					_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+					_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 					return
 				}
 				w.WriteHeader(test.status)

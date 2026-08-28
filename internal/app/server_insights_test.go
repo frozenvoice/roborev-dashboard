@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -16,15 +17,48 @@ import (
 
 type fakeInsightsService struct {
 	*fakeService
-	launches int
+	launches         int
+	launchContextErr error
 }
 
 func (f *fakeInsightsService) InsightsPreflight(context.Context, insights.Request) (insights.Preflight, error) {
 	return insights.Preflight{Command: insights.Command{Executable: "roborev", Args: []string{"insights", "--repo", `E:\repo`, "--since", "30d", "--json"}, Dir: `E:\repo`}, Binding: "1:roborev", CLIVersion: "v0.64.0", DaemonVersion: "v0.64.0"}, nil
 }
-func (f *fakeInsightsService) Insights(context.Context, insights.Request, insights.Preflight) (insights.LaunchResult, error) {
+func (f *fakeInsightsService) Insights(ctx context.Context, _ insights.Request, _ insights.Preflight) (insights.LaunchResult, error) {
 	f.launches++
+	f.launchContextErr = ctx.Err()
 	return insights.LaunchResult{Receipt: &insights.Receipt{JobID: 42, Agent: "codex", Since: time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)}}, nil
+}
+
+func TestInsightsResultErrorsDoNotExposeDaemonDetails(t *testing.T) {
+	service := &fakeInsightsService{fakeService: &fakeService{
+		repoPath: `E:\repo`,
+		showErr:  errors.New(`daemon private path C:\secret\prompt-marker`),
+		panelMetadata: map[int64]roborev.JobMetadata{
+			42: {ID: 42, RepoPath: `E:\repo`, JobType: "insights", Status: "done"},
+		},
+	}}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(`E:\repo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/insights/42/result?repositoryIdentity="+identity, nil)
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Sec-Fetch-Mode", "cors")
+	request.Header.Set("Sec-Fetch-Dest", "empty")
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "prompt-marker") || !strings.Contains(recorder.Body.String(), "Insights result could not be loaded") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestInsightsPreviewConfirmAndGenericRerunFailClosed(t *testing.T) {
@@ -77,6 +111,83 @@ func TestInsightsPreviewConfirmAndGenericRerunFailClosed(t *testing.T) {
 	server.Handler().ServeHTTP(recorder, rerun)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("generic Insights rerun status=%d", recorder.Code)
+	}
+}
+
+func TestInsightsAcceptedLaunchDoesNotInheritBrowserCancellation(t *testing.T) {
+	service := &fakeInsightsService{fakeService: &fakeService{repoPath: `E:\repo`}}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(`E:\repo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewBody, _ := json.Marshal(map[string]any{"repositoryIdentity": identity, "window": "30d", "branchScope": "all"})
+	preview := httptest.NewRequest(http.MethodPost, "/api/insights/preview", strings.NewReader(string(previewBody)))
+	preview.Header.Set("X-CSRF-Token", server.csrfToken)
+	previewRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(previewRecorder, preview)
+	if previewRecorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", previewRecorder.Code, previewRecorder.Body.String())
+	}
+	var decoded insights.Preview
+	if err := json.Unmarshal(previewRecorder.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	confirm := httptest.NewRequest(http.MethodPost, "/api/insights", strings.NewReader(`{"token":"`+decoded.Token+`"}`)).WithContext(requestCtx)
+	confirm.Header.Set("X-CSRF-Token", server.csrfToken)
+	cancel()
+	confirmRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(confirmRecorder, confirm)
+	if confirmRecorder.Code != http.StatusAccepted || service.launches != 1 || service.launchContextErr != nil {
+		t.Fatalf("confirm status=%d launches=%d contextErr=%v body=%s", confirmRecorder.Code, service.launches, service.launchContextErr, confirmRecorder.Body.String())
+	}
+}
+
+func TestInsightsGlobalGateBlocksDaemonEnqueue(t *testing.T) {
+	service := &fakeInsightsService{fakeService: &fakeService{repoPath: `E:\repo`}}
+	registry := NewRegistry(fakeInspector{}, "")
+	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(service, registry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := registry.Identity(`E:\repo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previewBody, _ := json.Marshal(map[string]any{"repositoryIdentity": identity, "window": "30d", "branchScope": "all"})
+	preview := httptest.NewRequest(http.MethodPost, "/api/insights/preview", strings.NewReader(string(previewBody)))
+	preview.Header.Set("X-CSRF-Token", server.csrfToken)
+	previewRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(previewRecorder, preview)
+	if previewRecorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", previewRecorder.Code, previewRecorder.Body.String())
+	}
+	var decoded insights.Preview
+	if err := json.Unmarshal(previewRecorder.Body.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	release, err := server.Gate.AcquireFix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := httptest.NewRequest(http.MethodPost, "/api/insights", strings.NewReader(`{"token":"`+decoded.Token+`"}`))
+	confirm.Header.Set("X-CSRF-Token", server.csrfToken)
+	confirmRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(confirmRecorder, confirm)
+	release()
+	if confirmRecorder.Code != http.StatusConflict || service.launches != 0 {
+		t.Fatalf("busy confirm status=%d launches=%d body=%s", confirmRecorder.Code, service.launches, confirmRecorder.Body.String())
 	}
 }
 

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App, CommentBox, ReviewDetail } from './App'
-import type { PanelInfo } from './api'
+import { BACKEND_COMMAND_SENTINEL, type PanelInfo } from './api'
 import { I18nProvider, LANGUAGE_STORAGE_KEY } from './i18n'
 
 const bootstrap = {
@@ -13,12 +13,14 @@ const jobs = [{ id: 42, git_ref: 'abcdef123456', commit_subject: 'Initial dashbo
 async function openFixRefine() { await userEvent.click(screen.getByRole('button', { name: 'Fix & Refine' })) }
 const defaultPanel: PanelInfo = { name: 'reviewers', kind: 'panel', members: ['codex', 'claude-code'], origin: 'global', valid: true }
 const setupReady = { status: 'ready', phase: 'ready', operationActive: false, installed: true, binaryPath: 'C:\\Tools\\roborev.exe', version: 'v0.64.0', recommendedVersion: 'v0.64.0', compatible: true, panelRefineCompatible: true, daemonRunning: true, blocked: false, retryable: false, installAvailable: false, canInstall: false, canRetry: false, canStartDaemon: false, architecture: 'windows-amd64', sourceURL: 'https://github.com/kenn-io/roborev/releases/tag/v0.64.0', sourceLabel: 'Official GitHub release', assetName: 'roborev-v0.64.0-windows-amd64.zip', sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', targetPath: 'C:\\Tools\\roborev.exe', downloadedBytes: 1200, totalBytes: 1200 }
-const setupAgents = { repositoryIdentity: 'repo-1', roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: 'claude', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\claude.exe', health: 'not_checked' }] }
-const setupAgentsB = { repositoryIdentity: 'repo-2', roborevVersion: 'v0.64.0', configured: [{ name: 'Gemini CLI', agent: 'gemini', model: 'pro', reasoning: 'high', command: 'gemini', commandSource: 'config', detected: true, detectionReason: 'Found in PATH', resolvedPath: 'C:\\Tools\\gemini.exe', health: 'not_checked' }] }
-const setupRuntime = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, daemonCommands: { start: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'start'] }, stop: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'stop'] }, restart: { executable: 'C:\\Tools\\roborev.exe', args: ['daemon', 'restart'] } } }
-const refineOptions = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
+const setupAgents = { repositoryIdentity: 'repo-1', roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: BACKEND_COMMAND_SENTINEL, commandSource: 'config', detected: true, detectionReason: 'Executable detected without sending an agent request.', health: 'not_checked' }] }
+const setupAgentsB = { repositoryIdentity: 'repo-2', roborevVersion: 'v0.64.0', configured: [{ name: 'Gemini CLI', agent: 'gemini', model: 'pro', reasoning: 'high', command: BACKEND_COMMAND_SENTINEL, commandSource: 'config', detected: true, detectionReason: 'Executable detected without sending an agent request.', health: 'not_checked' }] }
+const daemonCommand = (action: 'start' | 'stop' | 'restart') => ({ executable: 'roborev', args: ['daemon', action] })
+const setupRuntime = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, startCommand: daemonCommand('start'), stopCommand: daemonCommand('stop'), restartCommand: daemonCommand('restart'), daemonCommands: { start: daemonCommand('start'), stop: daemonCommand('stop'), restart: daemonCommand('restart') } }
+const refineOptions = { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
+const refineCommand = { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] }
 function refineRun(overrides: Record<string, unknown> = {}) {
-  return { id: 'refine-1', repositoryIdentity: 'repo-1', repositoryPath: 'E:\\repo', branch: 'main', iterationPanel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, fixAttempts: 0, phase: 'reviewing', startingHead: 'abcdef123456', currentHead: 'abcdef123456', currentReviewJobId: 42, iterations: [], command: refineOptions, ...overrides }
+  return { id: 'refine-1', repositoryIdentity: 'repo-1', branch: 'main', iterationPanel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, fixAttempts: 0, phase: 'reviewing', startingHead: 'abcdef123456', currentHead: 'abcdef123456', startedAt: '2026-08-17T00:00:00Z', updatedAt: '2026-08-17T00:00:05Z', currentReviewJobId: 42, iterations: [], command: refineCommand, ...overrides }
 }
 function refineEnvelope(runs: unknown[] = [refineRun()], options = refineOptions) { return { runs, options } }
 
@@ -1854,7 +1856,7 @@ describe('App review workflow', () => {
     await openFixRefine()
     expect(await screen.findByText('Reviewing')).toBeInTheDocument()
     await vi.advanceTimersByTimeAsync(4_000)
-    expect(await screen.findByRole('alert')).toHaveTextContent('refine refresh failed')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Panel Refine could not be refreshed: Failed')
     expect(screen.getByText('Reviewing')).toBeInTheDocument()
     await vi.advanceTimersByTimeAsync(4_000)
     expect(await screen.findByText('Panel Refine passed')).toBeInTheDocument()
@@ -1878,7 +1880,7 @@ describe('App review workflow', () => {
     render(<App />)
     await openFixRefine()
     await waitFor(() => expect(refineCalls).toBe(1))
-    expect(await screen.findByRole('alert')).toHaveTextContent('initial refine refresh failed')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Panel Refine could not be refreshed: Failed')
     await vi.advanceTimersByTimeAsync(2_000)
     await waitFor(() => expect(refineCalls).toBe(2))
     const disabledActions = await screen.findAllByRole('button', { name: 'Execution disabled' })
@@ -1897,7 +1899,7 @@ describe('App review workflow', () => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(++bootstrapCalls === 1 ? initial : switched)
       if (path === '/api/repos/select' && init?.method === 'POST') return response({ success: true })
-      if (path.startsWith('/api/panel-refines?')) return path.includes(encodeURIComponent(otherRepository.path)) ? response(refineEnvelope([{ ...refineRun(), id: 'refine-2', repositoryIdentity: 'repo-2', repositoryPath: otherRepository.path, branch: otherRepository.branch, currentHead: otherRepository.head }])) : old.promise
+      if (path.startsWith('/api/panel-refines?')) return path.includes(encodeURIComponent(otherRepository.path)) ? response(refineEnvelope([{ ...refineRun(), id: 'refine-2', repositoryIdentity: 'repo-2', branch: otherRepository.branch, currentHead: otherRepository.head }])) : old.promise
       if (path.startsWith('/api/reviews?')) return response([])
       return response({ success: true })
     }))
@@ -1942,7 +1944,7 @@ describe('App review workflow', () => {
   })
 
   it('accepts a panel refine response when the opaque repository identity matches despite path spelling', async () => {
-    const caseVariantRun = refineRun({ repositoryPath: 'e:\REPO' })
+    const caseVariantRun = refineRun()
     vi.stubGlobal('fetch', withPanels((input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/bootstrap') return response(bootstrap)
@@ -2434,7 +2436,7 @@ describe('App review workflow', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Agents & Setup' }))
     await userEvent.click(await screen.findByRole('button', { name: 'Stop daemon' }))
     expect(screen.getByRole('dialog')).toHaveTextContent('Active jobs may be interrupted; queued jobs remain queued.')
-    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['C:\\Tools\\roborev.exe', 'daemon', 'stop']))
+    expect(screen.getByRole('dialog')).toHaveTextContent(JSON.stringify(['roborev', 'daemon', 'stop']))
     const beforePanels = panelCalls
     const beforeReviews = reviewCalls
     await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop daemon' }))

@@ -133,6 +133,7 @@ describe('ReviewDetail lazy Prompt/Log ownership', () => {
         promptSignals.push(init.signal)
         return pendingUntilAborted(init.signal)
       }
+      if (path === '/api/reviews/42' || path === '/api/reviews/99') return response(path.endsWith('/42') ? firstJob : secondJob)
       return response({ ...job })
     }))
     const { rerender, unmount } = render(<I18nProvider><ReviewDetail {...props} job={firstJob} jobs={[firstJob]} /></I18nProvider>)

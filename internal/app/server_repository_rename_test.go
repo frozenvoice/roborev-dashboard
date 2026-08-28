@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,7 +159,7 @@ func TestRepositoryRenameConfirmMapsAdapterPreProcessErrors(t *testing.T) {
 		{name: "offline", err: roborev.ErrRepositoryRenameOffline, wantStatus: http.StatusServiceUnavailable},
 		{name: "unhealthy", err: roborev.ErrRepositoryRenameUnhealthy, wantStatus: http.StatusServiceUnavailable},
 		{name: "deadline", err: context.DeadlineExceeded, wantStatus: http.StatusGatewayTimeout},
-		{name: "unknown", err: errors.New("pre-process failure"), wantStatus: http.StatusBadGateway},
+		{name: "unknown", err: errors.New("private stderr marker C:\\private\\roborev.exe"), wantStatus: http.StatusBadGateway},
 		{name: "started false nil", result: reporename.ExecutionResult{}, wantStatus: http.StatusBadGateway},
 	}
 	base := repoinventory.Inventory{Repositories: []repoinventory.Repository{{Name: "old", RootPath: `E:\tracked repo`}}}
@@ -170,6 +171,9 @@ func TestRepositoryRenameConfirmMapsAdapterPreProcessErrors(t *testing.T) {
 			response := confirmRename(t, server, token)
 			if response.Code != test.wantStatus {
 				t.Fatalf("status=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "private stderr marker") || strings.Contains(response.Body.String(), `C:\private\roborev.exe`) {
+				t.Fatalf("private process detail leaked in response: %s", response.Body.String())
 			}
 			if service.renameCalls != 1 || service.installationCalls != 1 || service.preflights != 1 || service.inventoryCallCount != 1 {
 				t.Fatalf("duplicate/direct work: rename=%d installation=%d preflight=%d inventory=%d", service.renameCalls, service.installationCalls, service.preflights, service.inventoryCallCount)
@@ -441,6 +445,37 @@ func TestRepositoryRenameConcurrentSamePathClaimsAtMostOneProcess(t *testing.T) 
 	first := <-firstDone
 	if first.Code != http.StatusOK || service.renameCalls != 1 {
 		t.Fatalf("first status=%d calls=%d body=%s", first.Code, service.renameCalls, first.Body.String())
+	}
+}
+
+func TestRepositoryRenamePreviewStoreExpiresBeforeCapacityAndEvictsDeterministically(t *testing.T) {
+	store := newRepositoryRenamePreviewStore()
+	now := time.Now()
+	store.pending["expired"] = repositoryRenamePreviewRecord{ExpiresAt: now.Add(-time.Second)}
+	for index := 0; index < repositoryRenamePreviewMax-1; index++ {
+		store.pending[fmt.Sprintf("live-%02d", index)] = repositoryRenamePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryRenamePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.pending) != repositoryRenamePreviewMax {
+		t.Fatalf("expiry was not processed first: pending=%d", len(store.pending))
+	}
+	if _, ok := store.pending["expired"]; ok {
+		t.Fatal("expired preview was not removed before capacity eviction")
+	}
+	store = newRepositoryRenamePreviewStore()
+	for index := 0; index < repositoryRenamePreviewMax; index++ {
+		store.pending[fmt.Sprintf("token-%02d", index)] = repositoryRenamePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryRenamePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.pending["token-00"]; ok {
+		t.Fatal("lexicographically oldest token was not evicted on expiry tie")
+	}
+	if len(store.pending) != repositoryRenamePreviewMax {
+		t.Fatalf("pending=%d want=%d", len(store.pending), repositoryRenamePreviewMax)
 	}
 }
 

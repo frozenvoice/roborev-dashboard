@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeCIWorkflow, executeRepositoryAgentConfiguration, executeRepositoryTracking, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositoryAgentConfigurationPreview, fetchRepositoryAgentConfigurationStatus, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizeRepositoryAgentConfigurationExecuteResult, normalizeRepositoryAgentConfigurationPreview, normalizeRepositoryAgentConfigurationStatus, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRepositoryTrackingExecuteResult, normalizeRepositoryTrackingPreview, normalizeRuntimeDiagnostics, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, setCSRF, validateRepositoryRenameName } from './api'
+import { BACKEND_COMMAND_SENTINEL, executeCIWorkflow, executeRepositoryAgentConfiguration, executeRepositoryTracking, executeSnapshotIgnore, fetchCIWorkflowPreview, fetchRepositoryAgentConfigurationPreview, fetchRepositoryAgentConfigurationStatus, fetchRepositorySetupReadiness, fetchRepositoryTrackingPreview, fetchSnapshotIgnorePreview, normalizeAgentsResponse, normalizeCIWorkflowExecuteResult, normalizeCIWorkflowPreview, normalizePanelRefineResponse, normalizeRepositoryAgentConfigurationExecuteResult, normalizeRepositoryAgentConfigurationPreview, normalizeRepositoryAgentConfigurationStatus, normalizeRepositoryInventoryResponse, normalizeRepositoryMergeEligibility, normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, normalizeRepositoryMoveEligibility, normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, normalizeRepositoryRenamePreview, normalizeRepositoryRenameResult, normalizeRepositorySetupReadiness, normalizeRepositoryTrackingExecuteResult, normalizeRepositoryTrackingPreview, normalizeRuntimeControl, normalizeRuntimeDiagnostics, normalizeReviewDetail, normalizeReviewJob, normalizeSnapshotIgnoreExecuteResult, normalizeSnapshotIgnorePreview, normalizeStatsCostResponse, normalizeStatsSummaryResponse, setCSRF, validateRepositoryRenameName } from './api'
 
 const ciContent = 'name: RoboRev\non:\n  pull_request:\n    branches: [main]\n'
 const ciPreview = { version: 'v0.64.0', repositoryIdentity: 'repo-1', target: '.github/workflows/roborev.yml', workflow: { content: ciContent, sha256: 'a'.repeat(64) }, write: { status: 'available' as const, token: 'opaque-create-token', expiresAt: '2099-01-01T00:00:00.000Z' } }
@@ -168,6 +168,62 @@ describe('runtime diagnostics API normalization', () => {
     const inherited = Object.create({ extra: true }) as Record<string, unknown>
     Object.assign(inherited, diagnostics)
     expect(normalizeRuntimeDiagnostics(inherited)).toBeNull()
+  })
+})
+
+describe('agents, runtime control, and panel refine projections', () => {
+  const agents = { repositoryIdentity: 'repo-1', roborevVersion: 'v0.64.0', configured: [{ name: 'Claude Code', agent: 'claude-code', model: 'sonnet', reasoning: 'medium', command: BACKEND_COMMAND_SENTINEL, commandSource: 'config', detected: true, detectionReason: 'Executable detected without sending an agent request.', health: 'not_checked', lastCheckedAt: '2026-08-19T01:02:03Z' }] }
+  const command = (action: 'start' | 'stop' | 'restart') => ({ executable: 'roborev', args: ['daemon', action] })
+  const runtime = { daemonRunning: true, operationActive: false, queueState: 'processing', canPause: true, canResume: false, canStart: false, canStop: true, canRestart: true, startCommand: command('start'), stopCommand: command('stop'), restartCommand: command('restart'), daemonCommands: { start: command('start'), stop: command('stop'), restart: command('restart') } }
+  const panel = { runs: [{ id: 'run-1', repositoryIdentity: 'repo-1', branch: 'main', iterationPanel: 'dashboard_cross', fixAgent: 'codex', maxFixAttempts: 3, fixAttempts: 0, phase: 'reviewing', startingHead: 'abcdef123456', currentHead: 'abcdef123456', startedAt: '2026-08-19T01:02:03Z', updatedAt: '2026-08-19T01:02:04Z', iterations: [{ number: 1, targetHead: 'abcdef123456', panel: 'dashboard_cross', reviewJobId: 42, panelRunUUID: 'panel-1', reviewResult: 'F', fixAttempted: false }], command: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] } }], options: { executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 } }
+
+  it('accepts only the content-free agent projection and rejects private/arbitrary command fields', () => {
+    expect(normalizeAgentsResponse(agents)?.configured[0].command).toBe(BACKEND_COMMAND_SENTINEL)
+    expect(normalizeAgentsResponse({ ...agents, configured: [{ ...agents.configured[0], resolvedPath: 'C:\\private\\claude.exe' }] })).toBeNull()
+    expect(normalizeAgentsResponse({ ...agents, configured: [{ ...agents.configured[0], command: 'claude' }] })).toBeNull()
+    expect(normalizeAgentsResponse({ ...agents, configured: [{ ...agents.configured[0], nested: { env: 'PRIVATE' } }] })).toBeNull()
+  })
+
+  it('requires semantic daemon command previews with exact actions', () => {
+    expect(normalizeRuntimeControl(runtime)?.daemonCommands?.start).toEqual(command('start'))
+    expect(normalizeRuntimeControl({ ...runtime, daemonCommands: { ...runtime.daemonCommands, stop: command('restart') } })).toBeNull()
+    expect(normalizeRuntimeControl({ ...runtime, startCommand: { executable: 'C:\\private\\roborev.exe', args: ['daemon', 'start'] } })).toBeNull()
+    expect(normalizeRuntimeControl({ ...runtime, daemonCommands: { ...runtime.daemonCommands, secret: command('start') } })).toBeNull()
+  })
+
+  it('normalizes the server Panel Refine DTO and rejects path/raw error drift', () => {
+    const normalized = normalizePanelRefineResponse(panel)
+    expect(normalized.runs[0].command).toEqual({ executable: 'roborev', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] })
+    expect(normalizePanelRefineResponse({ ...panel, runs: [{ ...panel.runs[0], repositoryPath: 'C:\\private\\repo' }] }).runs).toHaveLength(0)
+    expect(normalizePanelRefineResponse({ ...panel, runs: [{ ...panel.runs[0], error: 'PRIVATE_STDERR' }] }).runs).toHaveLength(0)
+    expect(normalizePanelRefineResponse({ ...panel, runs: [{ ...panel.runs[0], command: { ...panel.runs[0].command, executable: 'C:\\private\\roborev.exe' } }] }).runs).toHaveLength(0)
+  })
+})
+
+describe('review job browser projection', () => {
+  const job = { id: 42, git_ref: 'abcdef123456', branch: 'main', status: 'done', verdict: 'P', skipped: false, review: { output: '# Pass' } }
+  it('drops server-only repository paths and rejects raw process fields', () => {
+    const normalized = normalizeReviewJob({ ...job, repo_path: 'C:\\private\\repo', repo_name: 'secret' })
+    expect(normalized).not.toBeNull()
+    expect(normalized).not.toHaveProperty('repo_path')
+    expect(normalizeReviewJob({ ...job, stderr: 'PRIVATE_STDERR' })).toBeNull()
+    expect(normalizeReviewJob({ ...job, review: { output: '# Pass', rawError: 'PRIVATE_ERROR' } })).toBeNull()
+    expect(normalizeReviewDetail(job, 42)).not.toBeNull()
+    expect(normalizeReviewJob({ id: 43, panel_role: 'member', panel_run_uuid: '986d3bfa-05da-4621-aeca-66f493a19ea3', panel_member_index: 0, status: 'done', verdict: 'F', agent: 'codex' })).not.toBeNull()
+  })
+
+  it('uses the nested job identity for detail envelopes and strips nested authority', () => {
+    const detail = normalizeReviewDetail({
+      id: 9001,
+      job_id: 42,
+      job: { id: 42, job_id: 42, repo_path: 'C:\\private\\repo', status: 'done', panel_role: 'synthesis' },
+      review: { output: '# Pass' },
+    }, 42)
+    expect(detail).toMatchObject({ id: 42, job_id: 42, status: 'done', panel_role: 'synthesis', review: { output: '# Pass' } })
+    expect(detail).not.toHaveProperty('repo_path')
+    expect(normalizeReviewDetail({ id: 9001, job_id: 43, job: { id: 42, status: 'done' } }, 42)).toBeNull()
+    expect(normalizeReviewDetail({ id: 9001, job_id: 42, job: { id: 43, status: 'done' } }, 42)).toBeNull()
+    expect(normalizeReviewDetail({ id: 9001, job_id: 42, job: { id: 42, status: 'done', stderr: 'PRIVATE_STDERR' } }, 42)).toBeNull()
   })
 })
 
@@ -383,7 +439,7 @@ describe('repository tracking management API contract', () => {
 })
 
 describe('repository rename API normalization and validation', () => {
-  const preview = { path: 'E:\\tracked', currentName: 'Old', newName: '새 이름', jobCount: 4, dashboardRegistered: true, command: { executable: 'roborev.exe', args: ['repo', 'rename', 'E:\\tracked', '새 이름'] }, token: 'token', expiresAt: '2026-08-23T01:02:03Z' }
+  const preview = { path: 'E:\\tracked', currentName: 'Old', newName: '새 이름', jobCount: 4, dashboardRegistered: true, command: { executable: 'roborev', args: ['repo', 'rename', 'E:\\tracked', '새 이름'] }, token: 'token', expiresAt: '2026-08-23T01:02:03Z' }
 
   it('accepts the strict preview and receipt DTOs while preserving raw path/argv', () => {
     expect(normalizeRepositoryRenamePreview(preview)).toEqual(preview)
@@ -393,6 +449,9 @@ describe('repository rename API normalization and validation', () => {
 
   it('rejects unknown fields, malformed command/expiry, and unsafe rename receipts', () => {
     expect(normalizeRepositoryRenamePreview({ ...preview, identity: 'secret' })).toBeNull()
+    expect(normalizeRepositoryRenamePreview({ ...preview, command: { ...preview.command, executable: 'C:\\private\\roborev.exe' } })).toBeNull()
+    expect(normalizeRepositoryRenamePreview({ ...preview, command: { ...preview.command, stderr: 'private stderr marker' } })).toBeNull()
+    expect(normalizeRepositoryRenamePreview({ ...preview, details: { rawError: 'private process marker' } })).toBeNull()
     expect(normalizeRepositoryRenamePreview({ ...preview, command: { ...preview.command, args: [] } })).toBeNull()
     expect(normalizeRepositoryRenamePreview({ ...preview, expiresAt: 'not-a-date' })).toBeNull()
     expect(normalizeRepositoryRenameResult({ status: 'renamed', path: 'E:\\tracked', previousName: 'Old', name: '새 이름', jobCount: 4 })).toBeNull()
@@ -415,7 +474,7 @@ describe('repository move API normalization', () => {
   const preview = {
     sourcePath: 'E:/old/project', sourceName: 'old-name', jobCount: 4,
     destinationRepositoryIdentity: 'opaque-destination', destinationPath: 'E:\\new\\project', destinationName: 'new-name',
-    command: { executable: 'roborev.exe', args: ['repo', 'move', 'E:/old/project', '.'], workingDirectory: 'E:\\new\\project' },
+    command: { executable: 'roborev', args: ['repo', 'move', 'E:/old/project', '.'], workingDirectory: 'E:\\new\\project' },
     token: 'move-token', expiresAt: '2026-08-23T01:02:03Z',
   }
 
@@ -448,6 +507,9 @@ describe('repository move API normalization', () => {
 
   it('rejects unknown fields, missing cwd, malformed identity and unsafe receipts', () => {
     expect(normalizeRepositoryMovePreview({ ...preview, extra: true })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, executable: 'C:\\private\\roborev.exe' } })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, stderr: 'private stderr marker' } })).toBeNull()
+    expect(normalizeRepositoryMovePreview({ ...preview, details: { rawError: 'private process marker' } })).toBeNull()
     expect(normalizeRepositoryMovePreview({ ...preview, destinationRepositoryIdentity: '' })).toBeNull()
     expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, workingDirectory: '' } })).toBeNull()
     expect(normalizeRepositoryMovePreview({ ...preview, command: { ...preview.command, extra: true } })).toBeNull()
@@ -459,7 +521,7 @@ describe('repository move API normalization', () => {
 describe('repository merge API normalization', () => {
   const source = { path: 'E:/old/project', name: 'old-name', jobCount: 7 }
   const target = { repositoryIdentity: 'dashboard-target', path: 'E:\\new\\project', name: 'new-name', jobCount: 3 }
-  const preview = { source, target, command: { executable: 'roborev.exe', args: ['repo', 'merge', '--yes', source.path, target.path], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
+  const preview = { source, target, command: { executable: 'roborev', args: ['repo', 'merge', '--yes', source.path, target.path], workingDirectory: '' }, token: 'merge-token', expiresAt: '2026-08-23T01:02:03Z' }
 
   it('accepts server-provided source and opaque target candidates', () => {
     expect(normalizeRepositoryMergeEligibility({ eligible: true, source, targets: [target] })).toEqual({ eligible: true, source, targets: [target] })
@@ -481,6 +543,9 @@ describe('repository merge API normalization', () => {
       { ...preview, extra: true },
       { ...preview, target: { ...target, repositoryIdentity: '' } },
       { ...preview, command: { ...preview.command, workingDirectory: 'C:\\' } },
+      { ...preview, command: { ...preview.command, executable: 'C:\\private\\roborev.exe' } },
+      { ...preview, command: { ...preview.command, stderr: 'private stderr marker' } },
+      { ...preview, details: { rawError: 'private process marker' } },
       { ...preview, command: { ...preview.command, args: ['repo', 'merge'] } },
       { status: 'unverified', message: '' },
       { status: 'merged', message: 'unexpected' },
@@ -490,5 +555,28 @@ describe('repository merge API normalization', () => {
       expect(normalizeRepositoryMergePreview(value)).toBeNull()
       expect(normalizeRepositoryMergeResult(value)).toBeNull()
     }
+  })
+})
+
+describe('stats API normalization', () => {
+  const summary = {
+    repositoryIdentity: 'repo-a', window: '7d', branchScope: 'all',
+    summary: {
+      since: '2026-08-16T00:00:00Z',
+      overview: { total: 1, queued: 0, running: 0, done: 1, failed: 0, canceled: 0, applied: 0, rebased: 0 },
+      verdicts: { total: 1, passed: 1, failed: 0, addressed: 0, pass_rate: 1, resolution_rate: 0 },
+      duration: { review_p50_secs: 1, review_p90_secs: 1, review_p99_secs: 1, queue_p50_secs: 1, queue_p90_secs: 1, queue_p99_secs: 1 },
+      agents: [{ agent: 'codex', total: 1, passed: 1, failed: 0, errors: 0, pass_rate: 1, median_duration_secs: 1 }],
+      job_types: [{ type: 'review', count: 1 }],
+      failures: { total: 0, retries: 0, errors: {} },
+      cost: { total_usd: 0, jobs_with_cost: 0, jobs_total: 1, complete: false },
+    },
+  }
+  it('accepts the path-free projection and rejects upstream path fields', () => {
+    expect(normalizeStatsSummaryResponse(summary, 'repo-a')).toBeTruthy()
+    expect(normalizeStatsSummaryResponse({ ...summary, summary: { ...summary.summary, repo_path: 'C:\\private\\project' } }, 'repo-a')).toBeNull()
+    expect(normalizeStatsSummaryResponse({ ...summary, summary: { ...summary.summary, repos: [{ name: 'project', path: 'C:\\private\\project', total: 1, passed: 1, failed: 0, addressed: 0 }] } }, 'repo-a')).toBeNull()
+    expect(normalizeStatsCostResponse({ repositoryIdentity: 'repo-a', branchScope: 'all', cost: summary.summary.cost }, 'repo-a')).toBeTruthy()
+    expect(normalizeStatsCostResponse({ repositoryIdentity: 'repo-a', branchScope: 'all', cost: { ...summary.summary.cost, repo_path: 'C:\\private\\project' } }, 'repo-a')).toBeNull()
   })
 })

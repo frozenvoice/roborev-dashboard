@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -441,7 +442,7 @@ func TestRepositoryMoveConfirmStartedOutcomeTaxonomy(t *testing.T) {
 		wantBody   string
 	}{
 		{name: "started false", wantStatus: http.StatusBadGateway},
-		{name: "started false typed error", err: errors.New("start failed"), wantStatus: http.StatusBadGateway},
+		{name: "started false typed error", err: errors.New("private stderr marker C:\\private\\roborev.exe"), wantStatus: http.StatusBadGateway},
 		{name: "started unverified", result: repomove.ExecutionResult{Started: true}, wantStatus: http.StatusOK, wantBody: `"status":"unverified"`},
 		{name: "offline", err: roborev.ErrRepositoryMoveOffline, wantStatus: http.StatusServiceUnavailable},
 		{name: "unhealthy", err: roborev.ErrRepositoryMoveUnhealthy, wantStatus: http.StatusServiceUnavailable},
@@ -455,6 +456,9 @@ func TestRepositoryMoveConfirmStartedOutcomeTaxonomy(t *testing.T) {
 			response := movePost(t, server, "/api/repository-moves", `{"token":"`+token+`"}`)
 			if response.Code != test.wantStatus || service.moveCalls != 1 || test.wantBody != "" && !strings.Contains(response.Body.String(), test.wantBody) {
 				t.Fatalf("status=%d want=%d move=%d body=%s", response.Code, test.wantStatus, service.moveCalls, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "private stderr marker") || strings.Contains(response.Body.String(), `C:\private\roborev.exe`) {
+				t.Fatalf("private process detail leaked in response: %s", response.Body.String())
 			}
 		})
 	}
@@ -558,6 +562,37 @@ func TestRepositoryMovePreviewStoreReservesBothPaths(t *testing.T) {
 	store.release(claimed)
 	if _, ok, busy := store.claim(tokenC); !ok || busy {
 		t.Fatalf("claim C after release ok=%v busy=%v", ok, busy)
+	}
+}
+
+func TestRepositoryMovePreviewStoreExpiresBeforeCapacityAndEvictsDeterministically(t *testing.T) {
+	store := newRepositoryMovePreviewStore()
+	now := time.Now()
+	store.pending["expired"] = repositoryMovePreviewRecord{ExpiresAt: now.Add(-time.Second)}
+	for index := 0; index < repositoryMovePreviewMax-1; index++ {
+		store.pending[fmt.Sprintf("live-%02d", index)] = repositoryMovePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryMovePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.pending) != repositoryMovePreviewMax {
+		t.Fatalf("expiry was not processed first: pending=%d", len(store.pending))
+	}
+	if _, ok := store.pending["expired"]; ok {
+		t.Fatal("expired preview was not removed before capacity eviction")
+	}
+	store = newRepositoryMovePreviewStore()
+	for index := 0; index < repositoryMovePreviewMax; index++ {
+		store.pending[fmt.Sprintf("token-%02d", index)] = repositoryMovePreviewRecord{ExpiresAt: now.Add(time.Minute)}
+	}
+	if _, err := store.put(repositoryMovePreviewRecord{ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.pending["token-00"]; ok {
+		t.Fatal("lexicographically oldest token was not evicted on expiry tie")
+	}
+	if len(store.pending) != repositoryMovePreviewMax {
+		t.Fatalf("pending=%d want=%d", len(store.pending), repositoryMovePreviewMax)
 	}
 }
 

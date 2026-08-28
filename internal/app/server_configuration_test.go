@@ -89,14 +89,70 @@ func (f *fakeConfigService) ConfigSet(_ context.Context, _ string, key string, v
 	f.setKeys = append(f.setKeys, key)
 	f.setValues = append(f.setValues, value)
 	f.setScopes = append(f.setScopes, scope)
+	origin := "global"
+	if scope == roborev.ConfigScopeLocal {
+		origin = "local"
+	}
+	for index := range f.listRows {
+		if f.listRows[index].Key == key {
+			f.listRows[index].Origin, f.listRows[index].Value = origin, value
+		}
+	}
+	found := false
+	for _, row := range f.listRows {
+		if row.Key == key {
+			found = true
+			break
+		}
+	}
+	if !found {
+		f.listRows = append(f.listRows, roborev.ConfigRow{Origin: origin, Key: key, Value: value})
+	}
 	return nil
+}
+
+func (f *fakeConfigService) ConfigurationPreflight(_ context.Context, _ string) (roborev.ConfigurationPreflight, error) {
+	f.mu.Lock()
+	version := f.version
+	f.mu.Unlock()
+	if version != "v0.64.0" {
+		return roborev.ConfigurationPreflight{}, errors.New("unsupported")
+	}
+	rows, err := f.ConfigList(context.Background(), "")
+	if err != nil {
+		return roborev.ConfigurationPreflight{}, err
+	}
+	return roborev.ConfigurationPreflight{Binding: roborev.ConfigurationBinding{Binary: "roborev", Version: version, Generation: 1, FileID: "binary"}, Rows: rows}, nil
+}
+
+func (f *fakeConfigService) ConfigurationSet(ctx context.Context, repoPath, key, value string, scope roborev.ConfigScope, expected roborev.ConfigurationBinding, guard roborev.ConfigurationPreLaunchGuard) (roborev.ConfigurationResult, error) {
+	if err := guard(ctx); err != nil {
+		return roborev.ConfigurationResult{}, err
+	}
+	if err := f.ConfigSet(ctx, repoPath, key, value, scope); err != nil {
+		return roborev.ConfigurationResult{Started: true}, err
+	}
+	return roborev.ConfigurationResult{Started: true}, nil
+}
+
+func (f *fakeConfigService) ConfigurationReadback(ctx context.Context, repoPath, key string, scope roborev.ConfigScope, expected roborev.ConfigurationBinding) (roborev.ConfigurationReadback, error) {
+	value, err := f.ConfigGet(ctx, repoPath, key, scope)
+	if err != nil {
+		return roborev.ConfigurationReadback{}, err
+	}
+	rows, err := f.ConfigList(ctx, repoPath)
+	if err != nil {
+		return roborev.ConfigurationReadback{}, err
+	}
+	return roborev.ConfigurationReadback{Value: value, Rows: rows, Binding: expected}, nil
 }
 
 func newConfigTestServer(t *testing.T) (*Server, *fakeConfigService, *mutableInspector, string) {
 	t.Helper()
-	inspector := &mutableInspector{repository: gitx.Repository{Name: "repo", Path: `E:\repo`, Branch: "main", Head: "abcdef123456", HeadShort: "abcdef12"}}
+	root := t.TempDir()
+	inspector := &mutableInspector{repository: gitx.Repository{Name: "repo", Path: root, Branch: "main", Head: "abcdef123456", HeadShort: "abcdef12"}}
 	registry := NewRegistry(inspector, "")
-	if _, err := registry.Add(context.Background(), `E:\repo`); err != nil {
+	if _, err := registry.Add(context.Background(), root); err != nil {
 		t.Fatal(err)
 	}
 	service := &fakeConfigService{fakeService: &fakeService{}, version: "v0.64.0"}
@@ -104,7 +160,7 @@ func newConfigTestServer(t *testing.T) (*Server, *fakeConfigService, *mutableIns
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := registry.Identity(`E:\repo`)
+	identity, err := registry.Identity(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,8 +477,8 @@ func TestConfigurationSetReportsUnverifiedWhenRefreshListFails(t *testing.T) {
 	if result.Status != "unverified" {
 		t.Fatalf("status = %q, want unverified: %+v", result.Status, result)
 	}
-	if !strings.Contains(result.Message, refreshErr.Error()) {
-		t.Fatalf("message = %q, want refresh error", result.Message)
+	if result.Message == "" || strings.Contains(result.Message, refreshErr.Error()) {
+		t.Fatalf("message = %q, want a stable sanitized message", result.Message)
 	}
 	if service.setCalls != 1 {
 		t.Fatalf("set calls = %d, want exactly one", service.setCalls)
@@ -498,17 +554,14 @@ func TestConfigurationSetRespectsExclusiveOperationGate(t *testing.T) {
 	}
 	release()
 
-	// The busy-gate rejection must not have burned the prepared change.
+	// Once authorization has claimed the token, a busy gate burns it. The
+	// caller must prepare a fresh change rather than replaying the token.
 	retry := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
-	if retry.Code != http.StatusOK {
-		t.Fatalf("retry status = %d body=%s, want the same token to succeed after the gate freed", retry.Code, retry.Body.String())
+	if retry.Code != http.StatusConflict {
+		t.Fatalf("replay status = %d body=%s, want 409 after the gate freed", retry.Code, retry.Body.String())
 	}
-	var result configurationSetDTO
-	if err := json.Unmarshal(retry.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "succeeded" || service.setCalls != 1 {
-		t.Fatalf("result=%+v setCalls=%d", result, service.setCalls)
+	if service.setCalls != 0 {
+		t.Fatalf("busy-gate replay executed a set: %d calls", service.setCalls)
 	}
 
 	// An invalid token still conflicts without touching RoboRev.
@@ -516,12 +569,12 @@ func TestConfigurationSetRespectsExclusiveOperationGate(t *testing.T) {
 	if bogus.Code != http.StatusConflict {
 		t.Fatalf("bogus token status = %d, want 409", bogus.Code)
 	}
-	if service.setCalls != 1 {
+	if service.setCalls != 0 {
 		t.Fatalf("bogus token executed a set: %d calls", service.setCalls)
 	}
 }
 
-func TestConfigurationSetRestoresTokenWhenLocalRepositoryLeaseBusy(t *testing.T) {
+func TestConfigurationSetConsumesTokenWhenLocalRepositoryLeaseBusy(t *testing.T) {
 	server, service, _, identity := newConfigTestServer(t)
 	preview := preparePreview(t, server, identity)
 
@@ -539,15 +592,11 @@ func TestConfigurationSetRestoresTokenWhenLocalRepositoryLeaseBusy(t *testing.T)
 	releaseRepo()
 
 	retry := configPostRequest(t, server, "/api/configuration/set", map[string]any{"previewToken": preview.PreviewToken}, nil)
-	if retry.Code != http.StatusOK {
-		t.Fatalf("retry status = %d body=%s, want the same token to succeed", retry.Code, retry.Body.String())
+	if retry.Code != http.StatusConflict {
+		t.Fatalf("replay status = %d body=%s, want 409 after the repository lease freed", retry.Code, retry.Body.String())
 	}
-	var result configurationSetDTO
-	if err := json.Unmarshal(retry.Body.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "succeeded" || service.setCalls != 1 {
-		t.Fatalf("result=%+v setCalls=%d, want one successful set", result, service.setCalls)
+	if service.setCalls != 0 {
+		t.Fatalf("busy repository replay executed a set: %d calls", service.setCalls)
 	}
 }
 
@@ -594,12 +643,13 @@ func TestConfigurationSetInvalidTokenNeverExecutesSet(t *testing.T) {
 	}
 }
 
-func TestConfigurationPreviewStoreRestoreDropsExpiredToken(t *testing.T) {
+func TestConfigurationPreviewStoreExpiresAtExactBoundary(t *testing.T) {
 	store := newConfigPreviewStore()
-	const token = "expired-token"
-	store.restore(token, configPreviewRecord{ExpiresAt: time.Unix(0, 0)})
-	if _, ok := store.take(token); ok {
-		t.Fatal("expired restored token was usable")
+	now := time.Unix(123, 456)
+	store.pending["boundary-token"] = configPreviewRecord{ExpiresAt: now}
+	store.expireLocked(now)
+	if _, ok := store.pending["boundary-token"]; ok {
+		t.Fatal("token remained valid at its exact expiry boundary")
 	}
 }
 

@@ -111,6 +111,52 @@ type Capabilities struct {
 	RepositoryMerge     bool `json:"repositoryMerge"`
 }
 
+// ConfigurationBinding identifies the exact v0.64 executable generation used
+// by a prepared general-configuration mutation. It is server-side only.
+type ConfigurationBinding struct {
+	Binary     string
+	Version    string
+	Generation uint64
+	FileID     string
+}
+
+func (b ConfigurationBinding) Valid() bool {
+	return b.Version == "v0.64.0" && b.Generation != 0 && strings.TrimSpace(b.Binary) != "" && strings.TrimSpace(b.FileID) != ""
+}
+
+func (b ConfigurationBinding) Equal(other ConfigurationBinding) bool {
+	return b.Binary == other.Binary && b.Version == other.Version && b.Generation == other.Generation && b.FileID == other.FileID
+}
+
+type ConfigurationPreflight struct {
+	Binding ConfigurationBinding
+	Rows    []ConfigRow
+}
+
+// ConfigurationResult reports process-boundary evidence. Started is required
+// before any post-process state can be credited as a successful mutation.
+type ConfigurationResult struct {
+	Started  bool
+	ExitCode int
+}
+
+type ConfigurationReadback struct {
+	Value   string
+	Rows    []ConfigRow
+	Binding ConfigurationBinding
+}
+
+type ConfigurationPreLaunchGuard func(context.Context) error
+
+// ConfigurationMutationTransport is deliberately separate from ConfigService
+// so read-only adapters remain source-compatible and cannot accidentally gain
+// a weaker generic mutation path.
+type ConfigurationMutationTransport interface {
+	ConfigurationPreflight(context.Context, string) (ConfigurationPreflight, error)
+	ConfigurationSet(context.Context, string, string, string, ConfigScope, ConfigurationBinding, ConfigurationPreLaunchGuard) (ConfigurationResult, error)
+	ConfigurationReadback(context.Context, string, string, ConfigScope, ConfigurationBinding) (ConfigurationReadback, error)
+}
+
 // RepositoryInventoryService is deliberately optional: the base Service
 // interface is shared by existing review/task consumers and must not acquire
 // a new read surface that would break legacy fakes.

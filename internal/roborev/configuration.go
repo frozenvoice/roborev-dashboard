@@ -2,14 +2,20 @@ package roborev
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/froze/roborev-dashboard/internal/pathsafety"
 	proc "github.com/froze/roborev-dashboard/internal/process"
+	"github.com/froze/roborev-dashboard/internal/roborevcompat"
 )
 
 // ConfigScope selects the RoboRev configuration file a command targets.
@@ -50,7 +56,6 @@ type ConfigRow struct {
 type ConfigService interface {
 	ConfigList(ctx context.Context, repoPath string) ([]ConfigRow, error)
 	ConfigGet(ctx context.Context, repoPath string, key string, scope ConfigScope) (string, error)
-	ConfigSet(ctx context.Context, repoPath string, key string, value string, scope ConfigScope) error
 }
 
 // v0.64 flattens nested TOML tables into lowercase dot-separated keys (for
@@ -190,17 +195,31 @@ func (c *Client) requireConfigCapability(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) requireConfigIntrospection(ctx context.Context) error {
+	version, err := c.detectVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if !capabilities(version).ConfigIntrospection {
+		return fmt.Errorf("RoboRev %s does not support configuration introspection", version)
+	}
+	return nil
+}
+
 // ConfigList returns the merged effective configuration with origins for one
 // registered repository. The repository path is used as the process working
 // directory only; upstream resolves the global file independently, so this
 // works while the daemon is offline.
 func (c *Client) ConfigList(ctx context.Context, repoPath string) ([]ConfigRow, error) {
-	if err := c.requireConfigCapability(ctx); err != nil {
+	if err := c.requireConfigIntrospection(ctx); err != nil {
 		return nil, err
 	}
 	result, err := c.runInDir(ctx, repoPath, ConfigListArgs(), configListTimeout, configListOutputLimit)
 	if err != nil {
 		return nil, fmt.Errorf("config list: %w", err)
+	}
+	if result.ExitCode != 0 || result.Stderr != "" || result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return nil, errors.New("config list: response unavailable")
 	}
 	rows, err := ParseConfigList(result.Stdout)
 	if err != nil {
@@ -212,7 +231,7 @@ func (c *Client) ConfigList(ctx context.Context, repoPath string) ([]ConfigRow, 
 // ConfigGet reads one key from an explicit scope file. Upstream fails when the
 // key is absent from that scope; the Dashboard treats that as an empty value.
 func (c *Client) ConfigGet(ctx context.Context, repoPath string, key string, scope ConfigScope) (string, error) {
-	if err := c.requireConfigCapability(ctx); err != nil {
+	if err := c.requireConfigIntrospection(ctx); err != nil {
 		return "", err
 	}
 	args, err := ConfigGetArgs(key, scope)
@@ -231,11 +250,159 @@ func (c *Client) ConfigGet(ctx context.Context, repoPath string, key string, sco
 		}
 		return "", fmt.Errorf("config get %s: %w", key, err)
 	}
+	if result.ExitCode != 0 || result.Stderr != "" {
+		return "", fmt.Errorf("config get %s: response unavailable", key)
+	}
 	value := strings.TrimRight(result.Stdout, "\r\n")
 	if len(strings.Fields(value)) > 1 {
 		return "", fmt.Errorf("config get %s: unexpected multi-token response", key)
 	}
 	return value, nil
+}
+
+const configurationBindingProbeTimeout = 5 * time.Second
+
+var errConfigurationUnavailable = errors.New("configuration mutation is unavailable")
+
+// ProbeConfigurationBinding is intentionally uncached. It validates the
+// exact v0.64 executable and its current file identity before every mutation
+// and readback boundary.
+func (c *Client) ProbeConfigurationBinding(ctx context.Context) (ConfigurationBinding, error) {
+	if c == nil || c.Runner == nil {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	binary, _, generation := c.snapshot()
+	if strings.TrimSpace(binary) == "" {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	abs, err := filepath.Abs(binary)
+	if err != nil {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		resolved = abs
+	}
+	if !sameExecutablePath(abs, resolved) {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	resolved = filepath.Clean(resolved)
+	info, err := os.Lstat(resolved)
+	if err != nil || info.IsDir() || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	fileID, err := pathsafety.FileIdentity(resolved, info)
+	if err != nil || strings.TrimSpace(fileID) == "" {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: resolved, Args: []string{"version", "--json"}, Env: agentConfigurationEnvFromProcess(), Timeout: configurationBindingProbeTimeout, OutputLimit: 64 << 10})
+	if runErr != nil || !result.Started || result.ExitCode != 0 || result.Stderr != "" || result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	decoder := json.NewDecoder(strings.NewReader(result.Stdout))
+	decoder.DisallowUnknownFields()
+	var response struct{ Name, Version string }
+	if err := decoder.Decode(&response); err != nil {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF || roborevcompat.ValidateVersionIdentity(response.Name, response.Version) != nil || response.Version != "v0.64.0" {
+		return ConfigurationBinding{}, errConfigurationUnavailable
+	}
+	if !c.generationCurrent(generation) {
+		return ConfigurationBinding{}, ErrBindingChanged
+	}
+	return ConfigurationBinding{Binary: resolved, Version: response.Version, Generation: generation, FileID: fileID}, nil
+}
+
+func (c *Client) configurationListWithBinary(ctx context.Context, binary, repoPath string) ([]ConfigRow, error) {
+	if strings.TrimSpace(binary) == "" || strings.TrimSpace(repoPath) == "" || !filepath.IsAbs(repoPath) {
+		return nil, errConfigurationUnavailable
+	}
+	result, err := c.Runner.Run(ctx, proc.Command{Executable: binary, Args: ConfigListArgs(), Dir: filepath.Clean(repoPath), Env: agentConfigurationEnvFromProcess(), Timeout: configListTimeout, OutputLimit: configListOutputLimit})
+	if err != nil || !result.Started || result.ExitCode != 0 || result.Stderr != "" || result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return nil, errConfigurationUnavailable
+	}
+	rows, err := ParseConfigList(result.Stdout)
+	if err != nil || len(rows) == 0 {
+		return nil, errConfigurationUnavailable
+	}
+	return rows, nil
+}
+
+// ConfigurationPreflight captures one fresh binding and effective list.
+func (c *Client) ConfigurationPreflight(ctx context.Context, repoPath string) (ConfigurationPreflight, error) {
+	binding, err := c.ProbeConfigurationBinding(ctx)
+	if err != nil {
+		return ConfigurationPreflight{}, err
+	}
+	rows, err := c.configurationListWithBinary(ctx, binding.Binary, repoPath)
+	if err != nil {
+		return ConfigurationPreflight{}, err
+	}
+	fresh, err := c.ProbeConfigurationBinding(ctx)
+	if err != nil || !fresh.Equal(binding) {
+		return ConfigurationPreflight{}, ErrBindingChanged
+	}
+	return ConfigurationPreflight{Binding: binding, Rows: rows}, nil
+}
+
+func (c *Client) ConfigurationSet(ctx context.Context, repoPath, key, value string, scope ConfigScope, expected ConfigurationBinding, guard ConfigurationPreLaunchGuard) (ConfigurationResult, error) {
+	args, err := ConfigSetArgs(key, value, scope)
+	if err != nil || !expected.Valid() || guard == nil {
+		return ConfigurationResult{}, errConfigurationUnavailable
+	}
+	binary, _, generation := c.snapshot()
+	if generation != expected.Generation || !sameExecutablePath(binary, expected.Binary) {
+		return ConfigurationResult{}, ErrBindingChanged
+	}
+	binding, err := c.ProbeConfigurationBinding(ctx)
+	if err != nil || !binding.Equal(expected) {
+		return ConfigurationResult{}, ErrBindingChanged
+	}
+	if err := guard(ctx); err != nil {
+		return ConfigurationResult{}, err
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: expected.Binary, Args: args, Dir: filepath.Clean(repoPath), Env: agentConfigurationEnvFromProcess(), Timeout: configSetTimeout, OutputLimit: configValueLimit})
+	mutation := ConfigurationResult{Started: result.Started, ExitCode: result.ExitCode}
+	if runErr != nil {
+		return mutation, errConfigurationUnavailable
+	}
+	if !c.generationCurrent(expected.Generation) {
+		return mutation, ErrBindingChanged
+	}
+	return mutation, nil
+}
+
+func (c *Client) ConfigurationReadback(ctx context.Context, repoPath, key string, scope ConfigScope, expected ConfigurationBinding) (ConfigurationReadback, error) {
+	if !expected.Valid() {
+		return ConfigurationReadback{}, errConfigurationUnavailable
+	}
+	binding, err := c.ProbeConfigurationBinding(ctx)
+	if err != nil || !binding.Equal(expected) {
+		return ConfigurationReadback{}, ErrBindingChanged
+	}
+	args, err := ConfigGetArgs(key, scope)
+	if err != nil {
+		return ConfigurationReadback{}, errConfigurationUnavailable
+	}
+	result, runErr := c.Runner.Run(ctx, proc.Command{Executable: expected.Binary, Args: args, Dir: filepath.Clean(repoPath), Env: agentConfigurationEnvFromProcess(), Timeout: configGetTimeout, OutputLimit: configValueLimit})
+	if runErr != nil || !result.Started || result.ExitCode != 0 || result.Stderr != "" || result.StdoutTruncated || result.StderrTruncated || !utf8.ValidString(result.Stdout) || !utf8.ValidString(result.Stderr) {
+		return ConfigurationReadback{}, errConfigurationUnavailable
+	}
+	value := strings.TrimRight(result.Stdout, "\r\n")
+	if strings.ContainsAny(value, "\x00\r\n") || strings.TrimSpace(value) != value || len(value) > 4096 {
+		return ConfigurationReadback{}, errConfigurationUnavailable
+	}
+	rows, err := c.configurationListWithBinary(ctx, expected.Binary, repoPath)
+	if err != nil {
+		return ConfigurationReadback{}, err
+	}
+	fresh, err := c.ProbeConfigurationBinding(ctx)
+	if err != nil || !fresh.Equal(expected) {
+		return ConfigurationReadback{}, ErrBindingChanged
+	}
+	return ConfigurationReadback{Value: value, Rows: rows, Binding: fresh}, nil
 }
 
 // SnapshotDirectory resolves the repository-local snapshot_dir used by the
@@ -315,3 +482,6 @@ func (c *Client) runInDir(ctx context.Context, repoPath string, args []string, t
 	}
 	return result, nil
 }
+
+var _ ConfigService = (*Client)(nil)
+var _ ConfigurationMutationTransport = (*Client)(nil)

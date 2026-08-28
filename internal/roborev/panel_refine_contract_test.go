@@ -55,7 +55,7 @@ func TestReviewPanelPostsPinnedTargetAndDecodesReceipt(t *testing.T) {
 	request := ReviewRequest{RepoPath: `C:\repo with spaces`, GitRef: "head-1", Branch: "feature/refine", Panel: "dashboard_cross"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 			return
 		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/enqueue" {
@@ -68,6 +68,7 @@ func TestReviewPanelPostsPinnedTargetAndDecodesReceipt(t *testing.T) {
 		if body["repo_path"] != request.RepoPath || body["git_ref"] != request.GitRef || body["branch"] != request.Branch || body["panel"] != request.Panel {
 			t.Fatalf("request body = %#v", body)
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":42,"repo_path":"C:\\repo with spaces","git_ref":"head-1","branch":"feature/refine","panel_name":"dashboard_cross","panel_run_uuid":"00000000-0000-0000-0000-000000000042","panel_role":"synthesis","job_type":"synthesis"}`))
 	}))
 	defer server.Close()
@@ -81,7 +82,7 @@ func TestReviewPanelPostsPinnedTargetAndDecodesReceipt(t *testing.T) {
 func TestSynthesisStatusUsesExactIDEndpointAndExpandedMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 			return
 		}
 		if r.URL.Path == "/api/job/output" {
@@ -241,7 +242,7 @@ func TestFixUsesConfiguredExecutableDirExactArgsAndSanitizedError(t *testing.T) 
 	runner := &fixCaptureRunner{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/health" {
-			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true}`))
+			_, _ = w.Write([]byte(`{"$schema":"http://127.0.0.1:7373/HealthStatus.json","healthy":true,"version":"v0.64.0"}`))
 			return
 		}
 		http.NotFound(w, r)

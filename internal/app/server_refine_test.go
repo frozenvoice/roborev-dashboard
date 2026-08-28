@@ -71,12 +71,12 @@ func TestPanelRefineStartRejectsQueryAndMalformedBodyBeforeBlockedTombstone(t *t
 func TestPanelRefineHistoryAndCancelRoutesRemainReadOnly(t *testing.T) {
 	server := setupServer(t, &fakeService{})
 	list := httptest.NewRecorder()
-	server.Handler().ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Crepo", nil))
+	server.Handler().ServeHTTP(list, strictBrowserReadRequest(http.MethodGet, "/api/panel-refines?repo=E%3A%5Crepo"))
 	if list.Code != http.StatusOK {
 		t.Fatalf("history list status = %d, body=%s", list.Code, list.Body.String())
 	}
 	get := httptest.NewRecorder()
-	server.Handler().ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/panel-refines/unknown", nil))
+	server.Handler().ServeHTTP(get, strictBrowserReadRequest(http.MethodGet, "/api/panel-refines/unknown"))
 	if get.Code != http.StatusNotFound {
 		t.Fatalf("history detail status = %d, body=%s", get.Code, get.Body.String())
 	}

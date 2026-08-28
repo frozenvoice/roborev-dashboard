@@ -14,11 +14,11 @@ const configuration: PanelConfiguration = {
   selectedPanel: 'dashboard_cross',
   selectionRequired: false,
 }
-const options = { executable: 'C:\\Tools\\roborev.exe', args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'], defaultFixAgent: 'codex', defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
+const options = { executable: 'roborev' as const, args: ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'] as ['fix', '--agent', 'codex', '--quiet', '<synthesisJobID>'], allowedFixAgents: ['codex'] as ['codex'], defaultFixAgent: 'codex' as const, defaultMaxFixAttempts: 3, minFixAttempts: 1, maxFixAttempts: 10 }
 const baseRun: PanelRefineRun = {
   id: 8,
   repositoryIdentity: 'repo-1',
-  repositoryPath: 'E:\\repo',
+  branch: 'main',
   iterationPanel: 'dashboard_cross',
   finalPanel: 'dashboard_deep',
   fixAgent: 'codex',
@@ -29,6 +29,7 @@ const baseRun: PanelRefineRun = {
   currentHead: 'abcdef1234567890',
   currentReviewJobID: 42,
   startedAt: '2026-08-18T00:00:00Z',
+  updatedAt: '2026-08-18T00:01:05Z',
   completedAt: '2026-08-18T00:01:05Z',
   command: options,
   iterations: [{ number: 1, targetHead: 'abcdef1234567890', panel: 'dashboard_cross', reviewJobID: 42 }],
@@ -81,8 +82,8 @@ describe('PanelRefine', () => {
 
   it('renders iteration errors and cancelled context consistently instead of Pending', () => {
     renderPanel({ run: { ...baseRun, iterations: [
-      { number: 1, targetHead: 'aaaaaaaaaaaa', panel: 'dashboard_cross', error: 'review timed out' },
-      { number: 2, targetHead: 'bbbbbbbbbbbb', panel: 'dashboard_deep', error: 'context canceled' },
+      { number: 1, targetHead: 'aaaaaaaaaaaa', panel: 'dashboard_cross', errorCode: 'panel_refine_error' },
+      { number: 2, targetHead: 'bbbbbbbbbbbb', panel: 'dashboard_deep', errorCode: 'repository_state_unavailable' },
     ] } })
     const errorLabel = screen.getByText(/· Error/)
     const cancelledLabel = screen.getByText(/· Cancelled/)
@@ -105,9 +106,9 @@ describe('PanelRefine', () => {
     ['failed', 'Panel Refine failed'],
     ['cancelled', 'Panel Refine cancelled'],
   ] as const)('renders terminal %s state', (phase, title) => {
-    renderPanel({ run: { ...baseRun, phase, error: phase === 'failed' ? 'review failed' : undefined } })
+    renderPanel({ run: { ...baseRun, phase, errorCode: phase === 'failed' ? 'panel_refine_error' : undefined } })
     expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
-    if (phase === 'failed') expect(screen.getByRole('alert')).toHaveTextContent('review failed')
+    if (phase === 'failed') expect(screen.getByRole('alert')).toHaveTextContent('Failed')
   })
 
   it('cancels an active run', async () => {
@@ -119,10 +120,10 @@ describe('PanelRefine', () => {
   })
 
   it('shows repository state and partial mutation warning after cancellation', () => {
-    renderPanel({ run: { ...baseRun, phase: 'cancelled', cancelState: { available: true, head: 'deadbeef1234', branch: 'feature/refine', dirty: true, error: 'inspection incomplete' } } })
+    renderPanel({ run: { ...baseRun, phase: 'cancelled', cancelState: { available: true, head: 'deadbeef1234', branch: 'feature/refine', dirty: true, errorCode: 'repository_state_unavailable' } } })
     expect(screen.getByText(/feature\/refine/)).toBeInTheDocument()
     expect(screen.getByText(/partial repository changes/i)).toBeInTheDocument()
-    expect(screen.getByText(/inspection incomplete/)).toBeInTheDocument()
+    expect(screen.getByText(/HEAD \/ branch state unavailable/)).toBeInTheDocument()
   })
 
   it('does not present unavailable cancellation state as clean', () => {
