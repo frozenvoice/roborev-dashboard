@@ -732,9 +732,22 @@ func panelTestJobWithType(id int64, repo, panel, run, role, jobType string) robo
 }
 
 func panelJobsJSON(jobs ...roborev.JobMetadata) json.RawMessage {
+	rows := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		encoded, _ := json.Marshal(job)
+		var row map[string]any
+		_ = json.Unmarshal(encoded, &row)
+		// The v0.64 job DTO omits nil optional pointers. JobMetadata is a
+		// typed authorization witness whose test JSON tag predates that
+		// omission, so keep this fixture faithful to the daemon wire shape.
+		if job.Closed == nil {
+			delete(row, "closed")
+		}
+		rows = append(rows, row)
+	}
 	data, _ := json.Marshal(struct {
-		Jobs []roborev.JobMetadata `json:"jobs"`
-	}{Jobs: jobs})
+		Jobs []map[string]any `json:"jobs"`
+	}{Jobs: rows})
 	return data
 }
 

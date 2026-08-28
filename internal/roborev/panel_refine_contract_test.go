@@ -96,6 +96,7 @@ func TestSynthesisStatusUsesExactIDEndpointAndExpandedMetadata(t *testing.T) {
 		if r.URL.Path != "/api/jobs" || r.URL.Query().Get("id") != "42" || r.URL.Query().Get("limit") != "1" || r.URL.Query().Get("omit_prompt") != "true" {
 			t.Fatalf("unexpected metadata query: %s", r.URL.String())
 		}
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"jobs":[{"id":42,"repo_path":"C:\\repo","git_ref":"head-1","branch":"main","panel_name":"dashboard_cross","panel_run_uuid":"00000000-0000-0000-0000-000000000042","panel_role":"synthesis","job_type":"synthesis","status":"done","verdict":"P"}]}`))
 	}))
 	defer server.Close()
@@ -113,6 +114,9 @@ func TestJobOutputStatusReadsOnlyOrderedPrefix(t *testing.T) {
 	body.data = append(body.data, []byte(tail)...)
 	body.data = append(body.data, []byte(`"],"has_more":false}`)...)
 	client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/health" {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"healthy":true,"version":"v0.64.0"}`)), Request: request}, nil
+		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, Request: request}, nil
 	})
 	status, err := client.JobOutputStatus(context.Background(), 42)
@@ -133,6 +137,9 @@ func TestJobOutputStatusFailsClosedForMalformedOrderWrongIDAndUnsupportedVersion
 		t.Run(test.name, func(t *testing.T) {
 			client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
 			client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/api/health" {
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"healthy":true,"version":"v0.64.0"}`)), Request: request}, nil
+				}
 				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(test.data)), Request: request}, nil
 			})
 			_, err := client.JobOutputStatus(context.Background(), 42)
@@ -148,6 +155,9 @@ func TestJobOutputStatusFailsClosedForMalformedOrderWrongIDAndUnsupportedVersion
 	for _, statusCode := range []int{http.StatusNotFound, http.StatusInternalServerError} {
 		client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
 		client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path == "/api/health" {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"healthy":true,"version":"v0.64.0"}`)), Request: request}, nil
+			}
 			return &http.Response{StatusCode: statusCode, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"status"}`)), Request: request}, nil
 		})
 		_, err := client.JobOutputStatus(context.Background(), 42)
@@ -171,6 +181,9 @@ func TestTerminalJobMetadataBoundsOverflowAndMalformedPayloads(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client := newMutationClient(t, "v0.64.0", "http://127.0.0.1:7373")
 			client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path == "/api/health" {
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"healthy":true,"version":"v0.64.0"}`)), Request: request}, nil
+				}
 				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(test.body)), Request: request}, nil
 			})
 			if _, err := client.TerminalJobMetadata(context.Background(), 42); !errors.Is(err, ErrMalformedJobMetadata) {

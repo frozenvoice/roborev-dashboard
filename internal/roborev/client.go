@@ -51,6 +51,7 @@ var ErrMalformedPanelEnqueueResponse = errors.New("malformed panel enqueue respo
 
 var (
 	ErrBindingChanged             = errors.New("RoboRev binding changed during verification")
+	errUnsupportedDaemonBinding   = errors.New("RoboRev daemon binding version is unsupported")
 	ErrUnsupportedJobOutputStatus = errors.New("RoboRev job output status contract is unsupported")
 	ErrMalformedJobOutputStatus   = errors.New("malformed RoboRev job output status response")
 	ErrUnsupportedJobMetadata     = errors.New("RoboRev job metadata contract is unsupported")
@@ -507,12 +508,15 @@ func (c *Client) generationCurrent(generation uint64) bool {
 }
 
 func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMessage, error) {
-	version, err := c.detectVersion(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !capabilities(version).JobListAPI {
-		return nil, fmt.Errorf("RoboRev %s does not support metadata-only job listing", version)
+	if !capabilities(binding.version).JobListAPI {
+		return nil, fmt.Errorf("RoboRev %s does not support metadata-only job listing", binding.version)
 	}
 	if limit < 1 || limit > 200 {
 		limit = 100
@@ -521,11 +525,18 @@ func (c *Client) List(ctx context.Context, repo string, limit int) (json.RawMess
 	query.Set("repo", repo)
 	query.Set("limit", strconv.Itoa(limit))
 	query.Set("omit_prompt", "true")
-	raw, err := c.getDaemonJSON(ctx, "/api/jobs?"+query.Encode(), 64<<20)
+	raw, err := c.daemonHTTPGet(ctx, binding, "/api/jobs?"+query.Encode(), http.StatusOK, 64<<20)
 	if err != nil {
 		return nil, err
 	}
-	return stripHeavyJobFields(raw)
+	clean, err := stripHeavyJobFields(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	return clean, nil
 }
 
 func (c *Client) JobMetadata(ctx context.Context, id int64) (JobMetadata, error) {
@@ -588,20 +599,32 @@ func (c *Client) TerminalJobMetadata(ctx context.Context, id int64) (JobMetadata
 	if err := validateJobID(id); err != nil {
 		return JobMetadata{}, err
 	}
-	version, err := c.detectVersion(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
+		if errors.Is(err, errUnsupportedDaemonBinding) {
+			return JobMetadata{}, fmt.Errorf("%w: %v", ErrUnsupportedJobMetadata, err)
+		}
 		return JobMetadata{}, err
 	}
-	if !capabilities(version).JobListAPI {
-		return JobMetadata{}, fmt.Errorf("%w: %s", ErrUnsupportedJobMetadata, version)
+	if !capabilities(binding.version).JobListAPI {
+		return JobMetadata{}, fmt.Errorf("%w: %s", ErrUnsupportedJobMetadata, binding.version)
 	}
 	query := url.Values{}
 	query.Set("id", strconv.FormatInt(id, 10))
 	query.Set("limit", "1")
 	query.Set("omit_prompt", "true")
-	raw, err := c.getDaemonJSONBounded(ctx, "/api/jobs?"+query.Encode(), 256<<10)
+	raw, err := c.daemonHTTPGet(ctx, binding, "/api/jobs?"+query.Encode(), http.StatusOK, 256<<10)
 	if err != nil {
-		return JobMetadata{}, err
+		if ctx.Err() != nil {
+			return JobMetadata{}, ctx.Err()
+		}
+		if errors.Is(err, ErrBindingChanged) {
+			return JobMetadata{}, err
+		}
+		return JobMetadata{}, fmt.Errorf("%w: metadata request failed", ErrMalformedJobMetadata)
 	}
 	var response struct {
 		Jobs []JobMetadata `json:"jobs"`
@@ -611,6 +634,9 @@ func (c *Client) TerminalJobMetadata(ctx context.Context, id int64) (JobMetadata
 	}
 	if len(response.Jobs) != 1 || response.Jobs[0].ID != id {
 		return JobMetadata{}, fmt.Errorf("%w: job not found", ErrMalformedJobMetadata)
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return JobMetadata{}, ErrBindingChanged
 	}
 	return response.Jobs[0], nil
 }
@@ -622,25 +648,44 @@ func (c *Client) JobOutputStatus(ctx context.Context, id int64) (JobOutputStatus
 	if err := validateJobID(id); err != nil {
 		return JobOutputStatus{}, err
 	}
-	version, err := c.detectVersion(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
+		if errors.Is(err, errUnsupportedDaemonBinding) {
+			return JobOutputStatus{}, fmt.Errorf("%w: %v", ErrUnsupportedJobOutputStatus, err)
+		}
 		return JobOutputStatus{}, err
 	}
-	if !capabilities(version).JobOutputStatusAPI {
-		return JobOutputStatus{}, fmt.Errorf("%w: %s", ErrUnsupportedJobOutputStatus, version)
+	if !capabilities(binding.version).JobOutputStatusAPI {
+		return JobOutputStatus{}, fmt.Errorf("%w: %s", ErrUnsupportedJobOutputStatus, binding.version)
 	}
 	query := url.Values{}
 	query.Set("job_id", strconv.FormatInt(id, 10))
-	_, daemonURL, _ := c.snapshot()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL+"/api/job/output?"+query.Encode(), nil)
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return JobOutputStatus{}, ErrBindingChanged
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, binding.daemonURL+"/api/job/output?"+query.Encode(), nil)
 	if err != nil {
 		return JobOutputStatus{}, err
 	}
+	req.Header.Set("Accept-Encoding", "identity")
 	resp, err := noRedirectHTTPClient(c.HTTP).Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return JobOutputStatus{}, ctx.Err()
+		}
 		return JobOutputStatus{}, fmt.Errorf("RoboRev daemon request: %w", err)
 	}
-	return decodeJobOutputStatus(resp, id)
+	status, err := decodeJobOutputStatus(resp, id)
+	if err != nil {
+		return JobOutputStatus{}, err
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return JobOutputStatus{}, ErrBindingChanged
+	}
+	return status, nil
 }
 
 const jobOutputPrefixLimit = 8 << 10
@@ -865,18 +910,28 @@ func (c *Client) PanelMembers(ctx context.Context, runUUID string) (json.RawMess
 			return nil, errors.New("invalid panel run UUID")
 		}
 	}
-	version, err := c.detectVersion(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	binding, err := c.daemonHTTPPreflight(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !capabilities(version).PanelMembersAPI {
-		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", version)
+	if !capabilities(binding.version).PanelMembersAPI {
+		return nil, fmt.Errorf("RoboRev %s does not support panel member listing", binding.version)
 	}
-	raw, err := c.getDaemonJSON(ctx, "/api/jobs?panel_run="+url.QueryEscape(runUUID)+"&limit=0&omit_prompt=true", 64<<20)
+	raw, err := c.daemonHTTPGet(ctx, binding, "/api/jobs?panel_run="+url.QueryEscape(runUUID)+"&limit=0&omit_prompt=true", http.StatusOK, 64<<20)
 	if err != nil {
 		return nil, err
 	}
-	return stripHeavyJobFields(raw)
+	clean, err := stripHeavyJobFields(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !c.daemonHTTPBindingCurrent(binding) {
+		return nil, ErrBindingChanged
+	}
+	return clean, nil
 }
 
 func stripHeavyJobFields(raw json.RawMessage) (json.RawMessage, error) {
@@ -1041,7 +1096,7 @@ func (c *Client) daemonHTTPPreflight(ctx context.Context) (daemonHTTPBinding, er
 	versionAt := c.versionAt
 	c.versionMu.RUnlock()
 	if versionGeneration != generation || versionAt.IsZero() || time.Since(versionAt) >= 30*time.Second || !roborevcompat.IsSupportedVersion(version) {
-		return daemonHTTPBinding{}, errors.New("RoboRev executable version is unavailable")
+		return daemonHTTPBinding{}, fmt.Errorf("%w: executable version is unavailable", errUnsupportedDaemonBinding)
 	}
 	health, err := c.healthStatus(ctx)
 	if err != nil {

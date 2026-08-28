@@ -13,16 +13,18 @@
 
 ## Final verdict
 
-- Final verdict: **PASS**
+- Correction status: **PASS**
 - Remaining MUST-SHIP: **0**
 - Feature verdict: **v0.64 FEATURE-COMPLETE**
 - Release verdict: **NOT YET RELEASE-CLOSED**
-- Final fresh-context internal reviewer: **exactly 1, final PASS**
-- Next checkpoint: **Windows Release Readiness & Non-Destructive E2E**
+- Correction reviewer: **exactly 1 fresh-context reviewer, initial NOT-CLOSED, final PASS**
+- Next checkpoint after correction closure: **Windows Release Readiness & Non-Destructive E2E**
 
 정확히 한 명의 fresh-context internal reviewer가 최초 **NOT-CLOSED**로 보고한 세 material finding을 교정했고, 같은 reviewer가 회귀 diff를 다시 읽어 모두 CLOSED, 새 material finding 0, 42개 질문의 remaining FAIL 0과 최종 **PASS**를 확인했다.
 
 최종 corrective review에서는 generic `/api/reviews/{id}/rerun`을 trimmed empty legacy와 `review`/`range`/`dirty`/`synthesis`로만 allowlist하고 Fix/Compact/Insights/Analyze/Classify/unknown 및 task/run을 fail closed했다. Panel member list/detail은 strict browser read authorization을 query·registry·daemon 조회보다 먼저 수행한다. Git/daemon/process/config/setup/panel/analysis/agent 실패는 typed policy를 제외하고 app-layer fixed message로 축약하며, 내부 path·command·stderr는 browser에 직렬화하지 않는다. Compact와 CI Metrics는 여전히 별도 blocked/deferred surface이며 이 correction은 이를 활성화하지 않는다.
+
+그 PASS 뒤의 독립 gatekeeper review는 두 material gap을 추가로 확인했다. `List`, `PanelMembers`, `TerminalJobMetadata`, `JobOutputStatus`가 CLI-only version gate 뒤에서 v0.64 전용 daemon 계약을 읽었고, review browser projection은 허용된 scalar key 아래의 object/array 값을 그대로 복사할 수 있었다. 이번 correction은 네 read/status path를 cached exact CLI + fresh daemon health/version binding에 묶고, browser projection을 key + field-shape schema로 교체했다. 이번 correction에 지정된 fresh-context reviewer 한 명이 초기 NOT-CLOSED finding 교정 뒤 17개 질문 전부 PASS, unresolved material finding 0과 최종 PASS를 확인했다.
 
 ## Production route inventory
 
@@ -66,7 +68,7 @@ Some older repository-management contracts intentionally preserve tokens when th
 
 ## Process and daemon lifecycle
 
-Review, Rerun, Show, Comment, Close, Reopen, Cancel, JobMetadata, Summary, Cost and Insights use exact v0.64 direct daemon HTTP instead of their lifecycle-bearing CLI commands. The adapter uses a pinned/current binding, fresh health/version match, no redirects, `Accept-Encoding: identity`, exact expected status, bounded `limit+1` reads, duplicate/trailing/depth-safe JSON validation where authority or receipts require it, sanitized errors and no mutation retry.
+Review, Rerun, Show, Comment, Close, Reopen, Cancel, JobMetadata, List, PanelMembers, TerminalJobMetadata, JobOutputStatus, Summary, Cost and Insights use exact v0.64 direct daemon HTTP instead of their lifecycle-bearing CLI commands. `List`, `PanelMembers`, `TerminalJobMetadata` and `JobOutputStatus` now require the cached verified exact-v0.64 executable binding plus a fresh matching daemon `/api/health` response before any `/api/jobs` or `/api/job/output` request. The adapter checks binding generation before requests and before adopting responses, uses no redirects, sends `Accept-Encoding: identity`, requires exact status, keeps bounded `limit+1` or ordered-prefix reads, never includes non-2xx bodies in errors, and does not ensure/start/restart/recover the daemon.
 
 Remaining process surfaces use typed executable + argument arrays, bounded stdout/stderr, timeouts/cancellation and no dynamic shell. Stream capability is false and production starts neither `roborev stream` nor an SSE relay source. Review/task refresh uses authoritative 4-second polling.
 
@@ -80,7 +82,7 @@ Remaining process surfaces use typed executable + argument arrays, bounded stdou
 
 ## Privacy boundaries
 
-Review list/detail/panel member and enqueue receipt responses are app-layer allowlist projections. Internal authorization may use `repo_path`, but that path is stripped before browser serialization. Projections remove prompt/diff/patch, raw error, dirty/worktree/config paths, raw command/process fields, token usage, session/worker metadata and unexpected nested fields while preserving UI-required IDs/status/verdict/panel metadata and intentional review Markdown/output.
+Review list/detail/panel member and enqueue receipt responses are app-layer key-and-shape allowlist projections. Internal authorization may use `repo_path`, but that path is stripped before browser serialization. Every admitted scalar is validated as its exact bounded string, boolean, positive/nonnegative JS-safe integer shape; exact v0.64 review `verdict_bool` values `0`/`1` are normalized to browser booleans, `member_job_ids` is limited to 256 positive safe IDs, and only dedicated `job`/`review` schemas admit nested objects. Object/array/null values in scalar positions and null list collections fail closed with a stable 502 at handlers. Projections remove prompt/diff/patch, raw error, dirty/worktree/config paths, raw command/process fields, token usage, session/worker metadata and unexpected nested fields while preserving UI-required IDs/status/verdict/panel metadata and intentional string review Markdown/output, including path-like text inside that content.
 
 Installation/runtime, Agents, Panel Refine/Fix history, repository command previews and Stats use dedicated browser DTOs. Actual binary paths, raw process/daemon errors, summary `repo_path`, per-repository Stats paths, HOME/config paths, stdout/stderr and private markers do not cross those DTOs. Intentional path-bearing bootstrap/inventory/install-display contracts remain explicitly out of scope of the path-free mutation projection claim.
 
@@ -117,8 +119,8 @@ The sole production `--yes` is the server-owned, preview-bound `repo merge --yes
 
 ## Regression suite
 
-- Targeted Go: `internal/app`, `internal/roborev`, operation/process/git/setup/configuration/agent-configuration, repository, hook, skills, CI, Stats and Insights packages PASS.
-- Focused frontend integration: 7 files / 288 tests PASS.
+- Targeted Go: `internal/app`, `internal/roborev`, operation/process/git/setup/configuration/agent-configuration, repository, hook, skills, CI, Stats and Insights packages PASS; this correction also repeated its binding/projection/panel/rerun tests 10 times.
+- Focused frontend integration for this correction: App, ReviewDetail lazy content, Panel Refine and API normalizers, 4 files / 174 tests PASS.
 - Concurrency repeats: `internal/operation` ×20, selected app token/Gate/lease tests ×10, stream manager shutdown/idle/concurrent tests ×10 PASS.
 - `scripts/test.ps1`: all Go packages PASS; Vitest 31 files / 594 tests PASS; TypeScript/Vite production build PASS.
 - `scripts/build.ps1`: PASS; Windows executable built.
@@ -129,9 +131,16 @@ The sole production `--yes` is the server-owned, preview-bound `repo merge --yes
 
 ## Findings and corrections
 
-Material findings corrected in this checkpoint include lifecycle-bearing CLI use on otherwise direct daemon-capable surfaces; redirect/error/body ambiguity in local daemon transports; stream/SSE capability drift; browser projection of binary/path/raw error/private upstream fields; missing global serialization for Insights; configuration token restoration/binding/readback weaknesses; unbounded repository preview stores; and frontend detail identity/projection regressions. The final reviewer additionally found and closed three integrated bypasses: generic rerun accepted stored Fix/Compact jobs, panel member reads lacked strict browser authorization, and several app handlers serialized raw Git/daemon/process errors. Exact review-like rerun allowlisting, authorization-before-service, fixed app-layer error projection and private-marker/zero-call regressions now cover those boundaries.
+Material findings corrected in the original checkpoint include lifecycle-bearing CLI use on otherwise direct daemon-capable surfaces; redirect/error/body ambiguity in local daemon transports; stream/SSE capability drift; browser projection of binary/path/raw error/private upstream fields; missing global serialization for Insights; configuration token restoration/binding/readback weaknesses; unbounded repository preview stores; and frontend detail identity/projection regressions. Its reviewer additionally found and closed three integrated bypasses: generic rerun accepted stored Fix/Compact jobs, panel member reads lacked strict browser authorization, and several app handlers serialized raw Git/daemon/process errors.
 
-Unresolved material findings: **0**. The same internal reviewer returned final **PASS** after the corrections.
+The independent post-commit gatekeeper then found exactly two remaining material gaps:
+
+1. CLI-only gating remained on `List`, `PanelMembers`, `TerminalJobMetadata` and `JobOutputStatus`. They now share exact CLI/daemon version binding; mismatch, invalid/offline health and generation drift fail before downstream adoption, with deterministic mismatch proving `/api/jobs`, `/api/job/output` and process/lifecycle calls are zero.
+2. Browser projection allowed malformed composite values under allowlisted scalar keys. The app projection now validates field types/shapes, safe integer bounds, bounded ID arrays and dedicated nested schemas. Regression fixtures reject nested repo/prompt/binary/stderr tunnels without raw or JSON-escaped marker leakage while retaining `Finding references C:\src\foo.go` as intentional review content.
+
+Unresolved material findings: **0**.
+
+That correction reviewer initially returned **NOT-CLOSED** for one exact-v0.64 compatibility issue: upstream persists `Review.VerdictBool` as numeric `0`/`1`, while the browser DTO expects a boolean. The projection now accepts only those two exact upstream integers and emits `false`/`true`; other numeric, string, boolean, object, array and null shapes are rejected. The same correction also closes the reviewer's precision note by rejecting bare or envelope-level null review collections instead of normalizing them to empty arrays. The same reviewer re-read the correction and returned final **PASS** with no remaining material finding.
 
 ## Residual risks
 
@@ -143,7 +152,7 @@ Unresolved material findings: **0**. The same internal reviewer returned final *
 
 ## Feature closure / release-readiness handoff
 
-The source/test/reviewer evidence supports `MUST-SHIP 0` and **v0.64 FEATURE-COMPLETE**. It does not claim full CLI parity or release readiness. Optional, superseded, unsupported and upstream-blocked taxonomy remains unchanged from `V064-COMPLETION-AUDIT.md`.
+The corrected source/test/reviewer evidence supports `MUST-SHIP 0` and **v0.64 FEATURE-COMPLETE**. It does not claim full CLI parity or release readiness. Optional, superseded, unsupported and upstream-blocked taxonomy remains unchanged from `V064-COMPLETION-AUDIT.md`.
 
 The exact next checkpoint is **Windows Release Readiness & Non-Destructive E2E**. It is not implemented in this commit.
 

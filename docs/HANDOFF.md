@@ -4,7 +4,7 @@
 
 ## Final v0.64 Security & Regression Closure
 
-**Current checkpoint:** Final v0.64 Security & Regression Closure
+**Current checkpoint:** Harden v0.64 read bindings and projections
 
 **Final feature verdict:** v0.64 FEATURE-COMPLETE
 
@@ -14,7 +14,7 @@
 
 **Next:** Windows Release Readiness & Non-Destructive E2E
 
-The integrated local gate is green: all Go packages, Vitest 31 files / 594 tests, TypeScript/Vite production build, Windows EXE build and `--help`, `go vet ./...`, focused concurrency repeats and `git diff --check` passed. Exactly one fresh-context internal reviewer initially returned NOT-CLOSED for three material findings; all three were corrected and the same reviewer returned final PASS with no remaining failed audit question. Final Git state is recorded in the completion report; this is not a release-signoff.
+The integrated local gate is green: all Go packages, Vitest 31 files / 594 tests, TypeScript/Vite production build, Windows EXE build and `--help`, `go vet ./...`, focused correction repeats and `git diff --check` passed. The original closure's one fresh-context reviewer returned NOT-CLOSED for three findings, then PASS after correction. A later independent gatekeeper found two more gaps: CLI-only daemon version gating on four read/status paths and key-only browser value projection. Both are corrected here. Exactly one new fresh-context reviewer for this correction initially returned NOT-CLOSED for numeric v0.64 `verdict_bool` compatibility; after correction the same reviewer returned final PASS with all 17 questions passing and no material finding. Final Git state is recorded in the completion report; this is not a release-signoff.
 
 - 기준 비교 대상은 exact RoboRev v0.64.0 `bc0af33c282733a9c39d72c08373b040e22c11d4`다. 이 checkpoint는 production feature expansion이 아니라 security/regression closure와 release-readiness separation이다.
 - [`docs/V064-COMPLETION-AUDIT.md`](V064-COMPLETION-AUDIT.md)에 Coverage의 remaining P-like/ambiguous capability 50개를 inventory하고, taxonomy를 A MUST-SHIP 0, B OPTIONAL-ADVANCED 7, C SUPERSEDED 9, D UNSUPPORTED-BY-DESIGN 8, E BLOCKED-BY-V0.64 14, F DOCS/CLI-UX-ONLY 12, G NEEDS-SEPARATE-AUDIT 0으로 확정한다.
@@ -23,6 +23,8 @@ The integrated local gate is green: all Go packages, Vitest 31 files / 594 tests
 - Feature completion과 release readiness는 분리한다. 원격 저장소에는 GitHub Actions workflow가 0개이고, 현재 private-plan 설정에서는 branch-protection/ruleset API가 unavailable(HTTP 403)하다. 남은 release-readiness gap은 release packaging과 version/commit stamping, clean-install·upgrade E2E, Windows non-destructive smoke, 사용자/README·privacy/telemetry 문서, crash recovery와 migration path 검증이다.
 - 이 audit에서는 실제 RoboRev/daemon lifecycle/LLM/review job/CI export를 실행하지 않았다. Stream CLI/SSE는 production transport가 아니며 capability false/unsupported로 닫고, review refresh는 4초 authoritative polling을 사용한다.
 - Final security correction: generic historical rerun은 trimmed empty legacy와 `review`/`range`/`dirty`/`synthesis`만 허용하고 Fix/Compact/Insights/Analyze/Classify/unknown 및 task/run은 fail closed한다. Panel member list/detail은 strict browser read authorization을 parse/query/registry/daemon 호출 전에 수행하며, Git/daemon/process/config/setup/panel/analysis/agent 오류는 app-layer fixed message로만 browser에 투영한다. Compact와 CI Metrics는 기존 blocked/deferred 판정을 유지한다.
+- Post-commit binding/projection correction: `List`, `PanelMembers`, `TerminalJobMetadata`, `JobOutputStatus`는 cached exact-v0.64 executable binding과 fresh matching daemon health/version 없이는 downstream `/api/jobs`/`/api/job/output`를 호출하지 않는다. no-redirect, identity encoding, bounded body/prefix, body-free non-2xx error와 generation-current adoption을 유지하며 lifecycle recovery는 없다. Review list/detail/panel/receipt projection은 key-only copy 대신 field-shape schema, JS-safe IDs, 최대 256개 member ID 배열과 dedicated `job`/`review` nested schema를 사용한다. malformed composite/null은 stable 502로 fail closed하고 intentional review Markdown string은 보존한다.
+- The correction reviewer initially returned NOT-CLOSED for exact v0.64's numeric `Review.VerdictBool`. The app projection now maps only upstream `0`/`1` to browser `false`/`true`, rejects every other shape, and rejects null review collections rather than silently producing an empty list. The same reviewer returned final PASS after re-review.
 
 ## 현재 상태
 
