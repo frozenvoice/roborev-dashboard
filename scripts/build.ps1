@@ -8,7 +8,17 @@ Push-Location $root
 try {
     Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'run', 'build')
     New-Item -ItemType Directory -Force -Path dist | Out-Null
-    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList @('build', '-trimpath', '-ldflags', '-s -w', '-o', 'dist\roborev-dashboard.exe', './cmd/dashboard')
+    $buildCommit = 'unknown'
+    try {
+        $candidateCommit = (& $tooling.GitPath @('rev-parse', 'HEAD') 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $candidateCommit -match '^[0-9a-f]{40}$') {
+            $buildCommit = $candidateCommit
+        }
+    } catch {
+        # A developer build remains useful when Git metadata is unavailable.
+    }
+    $ldflags = '-s -w -X github.com/froze/roborev-dashboard/internal/buildinfo.commit=' + $buildCommit + ' -X github.com/froze/roborev-dashboard/internal/buildinfo.version=dev -X github.com/froze/roborev-dashboard/internal/buildinfo.release=false'
+    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList @('build', '-trimpath', '-buildvcs=false', '-ldflags', $ldflags, '-o', 'dist\roborev-dashboard.exe', './cmd/dashboard')
     Write-Host "Built $root\dist\roborev-dashboard.exe"
 } finally {
     Pop-Location

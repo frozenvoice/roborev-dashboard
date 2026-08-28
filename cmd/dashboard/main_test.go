@@ -1,12 +1,32 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/gitx"
 )
+
+func TestWriteVersionDoesNotRequireRuntimeServices(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeVersion(&output, false); err != nil {
+		t.Fatalf("writeVersion() error = %v", err)
+	}
+	if got := output.String(); !strings.HasPrefix(got, "roborev-dashboard dev\n") || !strings.Contains(got, "RoboRev compatibility v0.64.0\n") {
+		t.Fatalf("version output = %q", got)
+	}
+
+	output.Reset()
+	if err := writeVersion(&output, true); err != nil {
+		t.Fatalf("writeVersion(json) error = %v", err)
+	}
+	if got := output.String(); !strings.HasPrefix(got, `{"name":"roborev-dashboard","version":"dev"`) || !strings.HasSuffix(got, "\n") {
+		t.Fatalf("version JSON output = %q", got)
+	}
+}
 
 type blockingStartupRegistry struct {
 	loadContext context.Context

@@ -40,8 +40,8 @@ var manifest064 = Manifest{
 	Version:        "v0.64.0",
 	Name:           "roborev",
 	URL:            "https://github.com/kenn-io/roborev/releases/download/v0.64.0/roborev_0.64.0_windows_amd64.zip",
-	CompressedSize: 16325029,
-	SHA256:         "157b008086a2ad1c107fe4aa70f172275400dd508c4c9761db2d604f9e56e056",
+	CompressedSize: 16028741,
+	SHA256:         "7a8ea79ffd3a90634e89a654e72ee0f65ea941f23106005710145ddd551290f1",
 	ArchiveEntry:   "roborev.exe",
 	TargetName:     "roborev.exe",
 }

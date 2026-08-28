@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,10 +16,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/froze/roborev-dashboard/internal/app"
+	"github.com/froze/roborev-dashboard/internal/buildinfo"
 	"github.com/froze/roborev-dashboard/internal/gitx"
 	"github.com/froze/roborev-dashboard/internal/operation"
 	proc "github.com/froze/roborev-dashboard/internal/process"
@@ -84,6 +85,23 @@ func initializeRegistry(registry startupRegistry, initialRepo string, timeout ti
 	return err
 }
 
+func writeVersion(w io.Writer, jsonOutput bool) error {
+	metadata, err := buildinfo.Current()
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		encoded, err := metadata.JSON()
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(w, string(encoded))
+		return err
+	}
+	_, err = io.WriteString(w, metadata.Human())
+	return err
+}
+
 func main() {
 	bind := flag.String("bind", "127.0.0.1", "loopback bind address")
 	port := flag.Int("port", 7410, "starting local port")
@@ -92,7 +110,15 @@ func main() {
 	binaryOverride := flag.String("roborev", "", "explicit roborev executable path")
 	daemonAddress := flag.String("roborev-server", "127.0.0.1:7373", "RoboRev daemon loopback address")
 	configDir := flag.String("config-dir", "", "override Dashboard config directory")
+	versionFlag := flag.Bool("version", false, "print Dashboard version")
+	versionJSONFlag := flag.Bool("version-json", false, "print Dashboard version as JSON")
 	flag.Parse()
+	if *versionFlag || *versionJSONFlag {
+		if err := writeVersion(os.Stdout, *versionJSONFlag); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	listener, err := listenLocal(*bind, *port)
 	if err != nil {
@@ -144,7 +170,7 @@ func main() {
 	}()
 
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(stop, shutdownSignals()...)
 	<-stop
 	streamShutdown, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = serverHandler.BeginShutdown(streamShutdown)
