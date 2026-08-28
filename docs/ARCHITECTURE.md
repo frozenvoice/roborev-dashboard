@@ -112,7 +112,43 @@ Exact v0.64.0 upstream audit 결과 `ExportReviewsInput`의 repository selectors
 
 보안 계약을 낮춰 best-effort export로 남기지 않는다. `/api/exports/reviews`는 strict browser authorization, exact single nonblank `repositoryIdentity` query validation, opaque Registry resolve와 fresh Git inspection을 순서대로 보존한 뒤 `501 phase=review-export-repository-isolation-blocked` tombstone을 반환한다. 이 path는 RoboRev service, daemon, CLI, Gate 또는 process를 호출하지 않으며, `/api/repos`와 `/api/export/reviews` upstream request는 모두 0이다. unsafe export adapter와 production call path는 제거했다. `roborev export reviews` CLI는 `ensureDaemon()` side effect 때문에 계속 N/superseded다.
 
-Reviews Export CTA는 disabled 상태와 “RoboRev v0.64.0에서는 안전한 저장소 단위 export를 지원하지 않음”이라는 localized explanation을 표시한다. browser download, prompt/diff/content export, polling/SSE export, daemon start/restart, operation manager/lease, CI metrics와 실제 RoboRev/daemon/LLM/external review 실행은 없다. Deterministic fake-daemon regression coverage는 identity collision race와 empty-identity name-fallback race를 각각 고정하고, 두 blocked path 모두 upstream inventory/export request, CLI/process와 browser download가 0임을 검증한다.
+Reviews Export CTA는 disabled 상태와 “RoboRev v0.64.0에서는 안전한 저장소 단위 export를 지원하지 않음”이라는 localized explanation을 표시한다. browser download, prompt/diff/content export, polling/SSE export, daemon start/restart, operation manager/lease, CI metrics와 실제 RoboRev/daemon/LLM/external review 실행은 없다. Deterministic fake-daemon regression coverage는 identity collision race와 empty-identity name-fallback race를 각각 고정하고, 두 blocked path 모두 upstream inventory/export request, CLI/process와 browser download가 0임을 검증한다. CI metrics는 별도 feasibility audit에서 두 selected-repository mode 모두 **NO-GO**로 결론 났다.
+
+### CI Metrics Export Feasibility Audit — NO-GO (2026-08-28)
+
+The exact v0.64.0 daemon `GET /api/export/ci-metrics` is a global panel/legacy
+read. Its only inputs are `format`, `since`, `until`, `limit`, `cursor` and
+`legacy`; the top-level page defaults to 500 and is capped at 5000. Panel SQL
+orders globally by `posted_at, panel_id`, and legacy groups globally by
+`(repo_id, git_ref)`. Nested jobs, strings and response bytes have no matching
+bound. The direct `export ci-metrics` CLI calls `ensureDaemon()` and follows
+pages without a full-export ceiling, so it is N/superseded and is not a
+Dashboard transport.
+
+The Dashboard may perform global observational reads in principle, but a
+client-side selected filter cannot establish complete, private results. A
+bounded scan starves behind foreign pages; an unbounded scan lacks a
+cross-request snapshot; a global cursor is not repository/window bound and
+leaks global activity unless a repository-safe wrapper exists. Panel
+`github_repo` is a hostless CI base-repository snapshot, not a local root or
+Dashboard identity; legacy identity is
+`COALESCE(NULLIF(TRIM(repos.identity), ''), repos.name)` with only a
+case-sensitive public-GitHub normalizer. Dashboard's registered path-derived
+selectors, the readiness/snapshot-ignore/tracking path-free alias, Git root and
+daemon inventory identity are not an atomic mapping to either value. Foreign
+slug/PR/SHA/agent/model/provider/time metadata would remain browser-private.
+Panel rows omit prompt/review/diff/path/credentials, but legacy `github_repo`
+can pass through a `local://<absolute-path>` or another raw effective identity,
+so the global response is not path-free.
+
+Accordingly, both panel-era selected-repository complete export and legacy
+selected-repository export are **NO-GO**. This is audit-only: no CI endpoint,
+adapter, UI, download, clipboard or CSV is implemented, and production
+occurrence of direct CLI/daemon CI metrics calls remains zero. Review Export
+remains blocked, while Tasks and Analyze execution, General Fix, Panel Refine,
+General Refine and Repository Delete remain blocked or disabled under their
+existing contracts. The complete evidence and unblock conditions are in
+[`docs/CI-METRICS-FEASIBILITY.md`](CI-METRICS-FEASIBILITY.md).
 
 ### transport
 
@@ -506,7 +542,7 @@ Execute is `POST /api/repository-tracking/execute` with exactly `{ "token": "<op
 
 The transport records `Attempted` at entry to `HTTP.Do`: a transport/build failure before `Do` receives no external-success credit, while any entered request is ambiguous until detached readback. After an attempted request, a background bounded verification (ten-second deadline) survives browser disconnect and checks fresh root identity, daemon binding/health/version and complete `/api/repos` inventory. The request body contains the selected canonical checkout root; readback must contain exactly one canonical row matching the server-derived effective `MainRoot` result and no duplicate-equivalent roots. A 200 followed by this exact proof is `verified-success`; a transport error or HTTP 5xx can also be reported as verified only when the exact handler audit and tracked readback make the mutation defensible. HTTP 3xx/4xx are not credited even if a concurrent external actor makes the row appear, and a duplicate/malformed/missing inventory is `failed-unverified`. `Attempted=false` never receives success credit even if another actor registered the repository. There is no retry, rollback or unregister operation. A residual race remains honest: another actor can change root or daemon state after the final guard and before the pathname HTTP request, so the guard-to-POST sequence is ordered but not a perfect transaction.
 
-The Setup card shows `Register repository` only when the daemon is online/healthy and tracking is freshly `not-tracked`; dirty/config/snapshot/hooks states do not suppress that CTA. Preview opens only after an explicit click. Confirmation performs no request, and one guarded confirmation performs one execute request. Success asks the user to choose `Check Setup` again; failure asks for inspection and a fresh preview rather than offering an automatic retry. Repository switches clear preview/token/dialog/result and discard stale work. Locale changes are local-only, and there is no readiness auto-refresh, polling or SSE. Browser responses never expose repository paths, `repo_path`, endpoints (including loopback addresses or sockets), binary paths, inventory roots, internal repository metadata, raw daemon errors or raw request/body data. No filesystem/Git/config/hook/LLM/review/enqueue mutation is introduced. Repository Setup Readiness, Snapshot Ignore, CI Workflow, Skills, Agent Hooks, Git Hooks and Review Export **BLOCKED** contracts remain unchanged; repository delete/unregister remains blocked/unsupported.
+The Setup card shows `Register repository` only when the daemon is online/healthy and tracking is freshly `not-tracked`; dirty/config/snapshot/hooks states do not suppress that CTA. Preview opens only after an explicit click. Confirmation performs no request, and one guarded confirmation performs one execute request. Success asks the user to choose `Check Setup` again; failure asks for inspection and a fresh preview rather than offering an automatic retry. Repository switches clear preview/token/dialog/result and discard stale work. For the tracking preview/execute and readiness DTOs, browser responses never expose repository paths, `repo_path`, endpoints (including loopback addresses or sockets), binary paths, inventory roots, internal repository metadata, raw daemon errors or raw request/body data; the separate bootstrap repository-inventory contract remains path-bearing by design. No filesystem/Git/config/hook/LLM/review/enqueue mutation is introduced. Repository Setup Readiness, Snapshot Ignore, CI Workflow, Skills, Agent Hooks, Git Hooks and Review Export **BLOCKED** contracts remain unchanged; repository delete/unregister remains blocked/unsupported.
 
 ### Repository Agent Configuration Management v1 (2026-08-28)
 

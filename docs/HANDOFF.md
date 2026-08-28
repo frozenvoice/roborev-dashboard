@@ -2,13 +2,13 @@
 
 마지막 갱신: 2026-08-28
 
-## Current checkpoint — Lifecycle-Free Fix Patch Feasibility Audit
+## Current checkpoint — CI Metrics Export Feasibility Audit
 
-- 기준 commit은 `8b86f75d2733f8a867ef510b1c0ad3c1c3910ad3` (`Sanitize blocked fix browser projection`)이며, 비교 대상은 exact RoboRev v0.64.0 `bc0af33c282733a9c39d72c08373b040e22c11d4`다.
-- `POST /api/job/fix` background generation, `GET /api/job/patch` inspection, TUI-style apply/commit, `/api/job/applied`와 stale/rebase를 source-audit한 결과는 **NO-GO**다. Phase A generation과 Phase C apply/commit은 production GO가 아니며 Phase B inspection도 audit-only B로 승격하지 않는다.
-- Blocker는 daemon의 live config/hot-reload와 primary→backup failover, 항상 agentic/dangerous executor, worktree의 비-sandbox 성격, queue pause race, unbounded/raw patch, CheckPatch→ApplyPatch→commit→mark/close의 비원자 partial failure다. 상세 근거와 required frozen reservation token은 [`docs/FIX-PATCH-FEASIBILITY.md`](FIX-PATCH-FEASIBILITY.md)에 있다.
-- General Fix, Panel Refine, General Refine mutation은 계속 blocked이고 Fix browser privacy boundary를 유지한다. Tasks/Analyze execution은 disabled, Review Export는 **BLOCKED**, Repository Delete/unregister는 **BLOCKED**다.
-- 다음 독립 checkpoint는 **CI Metrics Export Feasibility Audit**이며 이 checkpoint에서 구현하지 않는다.
+- 기준 Dashboard commit은 `dc9736f5fe25f19f10f394d0d947a201e8db5702`이며, 비교 대상은 exact RoboRev v0.64.0 `bc0af33c282733a9c39d72c08373b040e22c11d4`다.
+- panel-era selected-repository complete export와 legacy selected-repository export를 source-audit한 최종 verdict는 모두 **NO-GO**다. 상세 근거와 unblock 조건은 [`docs/CI-METRICS-FEASIBILITY.md`](CI-METRICS-FEASIBILITY.md)에 있다.
+- v0.64.0 daemon export는 global `posted/since/until/global cursor` 및 legacy `(repo_id, git_ref)` 읽기만 제공한다. top-level 500/5000 bound와 달리 nested jobs/string/body는 unbounded하고, CLI는 `ensureDaemon()`과 unbounded page accumulation을 수행한다. Dashboard identity와 `github_repo`/legacy identity 사이에 atomic selected mapping이나 completeness proof가 없다.
+- direct CLI, global daemon HTTP product surface, panel selected adapter, legacy selected adapter는 각각 `N/superseded`, `N/no Dashboard global product surface`, `N/unsupported-by-dashboard-safety`, `N/unsupported-by-dashboard-safety`다. 이 audit은 B를 주장하지 않으며 endpoint/UI/adapter/download/clipboard/CSV를 추가하지 않았다; production CI metrics occurrence는 0이다.
+- General Fix, Panel Refine, General Refine mutation은 계속 blocked이고 Fix browser privacy boundary를 유지한다. Tasks/Analyze execution은 disabled, Review Export는 **BLOCKED**, Repository Delete/unregister는 **BLOCKED**다. Targeted Go, focused frontend 5 files/181 tests, full Go + 31 frontend files/587 tests and embedded web build, `scripts/build.ps1`, Windows `--help` smoke와 `git diff --check`가 통과했다. exactly-one fresh internal reviewer의 material privacy finding과 두 precision finding을 교정하고 같은 reviewer가 최종 **PASS**했다. 실제 RoboRev/daemon/LLM/review job은 실행하지 않았다.
 
 ## 현재 상태
 
@@ -410,7 +410,7 @@ Repository Tracking Management v2 is the explicit registration checkpoint after 
 
 Dashboard root init, daemon lifecycle and CLI registration calls remain zero. Typed transport emits only the server-authorized canonical selected root as `{"repo_path":"<canonical-root>"}`; the effective `MainRoot` value remains server-side and is the inventory match key. Preview is `POST /api/repository-tracking/preview` with strict same-origin/CSRF, empty query and exact opaque `{repositoryIdentity}` body. It performs fresh binding, health/version and complete inventory readback; already-tracked means no token and no registration POST. Execute is `POST /api/repository-tracking/execute` with token only, using the shared global `AcquireFix` slot, atomic `AcquireRepositories` keys and selected lease. The three-minute, bounded-64, single-use token is claimed before gates and carries all private root/binding/inventory facts; the browser sees none of them. All slow checks run before `FINAL_ROOT_GUARD`; the immediately following operation is the single no-redirect typed registration POST, with five-second timeout, bounded body and no retry. The request records `Attempted`; pre-`HTTP.Do` failures cannot receive external-success credit, and any entered request gets detached bounded ten-second root/binding/health/inventory verification. Exactly one canonical row matching the effective root, with no duplicate-equivalent inventory roots, is required for success. A transport error or HTTP 5xx plus exact tracked readback may be a sanitized verified result because the audited handler can fail after its insert; HTTP 3xx/4xx are never credited, duplicates are failed-unverified, and there is no rollback/unregister.
 
-The browser never receives repository paths or `repo_path`, daemon endpoint, binary path, inventory roots, internal repository metadata, identity/name, raw daemon error or raw request/body. The CTA is limited to daemon online plus `not-tracked`; dirty/config/snapshot/hooks are independent. Confirmation has no network side effect and one guarded confirmation makes one execute request; success asks the user to run Check Setup again, failure asks for inspection and a fresh flow. Repository switches clear stale state, locale changes add no request, and there is no polling/SSE or automatic readiness refresh. The checkpoint introduces no filesystem, Git, config, hook, LLM, review or enqueue mutation and does not start/stop/restart a daemon. Repository Setup Readiness, Snapshot Ignore, CI Workflow, Skills, Agent Hooks and Git Hooks remain separate; Repository Delete/unregister is still blocked/unsupported and Review Export remains **BLOCKED**.
+For the tracking preview/execute and readiness DTOs, the browser never receives repository paths or `repo_path`, daemon endpoint, binary path, inventory roots, internal repository metadata, identity/name, raw daemon error or raw request/body; the separate bootstrap and repository-inventory DTOs remain path-bearing under their existing contracts. The CTA is limited to daemon online plus `not-tracked`; dirty/config/snapshot/hooks are independent. Confirmation has no network side effect and one guarded confirmation makes one execute request; success asks the user to run Check Setup again, failure asks for inspection and a fresh flow. Repository switches clear stale state, locale changes add no request, and there is no polling/SSE or automatic readiness refresh. The checkpoint introduces no filesystem, Git, config, hook, LLM, review or enqueue mutation and does not start/stop/restart a daemon. Repository Setup Readiness, Snapshot Ignore, CI Workflow, Skills, Agent Hooks and Git Hooks remain separate; Repository Delete/unregister is still blocked/unsupported and Review Export remains **BLOCKED**.
 
 Validation is complete with deterministic fakes only. Targeted Go coverage passed for `internal/repositorytracking`, `internal/roborev`, `internal/repoinventory`, `internal/app`, `internal/operation`, `internal/pathsafety`, `internal/gitx` and `internal/setupreadiness`; focused frontend coverage passed 6 files / 154 tests. The final `scripts/test.ps1` run passed every Go package, 29 Vitest files / 563 tests and the production frontend build. `scripts/build.ps1`, the rebuilt Windows executable `--help` smoke and `git diff --check` passed. A pre-final full run exposed one unrelated existing App daemon-stop timing failure; the isolated test and the following complete run both passed. The exactly-one fresh-context internal reviewer reported two candidate findings: non-standard HTTP 600+ responses were incorrectly included in the 5xx ambiguity class and were fixed with 600/700 regressions; the proposed removal of Windows case-equivalent inventory matching was not applied because this checkpoint explicitly reuses Repository Setup Readiness inventory semantics, where one drive/UNC case-equivalent root is a match and multiple equivalents are ambiguous. No actual `POST /api/repos/register`, root `roborev init`, daemon lifecycle, LLM/review job or external `dashboard_cross`/`dashboard_deep`/3-review was run.
 
@@ -459,4 +459,55 @@ No `/api/job/fix`, `/api/job/patch`, `/api/job/applied`, `/api/job/rebased`, pat
 
 The smallest unblock is an atomic frozen Fix plan/reservation token bound to the opaque repository and parent, exact base/full HEAD/checkout, config digest/reload generation, primary and backup agent/model/provider/reasoning/failover, executor/sandbox/dangerous settings and writable roots, plus a genuinely safe contained agent mode. Independently, a bounded repository-bound patch envelope and safer apply/index/commit/readback contract are required. An ordinary non-`--reject` hunk conflict has Git's default whole-patch rejection and is normally mutation-zero, subject to target readback; this does not make the full check→apply→stage→commit flow transactional. Generic I/O/concurrency or post-apply ambiguity requires authoritative readback, and a mutation-started unverified result is `failed-unverified`.
 
-The next independent checkpoint is **CI Metrics Export Feasibility Audit**; it is selected only and is not implemented here. Validation completed with targeted Go `go test ./internal/app ./internal/fixoperation ./internal/roborev ./internal/refine ./internal/operation` PASS; targeted FixRefine/GeneralRefine/PanelRefine/API frontend coverage (4 files, 78 tests) PASS; `scripts/test.ps1` PASS (all Go suites, 31 frontend files/587 tests and embedded web build); `scripts/build.ps1` PASS; and `dist/roborev-dashboard.exe --help` PASS. The first sandboxed Vitest/esbuild attempt hit an environment EPERM and the escalated rerun passed. Exactly one fresh-context internal read-only reviewer returned PASS with no material findings; its two minor documentation omissions were corrected and the same reviewer returned final PASS. No real RoboRev, daemon, LLM or external review job was run.
+The subsequent **CI Metrics Export Feasibility Audit** is documented below and concluded **NO-GO**; it was not implemented here. Deterministic validation is complete, and the exactly-one fresh internal reviewer returned final PASS after its findings were corrected. No real RoboRev, daemon, LLM or external review job was run.
+
+## CI Metrics Export Feasibility Audit handoff (2026-08-28)
+
+This audit is documentation-only and is documented in
+[`docs/CI-METRICS-FEASIBILITY.md`](CI-METRICS-FEASIBILITY.md). Against Dashboard
+base `dc9736f5fe25f19f10f394d0d947a201e8db5702` and exact RoboRev v0.64.0
+`bc0af33c282733a9c39d72c08373b040e22c11d4`, the final decision is **NO-GO** for
+both panel-era selected-repository complete export and legacy selected-
+repository export.
+
+The daemon route is a global metadata read: panel rows use global
+`posted_at/since/until/cursor` ordering and legacy rows group global
+`(repo_id, git_ref)`. It has only top-level 500/5000 bounds; nested jobs,
+strings and response bytes are unbounded. The CLI calls `ensureDaemon()` and
+accumulates pages without a full-export ceiling. Dashboard's registered
+path-derived selectors, the readiness/snapshot-ignore/tracking path-free alias,
+canonical root and daemon inventory identity cannot be atomically mapped to
+hostless panel `github_repo` or legacy identity. Legacy `github_repo` can also
+pass through `local://<absolute-path>` or another raw effective identity. A
+bounded client-side scan can starve behind foreign rows, while an unbounded
+scan has no cross-request snapshot; global reads are not inherently forbidden,
+but this contract cannot prove selected completeness and privacy.
+
+The taxonomy is direct CLI **N/superseded**, global daemon endpoint **N/no
+Dashboard global product surface**, panel selected adapter
+**N/unsupported-by-dashboard-safety**, and legacy selected adapter
+**N/unsupported-by-dashboard-safety**. No audit-only B claim is made. No
+endpoint, UI, adapter, download, clipboard or CSV was added; production
+occurrence of direct CLI and daemon CI metrics calls remains zero. Browser
+path-free guarantees continue to apply only to the specific readiness,
+snapshot-ignore and tracking DTOs that define them; bootstrap and repository
+inventory remain path-bearing under their existing contracts.
+
+Existing General Fix, Panel Refine, General Refine, Tasks and Analyze
+execution, Review Export and Repository Delete/unregister statuses are
+unchanged and remain blocked/disabled as previously documented. Fix browser
+privacy is preserved. Targeted Go coverage passed for `internal/app`,
+`internal/roborev`, `internal/repoinventory`, `internal/gitx`, `internal/stats`,
+`internal/insights`, `internal/ciworkflowpreview` and
+`internal/ciworkflowmanagement`; the focused Stats/CI Workflow/App/API suite
+passed 5 files/181 tests. `scripts/test.ps1` passed every Go package, 31
+frontend files/587 tests and the embedded web build. `scripts/build.ps1`, the
+Windows `dist/roborev-dashboard.exe --help` smoke and `git diff --check`
+passed. Initial sandboxed Vitest/build attempts hit the environment's esbuild
+`spawn EPERM`; identical escalated reruns passed. The exactly-one fresh
+internal reviewer found that legacy `github_repo` can leak a
+`local://<absolute-path>`, that the HMAC alias scope was overstated, and that
+the legacy SQL fallback expression needed exact `TRIM`/blank semantics. All
+three were corrected, the same reviewer returned final **PASS**, and the full
+validation above was rerun after the fixes. No real RoboRev, daemon, LLM or
+external review job is run.
