@@ -15,6 +15,7 @@
 - `go vet ./...`도 통과했다. 전체 검증에서 드러난 기존 `TestAcceptedStartSurvivesRequestCancellation`의 작업 완료 타이밍 의존성은 fake의 진입/해제 채널로 안정화했으며 해당 테스트를 100회 반복해 통과했다. runtime production 동작은 바꾸지 않았다.
 - 생성된 EXE를 별도 경로·설정과 개발 도구 없는 PATH에서 실행해 version/help, 없는 인스턴스 status/stop, 점유된 7410 회피, embedded frontend, `--no-open` 중복 실행, 명시적 port 옵션 충돌, 정상 종료, 설정 보존과 RoboRev 데이터 미생성을 확인했다. 이것은 installed-mode EXE 검증이며 실제 Setup 설치 E2E를 대체하지 않는다.
 - Codex 내부 reviewer의 material finding은 수정 후 재검토해 모두 해소했다. 다운그레이드 검사 순서, SemVer metadata, 설치 mutex 수명, reparse 경계, 종료 대기 제한, 설치 결과 상태 계약, PowerShell 5.1 모듈/UTF-8 및 dirty 파일 삭제 처리를 포함한다. RoboRev 외부 review는 실행하지 않았다.
+- 구현을 커밋한 clean tree에서 기존 `scripts/package.ps1 -Version 0.0.0-localcheck.1 -VerifyReproducible`을 Windows PowerShell 5.1로 실행해 두 번 빌드의 EXE/manifest/SHA 재현성을 확인했다. 해당 artifact의 기존 `scripts/release-e2e.ps1`도 fake RoboRev와 격리된 설정으로 통과했다. 검증용 로컬 산출물이며 태그·GitHub Release 게시를 의미하지 않는다.
 
 세부 사용법, 출력·로그, 데이터 보존과 남은 수동 검증은 [WINDOWS-INSTALLER.md](WINDOWS-INSTALLER.md)를 참고한다. 검증한 로컬 설치기는 `dist\installer\RoboRev-Dashboard-Setup.exe`, 실행별 원본과 로그는 `dist\local-build`에 보관한다. Sandbox 입력 묶음은 `dist\installer-sandbox`에 준비했으며 실행하지 않았다.
 
