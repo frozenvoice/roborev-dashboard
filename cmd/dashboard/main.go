@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/froze/roborev-dashboard/internal/app"
 	"github.com/froze/roborev-dashboard/internal/buildinfo"
 	"github.com/froze/roborev-dashboard/internal/gitx"
+	"github.com/froze/roborev-dashboard/internal/installedinstance"
 	"github.com/froze/roborev-dashboard/internal/operation"
 	proc "github.com/froze/roborev-dashboard/internal/process"
 	"github.com/froze/roborev-dashboard/internal/roborev"
@@ -102,6 +104,84 @@ func writeVersion(w io.Writer, jsonOutput bool) error {
 	return err
 }
 
+// validateModeFlags keeps the installed-instance control plane deliberately
+// small. A duplicate invocation must not accidentally reinterpret repository,
+// port, daemon, or configuration flags against the already running primary.
+// --no-open is the only ordinary behavior flag accepted with --installed.
+func validateModeFlags(fs *flag.FlagSet, installed, status, stop bool) error {
+	modeCount := 0
+	if installed {
+		modeCount++
+	}
+	if status {
+		modeCount++
+	}
+	if stop {
+		modeCount++
+	}
+	if modeCount > 1 {
+		return errors.New("--installed, --installed-status, and --stop-installed are mutually exclusive")
+	}
+	if modeCount == 0 {
+		return nil
+	}
+	allowed := map[string]bool{}
+	if installed {
+		allowed["installed"] = true
+		allowed["no-open"] = true
+	}
+	for _, name := range []string{"installed-status", "stop-installed"} {
+		if (status && name == "installed-status") || (stop && name == "stop-installed") {
+			allowed[name] = true
+		}
+	}
+	var invalid []string
+	fs.Visit(func(f *flag.Flag) {
+		if !allowed[f.Name] {
+			invalid = append(invalid, "--"+f.Name)
+		}
+	})
+	if len(invalid) > 0 {
+		return fmt.Errorf("installed instance modes do not accept %s", strings.Join(invalid, ", "))
+	}
+	return nil
+}
+
+func installedConfig() (installedinstance.Config, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return installedinstance.Config{}, fmt.Errorf("resolve Dashboard executable: %w", err)
+	}
+	return installedinstance.Config{
+		ExecutablePath: executable,
+		RequestTimeout: 2 * time.Second,
+		StartupTimeout: 8 * time.Second,
+		// The app shutdown sequence has 2s + 5s + 15s stage budgets. Leave
+		// enough room for the exact process-exit wait used by the installer.
+		ShutdownTimeout: 30 * time.Second,
+	}, nil
+}
+
+func runInstalledStatus(w io.Writer) error {
+	config, err := installedConfig()
+	if err != nil {
+		return err
+	}
+	status, err := installedinstance.Query(context.Background(), config)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(w).Encode(status)
+}
+
+func stopInstalled() error {
+	config, err := installedConfig()
+	if err != nil {
+		return err
+	}
+	return installedinstance.Stop(context.Background(), config)
+}
+
 func main() {
 	bind := flag.String("bind", "127.0.0.1", "loopback bind address")
 	port := flag.Int("port", 7410, "starting local port")
@@ -112,12 +192,82 @@ func main() {
 	configDir := flag.String("config-dir", "", "override Dashboard config directory")
 	versionFlag := flag.Bool("version", false, "print Dashboard version")
 	versionJSONFlag := flag.Bool("version-json", false, "print Dashboard version as JSON")
+	installed := flag.Bool("installed", false, "run or activate the per-user installed Dashboard instance")
+	installedStatus := flag.Bool("installed-status", false, "print the per-user installed Dashboard instance status as JSON")
+	stopInstalledFlag := flag.Bool("stop-installed", false, "stop the per-user installed Dashboard instance")
 	flag.Parse()
+	if err := validateModeFlags(flag.CommandLine, *installed, *installedStatus, *stopInstalledFlag); err != nil {
+		log.Fatal(err)
+	}
 	if *versionFlag || *versionJSONFlag {
 		if err := writeVersion(os.Stdout, *versionJSONFlag); err != nil {
 			log.Fatal(err)
 		}
 		return
+	}
+	if *installedStatus {
+		if err := runInstalledStatus(os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *stopInstalledFlag {
+		if err := stopInstalled(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	var instance *installedinstance.Manager
+	var remoteStop = make(chan struct{}, 1)
+	if *installed {
+		config, configErr := installedConfig()
+		if configErr != nil {
+			log.Fatal(configErr)
+		}
+		callbacks := installedinstance.Callbacks{
+			Shutdown: func(context.Context) error {
+				select {
+				case remoteStop <- struct{}{}:
+				default:
+				}
+				return nil
+			},
+		}
+		callbacks.Activate = func(status installedinstance.Status) {
+			if status.URL != "" {
+				openBrowser(status.URL)
+			}
+		}
+		var acquireErr error
+		instance, acquireErr = installedinstance.Acquire(config, callbacks)
+		if errors.Is(acquireErr, installedinstance.ErrAlreadyRunning) {
+			activateCtx, activateCancel := context.WithTimeout(context.Background(), config.StartupTimeout)
+			var activateErr error
+			if *noOpen {
+				_, activateErr = installedinstance.ActivateQuiet(activateCtx, config)
+			} else {
+				_, activateErr = installedinstance.Activate(activateCtx, config)
+			}
+			activateCancel()
+			if activateErr != nil {
+				log.Fatal(activateErr)
+			}
+			return
+		}
+		if acquireErr != nil {
+			log.Fatal(acquireErr)
+		}
+		defer instance.Close()
+		go func() {
+			if err := instance.Run(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("installed control pipe: %v", err)
+				select {
+				case remoteStop <- struct{}{}:
+				default:
+				}
+			}
+		}()
 	}
 
 	listener, err := listenLocal(*bind, *port)
@@ -130,7 +280,7 @@ func main() {
 	gitService := gitx.New(runner)
 	registry := app.NewRegistry(gitService, defaultConfigFile(*configDir))
 	initialRepo := *repo
-	if initialRepo == "" {
+	if initialRepo == "" && !*installed {
 		initialRepo, _ = os.Getwd()
 	}
 	if err := initializeRegistry(registry, initialRepo, 10*time.Second); err != nil {
@@ -159,6 +309,12 @@ func main() {
 	httpServer := &http.Server{Handler: serverHandler.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	url := "http://" + host
 	fmt.Printf("RoboRev Dashboard: %s\n", url)
+	if *installed {
+		state := instance.Status()
+		state.URL = url
+		instance.SetStatus(state)
+		fmt.Println("Press Ctrl+C to stop Dashboard.")
+	}
 	if !*noOpen {
 		go openBrowser(url)
 	}
@@ -171,7 +327,14 @@ func main() {
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, shutdownSignals()...)
-	<-stop
+	if instance == nil {
+		<-stop
+	} else {
+		select {
+		case <-stop:
+		case <-remoteStop:
+		}
+	}
 	streamShutdown, streamCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	_ = serverHandler.BeginShutdown(streamShutdown)
 	streamCancel()

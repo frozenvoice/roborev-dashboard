@@ -8,8 +8,15 @@ function Invoke-NativeCommand {
         [string[]]$ArgumentList = @()
     )
 
+    # The call operator receives an argument array, so paths and user-supplied
+    # values are never rebuilt into a shell command line.  Preserve the code in
+    # Exception.Data for wrappers that need to propagate the exact child code.
     & $FilePath @ArgumentList
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native command '$FilePath' failed with exit code $LASTEXITCODE."
+    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    if ($exitCode -ne 0) {
+        $exception = New-Object System.InvalidOperationException ("Native command '$FilePath' failed with exit code $exitCode.")
+        $exception.Data['ExitCode'] = $exitCode
+        $exception.Data['FilePath'] = $FilePath
+        throw $exception
     }
 }

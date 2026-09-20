@@ -6,6 +6,8 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction S
 # Keep the bootstrap contract itself deterministic and independently testable.
 & (Join-Path $PSScriptRoot 'prerequisites.tests.ps1')
 & (Join-Path $PSScriptRoot 'package.tests.ps1')
+& (Join-Path $PSScriptRoot 'local-build.tests.ps1')
+& (Join-Path $PSScriptRoot 'installer.tests.ps1')
 $tooling = Assert-DevelopmentPrerequisites -RootPath $root
 
 Push-Location $root

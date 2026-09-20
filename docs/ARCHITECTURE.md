@@ -22,6 +22,14 @@ RoboRev daemon -> RoboRev-owned storage
 
 Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 포함한다. 최종 사용자는 Node나 Go 없이 `roborev-dashboard.exe` 하나만 실행한다. 개발 스크립트는 frontend build 후 Go build 순서를 보장한다. `scripts/install.ps1` 소스 bootstrap은 이 runtime 경계와 분리되어 개발 도구만 준비하며 RoboRev를 설치하거나 실행하지 않는다. Dashboard의 RoboRev runtime onboarding은 Go backend가 소유하는 별도 capability다.
 
+### Windows Dashboard 앱 설치와 installed process
+
+`build-local.cmd`는 Windows PowerShell entry point이며 로컬 빌드 orchestration은 `scripts/build-local.ps1`이 소유한다. 개발 도구 bootstrap, Dashboard Setup, RoboRev runtime onboarding은 세 개의 독립된 경계다. 기존 strict 공식 `package.ps1`은 그대로 두고 현재 dirty checkout을 허용하는 로컬 packaging 경로를 사용한다. 실행별 staging/log/manifest, shared build lock, 검증 후 설치기 publish와 설치 후 EXE hash 확인으로 stale 성공이나 이전 Setup 실행을 막는다. `buildinfo`의 `dev`/`release=false` 계약은 바꾸지 않는다.
+
+Windows 설치본만 `--installed`로 단일 인스턴스 처리를 사용한다. 현재 사용자 SID와 canonical EXE identity로 제한한 native IPC에서 기존 process를 검증하고 activation/shutdown을 요청한다. Named pipe transport는 pinned `github.com/Microsoft/go-winio v0.6.2`, 권한·peer identity 검증은 Windows API를 사용한다. Pipe DACL은 현재 사용자로 제한하고 OS에서 얻은 peer PID의 SID, executable path와 file identity를 확인한다. localhost HTTP 응답이나 실행 파일 이름만으로 identity를 판단하지 않는다. 이 control channel은 browser API를 추가하지 않으며 기존 Host/Origin/CSRF 보호를 유지한다. `--stop-installed`는 기존 shutdown 순서와 cancellation budget을 사용하고 RoboRev daemon stop으로 연결하지 않는다.
+
+Inno Setup은 현재 사용자 설치와 고정 AppId/경로를 소유한다. 사용자의 설치 승인 후에만 이전 exact EXE에 정상 종료를 요청하고, 파일 잠금 해제 후 명시한 배포 파일만 교체한다. 콘솔과 시작 메뉴의 종료 바로가기로 lifecycle을 노출하며 사용자 설정은 기존 OS user config 경로에 유지한다. 설치기의 uninstall은 설정, 저장소, RoboRev와 agent 데이터를 제거하지 않는다. 일반 EXE 실행과 명시적 port/config 옵션은 기존 동작을 유지한다. 세부 운영 계약과 미검증 E2E 범위는 [Windows 설치 안내](WINDOWS-INSTALLER.md)를 따른다.
+
 ### RoboRev runtime 설치 신뢰 경계
 
 `internal/roborevcompat`의 immutable manifest가 Dashboard가 완전히 지원하는 RoboRev release의 version, Windows/architecture, 공식 GitHub asset URL, exact compressed size, SHA-256, archive entry와 managed user target을 한 곳에서 정의한다. installer와 capability layer는 같은 정책을 사용한다. 이번 checkpoint의 권장 버전은 v0.64.0이며 newer/latest를 원격 metadata만 보고 자동 선택하지 않는다. 이미 발견된 supported binary는 존중하고 newer, unknown, broken 또는 policy-blocked binary를 자동 downgrade하거나 덮어쓰지 않는다. explicit `--roborev` override가 있으면 자동 설치를 제공하지 않는다.

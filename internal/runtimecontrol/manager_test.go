@@ -264,14 +264,27 @@ func (f *onlineStopAdapter) StopDaemon(context.Context) error {
 }
 
 func TestAcceptedStartSurvivesRequestCancellation(t *testing.T) {
-	fake := &fakeRuntimeAdapter{online: false}
+	fake := &fakeRuntimeAdapter{
+		online:       false,
+		startEntered: make(chan struct{}),
+		startRelease: make(chan struct{}),
+	}
 	m := fastManager(t, fake, fake, operation.NewGate())
 	request, cancelRequest := context.WithCancel(context.Background())
 	state, err := m.Start(request)
-	if err != nil || !state.Active {
+	if err != nil {
 		t.Fatalf("start acceptance = %#v, %v", state, err)
 	}
+	select {
+	case <-fake.startEntered:
+	case <-time.After(time.Second):
+		t.Fatal("start did not begin")
+	}
+	if !state.Active {
+		t.Fatalf("accepted start state = %#v, want active", state)
+	}
 	cancelRequest()
+	close(fake.startRelease)
 	deadline := time.Now().Add(time.Second)
 	for m.Status().Active && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)

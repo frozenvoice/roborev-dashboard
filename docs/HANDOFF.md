@@ -1,6 +1,22 @@
 # Handoff
 
-마지막 갱신: 2026-08-29
+마지막 갱신: 2026-09-21
+
+## Windows local installer checkpoint (2026-09-21)
+
+이번 checkpoint는 현재 소스를 한 번에 빌드·검증하여 설치하는 unsigned 로컬 Windows 배포다. 아래의 기존 Final Release Candidate Closure는 이전 checkpoint의 기록이며 이번 변경의 CI/설치 E2E 검증 결과를 뜻하지 않는다. 이번 작업은 tag, GitHub Release, main merge/push 또는 RoboRev 외부 review를 수행하지 않는다.
+
+- `build-local.cmd`와 PowerShell wrapper는 기존 개발 도구 bootstrap 및 테스트를 재사용하고, dirty checkout의 개발 EXE를 독립된 run staging에 만든다. `-NoInstall`, 기본 승인 가능한 설치 창, 명시적 `-SilentInstall`을 제공한다.
+- Inno Setup은 pinned 6.7.3 도구를 검증하여 사용한다. Setup은 고정 AppId와 현재 사용자 경로를 사용하고, 같은 버전 재설치·업그레이드·제거 때 사용자 설정과 RoboRev 데이터를 보존한다.
+- Windows 설치본의 `--installed`/`--installed-status`/`--stop-installed`는 사용자·EXE identity로 제한한 native IPC를 사용한다. 콘솔/종료 바로가기를 유지하며 기존 일반 실행 및 RoboRev shutdown 경계를 보존한다.
+- 공식 `package.ps1`과 CI workflow의 정책은 유지한다. local manifest는 `dev`, commit/dirty와 artifact hash를 기록하고 정식 릴리스로 표시하지 않는다.
+- `scripts/prepare-installer-sandbox.ps1`은 호스트에서 설치하지 않고 disposable Sandbox 검증 입력을 만든다. 현재 Windows 11 amd64 환경에는 WindowsSandbox.exe가 없으므로 실제 설치·제거, 승인/취소 및 Start Menu browser E2E는 미검증이다. 일반 호스트 실행 거부는 Windows PowerShell 5.1에서 확인했다.
+- Windows 11 amd64 / Windows PowerShell 5.1에서 `.tmp\Windows 검증\source checkout`의 실제 `build-local.cmd -NoInstall`을 `C:\Windows\Temp`에서 실행해 통과했다. 개발 도구·의존성 준비, PowerShell 회귀 테스트, 전체 Go 테스트, frontend 31개 파일/594개 테스트, production build, pinned Inno 캐시 검증, 실제 Setup 컴파일과 manifest/hash 검증을 포함한다.
+- `go vet ./...`도 통과했다. 전체 검증에서 드러난 기존 `TestAcceptedStartSurvivesRequestCancellation`의 작업 완료 타이밍 의존성은 fake의 진입/해제 채널로 안정화했으며 해당 테스트를 100회 반복해 통과했다. runtime production 동작은 바꾸지 않았다.
+- 생성된 EXE를 별도 경로·설정과 개발 도구 없는 PATH에서 실행해 version/help, 없는 인스턴스 status/stop, 점유된 7410 회피, embedded frontend, `--no-open` 중복 실행, 명시적 port 옵션 충돌, 정상 종료, 설정 보존과 RoboRev 데이터 미생성을 확인했다. 이것은 installed-mode EXE 검증이며 실제 Setup 설치 E2E를 대체하지 않는다.
+- Codex 내부 reviewer의 material finding은 수정 후 재검토해 모두 해소했다. 다운그레이드 검사 순서, SemVer metadata, 설치 mutex 수명, reparse 경계, 종료 대기 제한, 설치 결과 상태 계약, PowerShell 5.1 모듈/UTF-8 및 dirty 파일 삭제 처리를 포함한다. RoboRev 외부 review는 실행하지 않았다.
+
+세부 사용법, 출력·로그, 데이터 보존과 남은 수동 검증은 [WINDOWS-INSTALLER.md](WINDOWS-INSTALLER.md)를 참고한다. 검증한 로컬 설치기는 `dist\installer\RoboRev-Dashboard-Setup.exe`, 실행별 원본과 로그는 `dist\local-build`에 보관한다. Sandbox 입력 묶음은 `dist\installer-sandbox`에 준비했으며 실행하지 않았다.
 
 ## Final Release Candidate Closure (2026-08-29)
 

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -67,5 +69,41 @@ func TestInitializeRegistryUsesFreshContextForAdd(t *testing.T) {
 	case <-registry.addContext.Done():
 	default:
 		t.Fatal("Add context was not canceled after initialization")
+	}
+}
+
+func TestValidateModeFlagsAllowsOnlyInstalledNoOpen(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		installed bool
+		status    bool
+		stop      bool
+		wantErr   bool
+	}{
+		{name: "installed", args: []string{"--installed"}, installed: true},
+		{name: "installed no open", args: []string{"--installed", "--no-open"}, installed: true},
+		{name: "installed port rejected", args: []string{"--installed", "--port", "7420"}, installed: true, wantErr: true},
+		{name: "status rejects no open", args: []string{"--installed-status", "--no-open"}, status: true, wantErr: true},
+		{name: "stop", args: []string{"--stop-installed"}, stop: true},
+		{name: "modes exclusive", args: []string{"--installed", "--installed-status"}, installed: true, status: true, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			set := flag.NewFlagSet("dashboard", flag.ContinueOnError)
+			set.SetOutput(io.Discard)
+			set.Bool("installed", false, "")
+			set.Bool("installed-status", false, "")
+			set.Bool("stop-installed", false, "")
+			set.Bool("no-open", false, "")
+			set.Int("port", 7410, "")
+			if err := set.Parse(test.args); err != nil {
+				t.Fatal(err)
+			}
+			err := validateModeFlags(set, test.installed, test.status, test.stop)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateModeFlags() error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
 	}
 }

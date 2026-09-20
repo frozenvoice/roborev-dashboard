@@ -6,6 +6,26 @@ RoboRev Dashboard는 기존 [`roborev`](https://github.com/kenn-io/roborev) CLI/
 
 ## 새 clone에서 개발 시작
 
+### Windows에서 원클릭 빌드·설치
+
+Windows 11 amd64에서 소스를 수정한 뒤 저장소 루트의 `build-local.cmd`를 더블클릭하면 개발 도구 확인·준비, `npm ci`, 전체 테스트, production build, 설치기 생성·검증을 순서대로 수행하고 설치 창을 연다. 미커밋 변경도 빌드에 포함하며 Git checkout을 변경하지 않는다. Windows 기본 PowerShell 5.1을 사용한다.
+
+```powershell
+.\build-local.cmd
+.\build-local.cmd -NoInstall
+.\build-local.cmd -SilentInstall
+```
+
+기본 실행은 설치 창에서 승인하거나 취소할 수 있다. `-NoInstall`은 설치기를 만들고 종료하며 실행 중인 Dashboard를 종료하지 않는다. `-SilentInstall`을 명시한 경우에만 무인 설치한다. 두 옵션은 함께 지정할 수 없다. 설치기는 `dist\installer\RoboRev-Dashboard-Setup.exe`, 실행별 기록은 `dist\local-build` 아래에 생성된다. 실패한 실행은 이전 설치기를 대신 실행하지 않는다.
+
+Dashboard 앱은 관리자 권한이나 경로 선택 없이 `%LOCALAPPDATA%\Programs\RoboRev Dashboard`에 설치된다. 시작 메뉴에서 실행하면 기본 브라우저를 열며, 같은 설치본을 다시 실행하면 기존 서버를 재사용한다. 서버 콘솔의 `Ctrl+C` 또는 시작 메뉴의 종료 바로가기로 Dashboard를 종료할 수 있다. 브라우저 탭만 닫으면 서버는 계속 실행된다.
+
+같은 버전 재설치와 새 버전 업그레이드는 설치된 앱을 교체하고, 명백히 낮은 버전은 거부한다. Windows **설치된 앱**에서 제거할 수 있다. Dashboard 설정(`%APPDATA%\roborev-dashboard\config.json`), 등록 저장소, RoboRev와 agent 데이터는 보존한다. 앱 종료·업데이트·제거가 RoboRev daemon 중지나 review 취소를 의미하지 않는다.
+
+세 가지 설치는 목적이 다르다. `scripts/install.ps1`은 **개발 도구와 의존성 준비**, `RoboRev-Dashboard-Setup.exe`는 **Dashboard 앱 설치**, 앱의 **Agents & Setup → Install RoboRev**는 **RoboRev CLI 설치**다. 설치된 Dashboard에는 Go, Node.js, npm, Inno Setup이 필요 없으며 Git 등 기존 런타임 요구사항은 유지된다. 로컬 EXE와 설치기는 **unsigned 개발 빌드**다. 보안 정책을 변경하거나 서명된 공식 릴리스로 표시하지 않는다. 자세한 검증 범위와 복구 방법은 [Windows 로컬 설치 안내](docs/WINDOWS-INSTALLER.md)를 참고한다.
+
+### 기존 개발 실행
+
 소스에서 Dashboard를 빌드하려면 Windows 개발 도구가 필요하다.
 
 - Git
