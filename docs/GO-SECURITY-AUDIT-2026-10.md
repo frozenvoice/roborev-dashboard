@@ -128,9 +128,19 @@ actual Setup installation/uninstallation remains unverified because
 successfully prepared at
 `dist/installer-sandbox/0ebe595b03c544e485f1bd0011e47558/installer-test.wsb`
 but were not launched. Formal clean-source `scripts/package.ps1`
-reproducibility and packaged `release-e2e.ps1` checks are still pending after
-the code commit. No operational release, account billing change or existing
-user installation/configuration overwrite was performed. A local pass
+reproducibility and packaged `release-e2e.ps1` checks also passed on clean
+implementation commit `8157821a2061980d9d81d761ad0387c07a99dfdc`:
+
+- `scripts/package.ps1 -Version 0.0.0-securitycheck.1 -OutputDirectory dist/security-20261005-2f0c39b9/release -VerifyReproducible`: two matching frontend/EXE builds and verified manifest/SHA. The release-check binary records actual Go 1.26.8, x/sys v0.44.0, Windows amd64 and `CGO_ENABLED=0`.
+- `scripts/release-e2e.ps1 -ArtifactPath <isolated release-check EXE> -Version 0.0.0-securitycheck.1`: PASS in 24.053 seconds with temporary profiles and fake RoboRev.
+
+The Codex internal reviewer found no material findings. No production runtime
+code changed and no RoboRev review jobs were created. Remaining checks are
+actual Setup installation/uninstallation in an available disposable Sandbox,
+owner resolution of the account payment/spending-limit condition, and
+successful remote CI on the patched candidate. No operational release,
+account billing change or existing user installation/configuration overwrite
+was performed. A local pass
 cannot replace successful remote CI on the candidate commit, and
 account/provisioning failures cannot be fixed by relaxing tests.
 
