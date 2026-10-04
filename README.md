@@ -30,7 +30,7 @@ Dashboard 앱은 관리자 권한이나 경로 선택 없이 `%LOCALAPPDATA%\Pro
 
 - Git
 - Node.js 22 이상과 npm
-- Go 1.24 이상
+- Go 1.26.8 이상 (`go.mod`의 패치 버전 요구사항)
 
 새 checkout에서는 다음 순서로 검사·설치 계획을 확인하고 개발 의존성을 준비한다.
 
@@ -44,6 +44,8 @@ Set-Location roborev-dashboard
 ```
 
 `scripts/install.ps1`은 소스 개발용 toolchain bootstrap이다. 정의된 Git/Node.js LTS/Go 패키지만 Windows Package Manager로 설치하거나 업그레이드하고, 현재 PowerShell 프로세스의 PATH만 새로 합친다. 이후 `web` 의존성을 `npm ci`로 설치한다. 이 과정은 RoboRev를 검사하거나 설치하거나 실행하지 않는다. winget이 필요 없는 상태라면 winget을 요구하지 않는다.
+
+Go의 최소 버전은 `go.mod`를 기준으로 개발·CI·패키징에서 공유한다. 기본 `GOTOOLCHAIN=auto`에서는 PATH의 Go launcher가 오래되어도 저장소의 요구사항에 맞는 도구체인을 다운로드하고 선택할 수 있다. prerequisite 검사는 호출 위치와 관계없이 이 checkout에서 선택되는 실제 컴파일러를 확인한다. `GOTOOLCHAIN=local`이거나 다운로드를 할 수 없으면 요구 버전의 Go를 별도로 준비해야 하며, 낮은 버전으로 테스트나 빌드를 진행하지 않는다. `go version`과 `go env GOVERSION GOTOOLCHAIN GOOS GOARCH`를 저장소 루트에서 실행하면 실제 선택을 확인할 수 있다. CI는 `go-version-file: go.mod`를 사용하며 Windows amd64 대상으로 고정된 `govulncheck` v1.8.0 검사를 실행한다.
 
 자동 테스트는 실제 RoboRev나 LLM을 호출하지 않는다.
 

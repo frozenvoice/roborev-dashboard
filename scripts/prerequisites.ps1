@@ -2,6 +2,8 @@
 # This file intentionally performs no work when dot-sourced. It never looks up,
 # installs, or executes RoboRev.
 
+$script:DevelopmentRepositoryRoot = Join-Path $PSScriptRoot '..'
+
 $script:DevelopmentToolDefinitions = @(
     [pscustomobject]@{
         Name = 'Git'
@@ -31,7 +33,8 @@ $script:DevelopmentToolDefinitions = @(
         Name = 'Go'
         CommandName = 'go'
         VersionArguments = @('version')
-        MinimumVersion = [version]'1.24.0'
+        # Filled from go.mod when definitions are requested, never on dot-source.
+        MinimumVersion = $null
         WingetId = 'GoLang.Go'
         VersionPattern = '(?m)\bgo([0-9]+(?:\.[0-9]+){1,3})\b'
     }
@@ -39,9 +42,18 @@ $script:DevelopmentToolDefinitions = @(
 
 function Get-DevelopmentToolDefinitions {
     [CmdletBinding()]
-    param()
+    param([string]$RootPath = $script:DevelopmentRepositoryRoot)
 
-    return @($script:DevelopmentToolDefinitions | ForEach-Object { $_.PSObject.Copy() })
+    $modulePath = Join-Path $RootPath 'go.mod'
+    $module = Get-Content -LiteralPath $modulePath -Raw -ErrorAction Stop
+    $goVersion = [regex]::Match($module, '(?m)^go[ \t]+([0-9]+\.[0-9]+(?:\.[0-9]+)?)[ \t]*(?://[^\r\n]*)?\r?$')
+    if (-not $goVersion.Success) { throw "Missing or invalid Go version directive: $modulePath" }
+    $minimumGoVersion = [version]$goVersion.Groups[1].Value
+    return @($script:DevelopmentToolDefinitions | ForEach-Object {
+        $copy = $_.PSObject.Copy()
+        if ($copy.Name -eq 'Go') { $copy.MinimumVersion = $minimumGoVersion }
+        $copy
+    })
 }
 
 function ConvertTo-DevelopmentVersion {
@@ -84,7 +96,8 @@ function Get-DevelopmentInventory {
     [CmdletBinding()]
     param(
         [scriptblock]$CommandResolver,
-        [scriptblock]$VersionInvoker
+        [scriptblock]$VersionInvoker,
+        [string]$RootPath = $script:DevelopmentRepositoryRoot
     )
 
     if (-not $CommandResolver) {
@@ -110,7 +123,8 @@ function Get-DevelopmentInventory {
     }
 
     $items = @()
-    foreach ($definition in $script:DevelopmentToolDefinitions) {
+    $root = (Resolve-Path -LiteralPath $RootPath -ErrorAction Stop).Path
+    foreach ($definition in Get-DevelopmentToolDefinitions -RootPath $root) {
         $command = & $CommandResolver $definition
         $path = $null
         if ($command) {
@@ -126,7 +140,11 @@ function Get-DevelopmentInventory {
             $errorMessage = "$($definition.Name) was not found on PATH."
         } else {
             try {
-                $invocation = & $VersionInvoker $path @($definition.VersionArguments)
+                $versionArguments = @($definition.VersionArguments)
+                # Go's launcher may select a patched compiler from go.mod. Resolve
+                # it in this checkout even when the caller runs from another cwd.
+                if ($definition.Name -eq 'Go') { $versionArguments = @('-C', $root) + $versionArguments }
+                $invocation = & $VersionInvoker $path $versionArguments
                 $output = [string]$invocation.Output
                 $exitCode = [int]$invocation.ExitCode
                 if ($exitCode -ne 0) {
@@ -195,7 +213,7 @@ function Get-DevelopmentWingetCommandSpec {
         [string]$WingetId
     )
 
-    $allowedIds = @(Get-DevelopmentToolDefinitions | Select-Object -ExpandProperty WingetId -Unique)
+    $allowedIds = @($script:DevelopmentToolDefinitions | Select-Object -ExpandProperty WingetId -Unique)
     if ($allowedIds -notcontains $WingetId) {
         throw "Refusing non-allowlisted winget package ID: $WingetId"
     }
@@ -319,18 +337,18 @@ function Assert-DevelopmentPrerequisites {
     } catch {
         throw "Development checkout root does not exist: $RootPath"
     }
-    if ($null -eq $Inventory) { $Inventory = @(Get-DevelopmentInventory) }
+    if ($null -eq $Inventory) { $Inventory = @(Get-DevelopmentInventory -RootPath $root) }
     $issues = New-Object System.Collections.Generic.List[string]
     $byName = @{}
     foreach ($item in @($Inventory)) { $byName[$item.Name] = $item }
-    foreach ($definition in Get-DevelopmentToolDefinitions) {
+    foreach ($definition in Get-DevelopmentToolDefinitions -RootPath $root) {
         if (-not $byName.ContainsKey($definition.Name)) {
             [void]$issues.Add("$($definition.Name) inventory record is missing.")
             continue
         }
         $item = $byName[$definition.Name]
-        if (-not $item.MeetsMinimum) {
-            $detail = if ($item.Error) { $item.Error } else { "$($item.Name) is missing or invalid." }
+        if (-not $item.MeetsMinimum -or -not (Test-DevelopmentVersionMinimum -Version $item.Version -MinimumVersion $definition.MinimumVersion)) {
+            $detail = if ($item.Error) { $item.Error } elseif ($null -ne $item.Version) { "$($item.Name) $($item.Version) is below required $($definition.MinimumVersion)." } else { "$($item.Name) is missing or invalid." }
             [void]$issues.Add($detail)
         }
     }

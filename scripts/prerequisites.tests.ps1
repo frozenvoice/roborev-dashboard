@@ -12,7 +12,7 @@ function Assert-Equal {
 }
 
 Assert-Equal (ConvertTo-DevelopmentVersion -ToolName 'Node.js' -Output 'v22.14.0') ([version]'22.14.0') 'node version parsing'
-Assert-Equal (ConvertTo-DevelopmentVersion -ToolName 'Go' -Output 'go version go1.26.5 windows/amd64') ([version]'1.26.5') 'go version parsing'
+Assert-Equal (ConvertTo-DevelopmentVersion -ToolName 'Go' -Output 'go version go1.26.8 windows/amd64') ([version]'1.26.8') 'go version parsing'
 Assert-Equal (ConvertTo-DevelopmentVersion -ToolName 'Git' -Output 'git version 2.47.1.windows.1') ([version]'2.47.1') 'git version parsing'
 Assert-True ((Test-DevelopmentVersionMinimum -Version ([version]'22.0.0') -MinimumVersion ([version]'22.0.0')) -eq $true) 'minimum threshold equality'
 Assert-True ((Test-DevelopmentVersionMinimum -Version ([version]'21.9.9') -MinimumVersion ([version]'22.0.0')) -eq $false) 'minimum threshold rejection'
@@ -115,6 +115,33 @@ Assert-Equal $merged 'C:\Machine;C:\Shared;c:\user;C:\Current' 'path order and c
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("roborev-dashboard-prereq-" + $PID)
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot 'web\node_modules\.bin') | Out-Null
+    Set-Content -LiteralPath (Join-Path $tempRoot 'go.mod') -Value "module example.test/prerequisites`ngo 1.26.8" -Encoding UTF8
+    $fixtureDefinitions = @(Get-DevelopmentToolDefinitions -RootPath $tempRoot)
+    Assert-Equal (($fixtureDefinitions | Where-Object { $_.Name -eq 'Go' }).MinimumVersion) ([version]'1.26.8') 'Go requirement comes from checkout go.mod'
+    $versionCalls = New-Object System.Collections.Generic.List[object]
+    $fixtureInvoker = {
+        param($path, $arguments)
+        [void]$versionCalls.Add([pscustomobject]@{ Path = $path; Arguments = @($arguments) })
+        if ($path -like '*go.exe') { [pscustomobject]@{ Output = 'go version go1.26.5 windows/amd64'; ExitCode = 0 } }
+        elseif ($path -like '*node.exe') { [pscustomobject]@{ Output = 'v22.1.0'; ExitCode = 0 } }
+        elseif ($path -like '*npm.exe') { [pscustomobject]@{ Output = '10.2.0'; ExitCode = 0 } }
+        else { [pscustomobject]@{ Output = 'git version 2.47.1'; ExitCode = 0 } }
+    }.GetNewClosure()
+    Push-Location $scriptRoot
+    try {
+        $fixtureInventory = @(Get-DevelopmentInventory -RootPath $tempRoot -CommandResolver $allResolver -VersionInvoker $fixtureInvoker)
+    } finally { Pop-Location }
+    $fixtureGo = $fixtureInventory | Where-Object { $_.Name -eq 'Go' }
+    Assert-Equal $fixtureGo.Action 'Upgrade' 'unpatched effective Go compiler requires upgrade'
+    Assert-True ($fixtureGo.Error -like '*1.26.8*') 'upgrade reports module patch requirement'
+    $goCall = $versionCalls | Where-Object { $_.Path -like '*go.exe' }
+    Assert-Equal ([string]::Join('|', $goCall.Arguments)) "-C|$tempRoot|version" 'Go version resolves in checkout independently of caller location'
+
+    Set-Content -LiteralPath (Join-Path $tempRoot 'go.mod') -Value 'module example.test/prerequisites' -Encoding UTF8
+    $invalidModuleRejected = $false
+    try { Get-DevelopmentToolDefinitions -RootPath $tempRoot | Out-Null } catch { $invalidModuleRejected = $_.Exception.Message -like '*invalid Go version directive*' }
+    Assert-True $invalidModuleRejected 'missing module Go version fails closed'
+    Set-Content -LiteralPath (Join-Path $tempRoot 'go.mod') -Value "module example.test/prerequisites`ngo 1.26.8" -Encoding UTF8
     $ready = Test-FrontendShimReadiness -WebRoot (Join-Path $tempRoot 'web')
     Assert-True (-not $ready.Ready -and $ready.Missing.Count -eq 3) 'frontend missing shim detection'
     foreach ($shim in @('tsc', 'vite', 'vitest')) { New-Item -ItemType File -Force -Path (Join-Path $tempRoot "web\node_modules\.bin\$shim.cmd") | Out-Null }
@@ -123,20 +150,29 @@ try {
 
     $goodInventory = @($inventory | ForEach-Object {
         $copy = $_.PSObject.Copy()
-        if ($copy.Name -eq 'Go') { $copy.Path = 'C:\Tools\go.exe'; $copy.Version = [version]'1.26.0'; $copy.MeetsMinimum = $true; $copy.Error = '' }
+        if ($copy.Name -eq 'Go') { $copy.Path = 'C:\Tools\go.exe'; $copy.Version = [version]'1.26.8'; $copy.MeetsMinimum = $true; $copy.Error = '' }
         $copy
     })
     $resolved = Assert-DevelopmentPrerequisites -RootPath $tempRoot -Inventory $goodInventory
     Assert-Equal $resolved.NpmPath 'C:\Tools\npm.cmd' 'absolute npm path resolution'
     Assert-Equal $resolved.GoPath 'C:\Tools\go.exe' 'absolute go path resolution'
 
+    $staleInventory = @($goodInventory | ForEach-Object {
+        $copy = $_.PSObject.Copy()
+        if ($copy.Name -eq 'Go') { $copy.Version = [version]'1.26.5' }
+        $copy
+    })
+    $staleInventoryRejected = $false
+    try { Assert-DevelopmentPrerequisites -RootPath $tempRoot -Inventory $staleInventory | Out-Null } catch { $staleInventoryRejected = $_.Exception.Message -like '*Go 1.26.5 is below required 1.26.8*' }
+    Assert-True $staleInventoryRejected 'cached minimum flag cannot override current module requirement'
+
     $badInventory = @($goodInventory | ForEach-Object {
         $copy = $_.PSObject.Copy()
-        if ($copy.Name -eq 'Go') { $copy.MeetsMinimum = $false; $copy.Error = 'Go 1.24+ is required.' }
+        if ($copy.Name -eq 'Go') { $copy.MeetsMinimum = $false; $copy.Error = 'Go 1.26.8+ is required.' }
         $copy
     })
     $actionable = $false
-    try { Assert-DevelopmentPrerequisites -RootPath $tempRoot -Inventory $badInventory | Out-Null } catch { $actionable = $_.Exception.Message -like '*Go 1.24+ is required*' -and $_.Exception.Message -like '*scripts\install.ps1*' }
+    try { Assert-DevelopmentPrerequisites -RootPath $tempRoot -Inventory $badInventory | Out-Null } catch { $actionable = $_.Exception.Message -like '*Go 1.26.8+ is required*' -and $_.Exception.Message -like '*scripts\install.ps1*' }
     Assert-True $actionable 'actionable aggregate prerequisite error'
 } finally {
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

@@ -71,6 +71,31 @@ jobs:
         with:
           node-version: 22.x
 
+      - name: Record effective Go compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location $env:SAFE_CHECKOUT
+          try {
+            go version
+            if ($LASTEXITCODE -ne 0) { throw 'Go compiler version query failed.' }
+            go env GOVERSION GOTOOLCHAIN GOOS GOARCH GOMOD
+            if ($LASTEXITCODE -ne 0) { throw 'Go compiler environment query failed.' }
+          } finally { Pop-Location }
+
+      - name: Check Windows Go vulnerabilities
+        shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location $env:SAFE_CHECKOUT
+          try {
+            go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -show verbose ./...
+            if ($LASTEXITCODE -ne 0) { throw "Windows govulncheck failed with exit code $LASTEXITCODE" }
+          } finally { Pop-Location }
+
       - name: Install frontend dependencies
         shell: pwsh
         run: |
