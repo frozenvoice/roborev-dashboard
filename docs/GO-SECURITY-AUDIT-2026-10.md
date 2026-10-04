@@ -135,10 +135,10 @@ implementation commit `8157821a2061980d9d81d761ad0387c07a99dfdc`:
 - `scripts/release-e2e.ps1 -ArtifactPath <isolated release-check EXE> -Version 0.0.0-securitycheck.1`: PASS in 24.053 seconds with temporary profiles and fake RoboRev.
 
 The Codex internal reviewer found no material findings. No production runtime
-code changed and no RoboRev review jobs were created. Remaining checks are
-actual Setup installation/uninstallation in an available disposable Sandbox,
-owner resolution of the account payment/spending-limit condition, and
-successful remote CI on the patched candidate. No operational release,
+code changed and no RoboRev review jobs were created. Patched-candidate
+remote CI also passed as recorded below. The remaining verification is
+actual Setup installation/uninstallation in an available disposable Sandbox.
+No operational release,
 account billing change or existing user installation/configuration overwrite
 was performed. A local pass
 cannot replace successful remote CI on the candidate commit, and
@@ -146,9 +146,34 @@ account/provisioning failures cannot be fixed by relaxing tests.
 
 ## Remote CI evidence
 
-Read-only GitHub connector queries on 2026-10-05 independently confirmed
+### Patched candidate success
+
+[Windows CI 37224907845](https://github.com/frozenvoice/roborev-dashboard/actions/runs/37224907845)
+passed all 19 steps on exact `main` commit
+`d54863dac437f1d6d60a57f533cf0aac93487588`, completing at
+`2026-10-04T18:43:37Z` (2026-10-05 03:43:37 KST). Retained logs record
+`go version go1.26.8 windows/amd64` at `18:34:08.257Z`, with `GOOS=windows`,
+`GOARCH=amd64` and `GOVERSION=go1.26.8`. The pinned
+`govulncheck@v1.8.0 -show verbose ./...` step reported
+`No vulnerabilities found.` at `18:35:18.349Z`.
+
+Tests, vet, development build, contract checks, reproducible packaging,
+packaged release smoke and artifact upload all passed. This is durable
+evidence for the named candidate commit, not a prediction of later CI runs
+or a claim about a subsequent documentation-only commit.
+
+No account/billing settings were changed by this work. The historical
+September admission error below did not block this patched candidate run.
+Billing & plans follow-up is conditional on recurrence or the owner's wish
+to identify the older account condition; it is not a current CI blocker.
+Operational release publication was not performed.
+
+### Initial inspection and historical baselines
+
+Initial read-only GitHub connector queries on 2026-10-05 confirmed
 `main` at `ff5db8517ae18d730436e43498956a8c556f5e15`. The repository returned
-five main-branch workflow runs. Its latest run is still
+five main-branch workflow runs before the patched commits were pushed.
+The latest run at that initial inspection was
 [Windows CI 35519038770](https://github.com/frozenvoice/roborev-dashboard/actions/runs/35519038770),
 attempt 1, triggered by push on 2026-09-20 at 15:16:05 UTC
 (2026-09-21 00:16:05 KST), completed with failure at 15:16:09 UTC.
@@ -174,9 +199,10 @@ This confirms account payment/spending-limit admission failure; it does not
 distinguish failed recent payments from an insufficient spending limit.
 That distinction requires an authorized account check. The failed run
 provides no evidence of a code/test failure or an allocated runner failure.
-The owner must check Billing & plans and obtain successful CI on the patched
-candidate after resolving the account condition. No account settings or CI
-runs were changed during this investigation.
+No account settings were changed, and the later patched candidate CI passed.
+The original payment-versus-limit distinction remains unknown; it requires
+an authorized account check only if the owner wants to identify that
+historical condition or the admission error recurs.
 
 Initial CLI queries failed locally with `proxyconnect tcp: dial tcp
 127.0.0.1:9 ... actively refused it`, then `net/http: TLS handshake timeout`
@@ -186,14 +212,15 @@ job-log API returned `404 BlobNotFound`. These are investigation-access
 failures, not the workflow's original failure; the subsequent successful
 annotation retrieval supersedes the earlier unverified billing hypothesis.
 
-The latest successful main run is
+The successful historical main baseline available at initial inspection was
 [33220089303](https://github.com/frozenvoice/roborev-dashboard/actions/runs/33220089303)
 for `56f03027a05d52dfcb913539d5f0bedad11db9e2`, started 2026-08-28
 23:20:15 UTC and completed 23:29:50 UTC. Its recorded tests, vet, development
 build, reproducible package, packaged smoke and artifact upload all passed.
 The retained job log explicitly says `Setup go version spec 1.24.0` and
 `go version go1.24.0 windows/amd64`. This confirms the historical compiler;
-it is not evidence that the current patched candidate has passed remote CI.
+it does not establish the patched compiler result. The separately named
+patched candidate run above supplies that evidence.
 
 The workflow reads `SAFE_CHECKOUT\go.mod` through `go-version-file`; it does
 not pin Go 1.26.5. The [main branch metadata](https://api.github.com/repos/frozenvoice/roborev-dashboard/branches/main)
