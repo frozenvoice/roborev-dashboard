@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [switch]$SerialGoPackages
+)
+
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction Stop).Path
 . (Join-Path $PSScriptRoot 'prerequisites.ps1')
@@ -8,6 +13,7 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction S
 & (Join-Path $PSScriptRoot 'package.tests.ps1')
 & (Join-Path $PSScriptRoot 'local-build.tests.ps1')
 & (Join-Path $PSScriptRoot 'installer.tests.ps1')
+& (Join-Path $PSScriptRoot 'verify-local.tests.ps1')
 $tooling = Assert-DevelopmentPrerequisites -RootPath $root
 
 Push-Location $root
@@ -16,7 +22,10 @@ try {
     # production assets before running them.  Keep one actual build here;
     # release reproducibility is covered by package.ps1.
     Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'run', 'build')
-    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList @('test', './...')
+    $goTestArguments = @('test', '-count=1')
+    if ($SerialGoPackages) { $goTestArguments += '-p=1' }
+    $goTestArguments += './...'
+    Invoke-NativeCommand -FilePath $tooling.GoPath -ArgumentList $goTestArguments
     Invoke-NativeCommand -FilePath $tooling.NpmPath -ArgumentList @('--prefix', 'web', 'test', '--', '--run')
 } finally {
     Pop-Location

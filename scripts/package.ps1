@@ -15,6 +15,7 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction S
 . (Join-Path $PSScriptRoot 'prerequisites.ps1')
 . (Join-Path $PSScriptRoot 'native-command.ps1')
 . (Join-Path $PSScriptRoot 'release-common.ps1')
+. (Join-Path $PSScriptRoot 'artifact-contract.ps1')
 
 [void](Assert-StrictSemVer -Value $Version)
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitOperatingSystem) {
@@ -25,58 +26,6 @@ $tooling = Assert-DevelopmentPrerequisites -RootPath $root
 $commit = $null
 $stage = $null
 $final = $null
-
-function Invoke-ReleaseExeVersionJson {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Executable
-    )
-
-    $start = New-Object System.Diagnostics.ProcessStartInfo
-    $start.FileName = (Get-FullPathSafe -Path $Executable)
-    $start.Arguments = '--version-json'
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $start
-    try {
-        if (-not $process.Start()) { throw 'Could not start release executable.' }
-        if (-not $process.WaitForExit(15000)) {
-            try { $process.Kill() } catch { }
-            throw 'Release executable --version-json timed out.'
-        }
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        if ($process.ExitCode -ne 0) {
-            throw "Release executable --version-json failed with exit code $($process.ExitCode): $stderr"
-        }
-        try { return ($stdout | ConvertFrom-Json -ErrorAction Stop) } catch { throw 'Release executable returned invalid version JSON.' }
-    } finally {
-        $process.Dispose()
-    }
-}
-
-function Assert-ReleaseVersionJson {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)][object]$Metadata,
-        [Parameter(Mandatory = $true)][string]$Version,
-        [Parameter(Mandatory = $true)][string]$Commit
-    )
-
-    [void](Assert-ExactPropertySet -Value $Metadata -Expected @('name', 'version', 'commit', 'release', 'target', 'roborevCompatibility'))
-    if ($Metadata.name -ne 'roborev-dashboard' -or
-        $Metadata.version -ne $Version -or
-        $Metadata.commit -ne $Commit -or
-        $Metadata.release -ne $true -or
-        $Metadata.target -ne 'windows/amd64' -or
-        $Metadata.roborevCompatibility -ne 'v0.64.0') {
-        throw 'Release executable provenance does not match the requested package.'
-    }
-}
 
 Push-Location $root
 try {
@@ -142,8 +91,7 @@ try {
         if ($null -eq $oldCGO) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue } else { $env:CGO_ENABLED = $oldCGO }
     }
 
-    $metadata = Invoke-ReleaseExeVersionJson -Executable $exeA
-    Assert-ReleaseVersionJson -Metadata $metadata -Version $Version -Commit $commit
+    Invoke-ArtifactCommandContract -GoPath $tooling.GoPath -ArtifactPath $exeA -ExpectedVersion $Version -ExpectedCommit $commit -ExpectedRelease:$true
     $sha256 = Get-FileSha256Lower -Path $exeA
     $size = [int64](Get-Item -LiteralPath $exeA -Force).Length
     $manifest = New-ReleaseManifest -Version $Version -Commit $commit -Size $size -Sha256 $sha256

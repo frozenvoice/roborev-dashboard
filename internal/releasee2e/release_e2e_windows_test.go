@@ -24,8 +24,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/froze/roborev-dashboard/internal/buildinfo"
 )
 
 const (
@@ -239,26 +237,6 @@ type runningProcess struct {
 	stopErr  error
 }
 
-type boundedProcessOutput struct {
-	bytes.Buffer
-	limit    int
-	exceeded bool
-}
-
-func (b *boundedProcessOutput) Write(data []byte) (int, error) {
-	remaining := b.limit - b.Len()
-	if remaining <= 0 {
-		b.exceeded = true
-		return len(data), nil
-	}
-	if len(data) > remaining {
-		_, _ = b.Buffer.Write(data[:remaining])
-		b.exceeded = true
-		return len(data), nil
-	}
-	return b.Buffer.Write(data)
-}
-
 func startProcess(t *testing.T, executable string, args []string, env []string, prefix string) *runningProcess {
 	return startProcessInDir(t, executable, args, env, "", prefix)
 }
@@ -397,35 +375,34 @@ func daemonAddress(process *runningProcess) string {
 
 func assertToolchainFreeCopy(t *testing.T, artifact string, env []string) {
 	t.Helper()
-	for _, args := range [][]string{{"--help"}, {"--version"}, {"--version-json"}} {
-		ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
-		cmd := exec.CommandContext(ctx, artifact, args...)
-		cmd.Env = env
-		var stdout, stderr boundedProcessOutput
-		stdout.limit, stderr.limit = 128<<10, 128<<10
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		cancel()
-		if err != nil {
-			t.Fatalf("copied artifact %v failed: %v\n%s", args, err, stderr.String())
-		}
-		if stdout.exceeded || stderr.exceeded {
-			t.Fatalf("copied artifact %v exceeded bounded output", args)
-		}
-		if args[0] == "--version-json" {
-			var value struct {
-				Name                 string `json:"name"`
-				Version              string `json:"version"`
-				Commit               string `json:"commit"`
-				Release              bool   `json:"release"`
-				Target               string `json:"target"`
-				RoboRevCompatibility string `json:"roborevCompatibility"`
-			}
-			expectedVersion := strings.TrimSpace(os.Getenv("RELEASE_E2E_EXPECTED_VERSION"))
-			if err := json.Unmarshal(stdout.Bytes(), &value); err != nil || value.Name != "roborev-dashboard" || !value.Release || value.Version == "dev" || !buildinfo.IsStrictSemVer(value.Version) || expectedVersion != "" && value.Version != expectedVersion || len(value.Commit) != 40 || !isLowerHexCommit(value.Commit) || value.Target != "windows/amd64" || value.RoboRevCompatibility != "v0.64.0" {
-				t.Fatalf("copied artifact version JSON invalid or not a release: %s", stdout.Bytes())
-			}
+	assertArtifactCommandContract(t, artifact, filepath.Dir(artifact), env, artifactMetadataExpectation{
+		Version: strings.TrimSpace(os.Getenv("RELEASE_E2E_EXPECTED_VERSION")),
+		Release: true,
+	})
+}
+
+func assertDashboardHelp(t *testing.T, artifact, output string) {
+	t.Helper()
+	header, body, ok := strings.Cut(output, "\n")
+	if !ok || !strings.HasPrefix(header, "Usage of ") || !strings.HasSuffix(header, ":") {
+		t.Fatalf("copied artifact --help has invalid usage header: %q", output)
+	}
+	invokedPath := strings.TrimSuffix(strings.TrimPrefix(header, "Usage of "), ":")
+	if !samePath(invokedPath, artifact) {
+		t.Fatalf("copied artifact --help usage path = %q, want %q", invokedPath, artifact)
+	}
+
+	// Keep the public contract in lockstep with the key flags declared in
+	// cmd/dashboard/main.go without snapshotting every human-facing flag
+	// description and its standard-library formatting.
+	for _, required := range []string{
+		"  -bind string\n    \tloopback bind address (default \"127.0.0.1\")",
+		"  -port int\n    \tstarting local port (default 7410)",
+		"  -version\n    \tprint Dashboard version",
+		"  -version-json\n    \tprint Dashboard version as JSON",
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("copied artifact --help missing required contract %q:\n%s", required, body)
 		}
 	}
 }

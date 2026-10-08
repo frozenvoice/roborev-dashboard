@@ -130,6 +130,14 @@ read-only contract 확인은 허용한다: `roborev version --json`, 각 command
 - 실제 RoboRev 호출은 dogfood/manual smoke test에서만 실행한다.
 - 주요 checkpoint마다 targeted/full test, production build, smoke test 순으로 검증하고, 비단순 변경은 Codex internal reviewer를 거친다.
 
+## 로컬 품질 검증 진입점
+
+- 개발 완료 전 Codex, Claude 및 다른 coding agent는 `scripts/verify-local.ps1`을 사용한다. 인자 없이 실행하면 `-Mode Full`이며 `Quick`, `Full`, `Release`를 지원한다. 자세한 범위와 결과 형식은 `docs/LOCAL-VERIFICATION.md`를 따른다.
+- `Quick`은 `go test -p 1 -count=1` 핵심 Go process/pathsafety/gitx/roborev 회귀, Vitest와 Windows 전용 검증기 self-test를 실행한다. `Full`은 `scripts/test.ps1 -SerialGoPackages`를 한 번 재사용하고, Windows 전용 PowerShell self-test/전체 repository test aggregate와 portable `go vet ./...`, frontend build를 중복하지 않는 개발 EXE build를 별도 행으로 확인한다. 개발 EXE와 package EXE의 세 flag 계약은 각각 별도 행이며 Windows `internal/releasee2e` harness에 위임한다. `-SerialGoPackages`/`-p 1`은 package 간 compile/test 프로그램만 순차화하며 테스트 내부 goroutine·child/grandchild concurrency와 timeout assertion을 바꾸거나 retry하지 않는다. standalone `scripts/test.ps1`와 CI의 기본 scheduling은 유지한다. `Release`는 clean/non-reparse checkout, Windows amd64 `govulncheck` v1.8.0, 재현 가능한 `package.ps1`와 `release-e2e.ps1`를 추가한다.
+- 각 행은 `PASS`/`FAIL`/`BLOCKED`로 보고한다. Windows 전용 검사는 비Windows 환경에서 PASS로 바꾸지 않으며, missing prerequisite와 dirty release checkout은 BLOCKED로 남긴다. govulncheck compilation·module·feed·network 등 실행 오류는 FAIL로 표면화하고, 취약점 결과나 오류를 억제해 PASS로 만들지 않는다. `LOCAL_VERIFY_*` artifact 환경 상태를 포함한 process 환경은 clear/restore하며 전체 secret/environment를 로그에 남기지 않는다. 실제 RoboRev 데이터·인증정보도 사용하지 않는다.
+- 검증기는 기존 스크립트와 release-common의 경로/reparse 안전성을 재사용하고, 고정된 새 `.tmp/verify-local`만 소유한다. 이미 존재하는 경로는 재사용·삭제하지 않으며 `TEMP`/`TMP`를 복원하고 새로 소유한 임시 경로만 정리한다. 기존 루트 `dist` 산출물과 무관한 사용자 작업물을 보존하고 clone/install을 수행하지 않는다.
+- 완료 순서는 `targeted tests → verify-local Full → Codex internal reviewer → valid finding 수정 → commit → push → clean working tree`다. Release 민감한 변경은 clean commit 뒤 Release를 별도로 실행한다.
+
 ## RoboRev 통합 원칙
 
 - 현재 설치된 `roborev version --json`과 각 command help를 런타임 계약의 우선 기준으로 삼는다.

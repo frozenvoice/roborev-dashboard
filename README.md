@@ -49,6 +49,18 @@ Go의 최소 버전은 `go.mod`를 기준으로 개발·CI·패키징에서 공�
 
 자동 테스트는 실제 RoboRev나 LLM을 호출하지 않는다.
 
+## 로컬 품질 검증
+
+개발 완료 전에는 기존 개별 스크립트를 따로 조합하지 말고 통합 진입점을 사용한다. 기본 모드는 Full이며, Release는 Windows amd64에서 Windows 11 Tier 1 기준의 패키징과 fake CLI/daemon smoke까지 확인한다. 다른 OS에서는 Windows 전용 결과를 BLOCKED로 보고한다.
+
+```powershell
+.\scripts\verify-local.ps1                 # Full
+.\scripts\verify-local.ps1 -Mode Quick    # 빠른 보안·핵심 회귀
+.\scripts\verify-local.ps1 -Mode Release  # 재현 패키지·실행 계약·release E2E
+```
+
+`-Version` 기본값은 `0.0.0-localverify.1`이다. 결과는 각 검사별 `PASS`/`FAIL`/`BLOCKED`로 출력되며 종료 코드는 각각 성공 `0`, 실행 실패 `1`, 실행 불가 `2`다. Windows 전용 검사는 다른 OS에서 PASS로 표시되지 않는다. 임시 산출물, 재현성 경계, 데이터 보존과 모드별 범위는 [로컬 품질 검증 안내](docs/LOCAL-VERIFICATION.md)에 정리되어 있다.
+
 ## 언어 전환
 
 Dashboard UI는 한국어와 English를 지원한다. 사이드바 하단의 native language selector에서 언어를 바꿀 수 있으며, 선택은 `roborev-dashboard-language`에 안전하게 저장되고 다음 실행에서 복원된다. 저장소, panel, review, modal, setup 진행 상태와 입력 내용은 언어 전환으로 재설정되지 않고 네트워크 요청이나 mutation도 발생하지 않는다. 열린 Install, daemon, agent check, Fix Prompt 화면에서도 헤더의 compact selector로 즉시 전환할 수 있다.

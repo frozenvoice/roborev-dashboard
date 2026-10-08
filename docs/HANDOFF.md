@@ -1,6 +1,16 @@
 # Handoff
 
-마지막 갱신: 2026-10-05
+마지막 갱신: 2026-10-08
+
+## Local verification entrypoint (implementation handoff)
+
+- `scripts/verify-local.ps1`은 `Quick`, `Full`, `Release` 모드와 기본 `Full`, 기본 버전 `0.0.0-localverify.1`을 제공한다. 기존 `test.ps1`, `build.ps1`, `package.ps1`, `release-e2e.ps1`를 orchestration 경계로 재사용한다.
+- Quick은 `go test -p 1 -count=1` 핵심 process/pathsafety/gitx/roborev 회귀, Vitest와 Windows 전용 검증기 self-test를 실행한다. Full은 `test.ps1 -SerialGoPackages` 한 번, Windows 전용 PowerShell/전체 repository aggregate와 portable `go vet ./...`, frontend build를 건너뛴 개발 EXE build를 별도 행으로 확인한다. 개발/package EXE 세 flag 계약은 각각 별도 결과 행이며 Windows `internal/releasee2e` artifact harness에 위임한다. 이 switch는 package-level compile/test scheduling만 순차화하고 테스트 내부 concurrency와 timeout assertion은 유지하며 retry를 추가하지 않는다. standalone/CI의 기본 `test.ps1` scheduling은 유지한다.
+- Release는 Full 기준에 clean/safe current checkout, non-reparse 경로, Windows amd64 `govulncheck@v1.8.0`, reproducible package와 fake CLI/daemon/temp-profile `release-e2e`를 추가한다. dirty checkout과 비Windows Windows-only 검사는 BLOCKED로 보고한다.
+- 검증기 임시 경계는 기존 `.tmp/verify-local`가 있으면 fail closed하고, 새로 소유한 경로만 cleanup한다. `TEMP`/`TMP`, `dist`, unrelated user work와 RoboRev DB/config/credentials는 보존한다. CI `workflow_dispatch`와 외부 RoboRev review/no-loop 정책은 변경하지 않는다.
+- Windows 11 amd64 / Windows PowerShell 5.1의 최종 `verify-local -Mode Full`은 PASS(exit 0)했다. PowerShell self-test, fresh 전체 Go 테스트, frontend production build, Vitest 31 files / 594 tests, `go vet`, 격리 개발 EXE build와 copied EXE의 실제 `--help`/`--version`/`--version-json` 실행을 포함한다. Codex internal reviewer도 material finding 없이 승인했다.
+- 최초 cold 실행의 process deadline 실패는 로컬 package scheduling을 `-p=1`로 제한해 해결했다. 기존 테스트 내부 concurrency/deadline과 standalone/CI scheduling은 유지한다. 추가 self-test의 nested TEMP mock 충돌은 정확한 소유 fixture 경로로 제한해 수정했다. 실패를 retry나 timeout 완화로 숨기지 않는다.
+- Windows `govulncheck@v1.8.0`은 PASS(취약점 0개)했다. dirty source 상태의 Release 패키징은 BLOCKED로 표시됐으며, clean 구현 commit 뒤 재현 패키징·package EXE 실제 실행·release E2E 추가 단계를 검증한다. 완료한 Full suite는 그 단계에서 중복 실행하지 않는다.
 
 ## Go security checkpoint (2026-10-05)
 
