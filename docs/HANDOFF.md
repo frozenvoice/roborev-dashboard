@@ -10,7 +10,9 @@
 - 검증기 임시 경계는 기존 `.tmp/verify-local`가 있으면 fail closed하고, 새로 소유한 경로만 cleanup한다. `TEMP`/`TMP`, `dist`, unrelated user work와 RoboRev DB/config/credentials는 보존한다. CI `workflow_dispatch`와 외부 RoboRev review/no-loop 정책은 변경하지 않는다.
 - Windows 11 amd64 / Windows PowerShell 5.1의 최종 `verify-local -Mode Full`은 PASS(exit 0)했다. PowerShell self-test, fresh 전체 Go 테스트, frontend production build, Vitest 31 files / 594 tests, `go vet`, 격리 개발 EXE build와 copied EXE의 실제 `--help`/`--version`/`--version-json` 실행을 포함한다. Codex internal reviewer도 material finding 없이 승인했다.
 - 최초 cold 실행의 process deadline 실패는 로컬 package scheduling을 `-p=1`로 제한해 해결했다. 기존 테스트 내부 concurrency/deadline과 standalone/CI scheduling은 유지한다. 추가 self-test의 nested TEMP mock 충돌은 정확한 소유 fixture 경로로 제한해 수정했다. 실패를 retry나 timeout 완화로 숨기지 않는다.
-- Windows `govulncheck@v1.8.0`은 PASS(취약점 0개)했다. dirty source 상태의 Release 패키징은 BLOCKED로 표시됐으며, clean 구현 commit 뒤 재현 패키징·package EXE 실제 실행·release E2E 추가 단계를 검증한다. 완료한 Full suite는 그 단계에서 중복 실행하지 않는다.
+- clean 구현 commit의 Release 추가 단계도 Windows PowerShell 5.1에서 모두 PASS(exit 0)했다. Windows `govulncheck@v1.8.0`(실제 Go 1.26.8, 취약점 0개), safe/non-reparse checkout/HEAD, `0.0.0-localverify.1`의 2회 EXE/frontend 재현 빌드와 manifest/SHA-256 검증, copied package EXE의 실제 세 flag 실행, fake RoboRev CLI/daemon·임시 profile의 `release-e2e.ps1` smoke(28.891초)를 포함한다. 완료한 Full suite는 중복 실행하지 않고 동일 Release plan의 추가 stage executor를 재사용했다. 최종 필수 검사에 FAIL/BLOCKED는 없다.
+- 이번 local verification receipt의 clean source HEAD는 `e2bd574bcf9d4b2ffde38040e34a829a49d99918`이다. 검증한 EXE는 `11123200` bytes, SHA-256 `e071fe645011ec733b151726b095c4b095ccc187a92a0f86a624c1b2eafbd325`다. 이 근거는 해당 구현 commit을 검증하며 후속 receipt 문서 전용 commit의 binary proof를 뜻하지 않는다.
+- 앞선 dirty checkout과 이미 존재하는 검증 fixture는 올바르게 BLOCKED 처리됐으며 소유권 확인 후 생성 주체의 fixture만 정리했다. 최종 `.tmp/verify-local` cleanup도 PASS했다. 기존 `dist/roborev-dashboard.exe`, `.tmp/gocache`, `worker-config.patch`와 사용자 작업물은 보존했다. 실제 RoboRev review/LLM/DB/인증정보 사용, 설치, tag/GitHub Release 게시, CI dispatch는 수행하지 않았다.
 
 ## Go security checkpoint (2026-10-05)
 
