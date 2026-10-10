@@ -250,7 +250,7 @@ function Invoke-VerifyStageAction {
             return
         }
         'SelfTests' {
-            foreach ($name in @('prerequisites.tests.ps1', 'package.tests.ps1', 'local-build.tests.ps1', 'installer.tests.ps1', 'verify-local.tests.ps1')) {
+            foreach ($name in @('prerequisites.tests.ps1', 'package.tests.ps1', 'local-build.tests.ps1', 'installer.tests.ps1', 'prepare-distributions.tests.ps1', 'verify-local.tests.ps1')) {
                 & (Join-Path $script:VerifyScriptRoot $name) | Out-Host
             }
             return

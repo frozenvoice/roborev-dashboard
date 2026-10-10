@@ -10,9 +10,11 @@ RoboRev Dashboard는 기존 [`roborev`](https://github.com/kenn-io/roborev) CLI/
 
 다음 릴리스 후보부터 같은 커밋과 버전으로 **`RoboRev-Dashboard-Setup.exe` (설치형)** 및 **`RoboRev-Dashboard-<버전>-win-x64-portable.zip` (포터블)**을 함께 만들 수 있습니다. GitHub Release 한 건에 두 파일을 첨부하며, 릴리스는 자동으로 게시하지 않습니다.
 
-Windows x64에서 깨끗한 소스 체크아웃을 준비하고 `pwsh -NoProfile -File scripts/prepare-distributions.ps1 -Version 0.1.0 -VerifyReproducible`을 실행합니다. 결과는 `dist/release/0.1.0/`에 두 배포물과 `SHA256SUMS.txt`로 생성됩니다. 기존 버전 폴더는 덮어쓰지 않습니다. 포터블은 ZIP을 푼 뒤 `roborev-dashboard.exe`를 실행하면 되며, Windows 설치·시작 메뉴 등록 없이 로컬 브라우저를 엽니다. 설치형과 포터블은 같은 설정·RoboRev 런타임을 볼 수 있으므로 동시에 실행하지 마세요.
+Windows x64에서 깨끗한 소스 체크아웃을 준비하고 `pwsh -NoProfile -File scripts/prepare-distributions.ps1 -Version 0.1.0 -VerifyReproducible`을 실행합니다. 결과는 `dist/release/0.1.0/`에 두 배포물과 `SHA256SUMS.txt`로 생성됩니다. 기존 버전 폴더는 덮어쓰지 않으며, 기존 후보를 보존하려면 `-OutputDirectory .\dist\distributions\0.1.0`처럼 별도 경로를 지정합니다. 포터블은 ZIP을 푼 뒤 `roborev-dashboard.exe`를 실행하면 Windows 설치·시작 메뉴 등록 없이 로컬 브라우저를 엽니다. Go·Node.js·npm은 실행에 필요하지 않습니다.
 
-두 배포물 모두 기존 RoboRev/ Git 런타임 요구사항과 Windows SmartScreen의 미서명 개발 빌드 경고가 유지됩니다. 공식 배포 전에는 [릴리스 검증 절차](docs/RELEASE.md)를 통과해야 합니다.
+설치형과 포터블은 기본적으로 같은 사용자 설정을 사용합니다. 설정 손실을 막기 위해 같은 설정 파일을 사용하는 두 번째 서버는 시작 전에 거부합니다. 설치형의 같은 경로 재실행은 기존 서버를 활성화합니다. 별도 `--config-dir`를 지정한 포터블은 독립 실행할 수 있으며, 기본 포트가 사용 중이면 다음 사용 가능한 loopback 포트를 선택합니다. 콘솔의 Ctrl+C로 종료하며 브라우저 탭을 닫아도 서버나 RoboRev daemon은 종료되지 않습니다.
+
+두 배포물 모두 기존 RoboRev/Git 런타임 요구사항과 Windows SmartScreen의 미서명 바이너리 경고가 유지됩니다. RoboRev가 없으면 Setup 안내를 제공하며 명시적 승인 없이 설치하지 않습니다. 공식 배포 전에는 [릴리스 검증 절차](docs/RELEASE.md)를 통과해야 합니다.
 
 ### Windows에서 원클릭 빌드·설치
 

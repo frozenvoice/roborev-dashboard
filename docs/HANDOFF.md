@@ -1,6 +1,15 @@
 # Handoff
 
-마지막 갱신: 2026-10-08
+마지막 갱신: 2026-10-10
+
+## 설치형·포터블 통합 릴리스 checkpoint
+
+- PR #1의 구현을 독립적으로 검증하고 보완했다. `package.ps1`의 clean/reproducible 공식 EXE·manifest·SHA 3파일 계약은 그대로 유지한다. `prepare-distributions.ps1`은 그 EXE 하나로 정식 Setup과 deterministic portable ZIP을 만들고, 정확히 6파일을 source HEAD 재검증 뒤 원자적으로 반영한다. 실패/기존 후보는 승격하거나 덮어쓰지 않는다.
+- 정식 버전은 공식 EXE provenance에서 검증하며 설치기·ZIP과 일치한다. 기존 `build-local.cmd`의 PowerShell 5.1 개발용 `-local` 및 `version=dev, release=false` 계약은 유지한다. exact RoboRev v0.64.0 capability와 사용자 승인 설치 정책도 유지한다.
+- Windows 서버는 설정 파일의 쓰기 경로에 대한 사용자별 lifetime lease를 가져 installed/portable의 공유 설정 동시 writer를 차단한다. 같은 설치본 재실행은 기존 authenticated instance를 활성화하며, 별도 `--config-dir`의 서버는 포트 충돌을 피하여 공존한다. Dashboard 종료는 RoboRev daemon을 중지하지 않는다.
+- `distribution-e2e.ps1`은 원본 Setup payload readback, 설치된 공식 3파일 검증, actual Setup 설치/업데이트/재설치/다운그레이드 거부/제거와 portable 실행을 수행한다. 기존 production 설치가 있는 호스트에서는 고정 테스트 AppId와 같은 clean source ISS/공식 payload를 사용하고 그 검증 범위를 명시한다. production AppId·기본 경로·시작 메뉴·대화형 Windows 정책 검증을 통과한 것으로 대체하지 않는다.
+- Windows 11 Home x64 (10.0.26300), Go 1.26.8, Node 24.12.0의 `verify-local -Mode Full` PASS: 전체 Go, PowerShell 계약 회귀, frontend 31 files / 594 tests 및 production build, vet, 개발 EXE 및 세 flag 계약. 이후 runtime/E2E 경계 보완은 focused 검증과 내부 reviewer를 거친다. clean Release 및 실제 배포물 lifecycle/CI 결과는 후보별 외부 evidence로 남긴다.
+- 자동 RoboRev review/LLM/실제 daemon mutation, tag 및 GitHub Release 게시를 수행하지 않는다. 다음 게시 작업은 [RELEASE.md](RELEASE.md)의 명시적 release-owner 승인 정책에 따라 같은 후보의 Setup·ZIP을 하나의 Release에 함께 첨부한다.
 
 ## Local verification entrypoint (implementation handoff)
 

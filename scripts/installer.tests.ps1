@@ -27,8 +27,8 @@ Assert-InstallerTest ($spec.CompilerTreeSha256 -match '^[a-f0-9]{64}$') 'compile
 Assert-InstallerTest ($spec.CompilerTreeSha256 -ceq '90727b1f2a9315c9f779774884f0cee5b187173efa96dd48dabc415be537a4be') 'compiler payload tree digest matches ordinal reference evidence'
 
 Assert-InstallerTest ((ConvertTo-LocalInstallerVersion -BaseVersion '0.1.0') -ceq '0.1.0-local') 'local version label'
-$releaseManifest = New-LocalManifestText -Version '0.1.0' -Commit ('a' * 40) -Size 4 -Sha256 ('0' * 64) -IsLocal:$false | ConvertFrom-Json
-Assert-InstallerTest (($releaseManifest.version -ceq '0.1.0') -and ($releaseManifest.local -eq $false)) 'release installer manifest retains final version and non-local identity'
+$releaseManifest = New-ReleaseManifest -Version '0.1.0' -Commit ('a' * 40) -Size 4 -Sha256 ('0' * 64)
+Assert-InstallerTest (($releaseManifest.version -ceq '0.1.0') -and @($releaseManifest.PSObject.Properties).Count -eq 8) 'release installer uses unchanged official eight-field manifest'
 $developmentManifest = New-LocalManifestText -Version '0.1.0-local' -Commit 'unknown' -Size 4 -Sha256 ('0' * 64) | ConvertFrom-Json
 Assert-InstallerTest (($developmentManifest.version -ceq '0.1.0-local') -and ($developmentManifest.local -eq $true)) 'local installer manifest is still local'
 Assert-InstallerTest ((ConvertTo-LocalInstallerVersion -BaseVersion '1.2.3-beta.1+build.2') -ceq '1.2.3-beta.1-local+build.2') 'local label precedes build metadata'
