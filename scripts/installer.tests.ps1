@@ -79,6 +79,21 @@ Assert-InstallerTest (-not $iss.Contains('taskkill')) 'installer has no taskkill
 Assert-InstallerTest (-not $iss.Contains('CloseApplications=yes')) 'installer does not delegate shutdown to broad CloseApplications'
 Assert-InstallerTest (-not $iss.Contains('ewWaitUntilTerminated')) 'installer stop supervision is bounded'
 Assert-InstallerTest (-not $iss.Contains('roborev.exe')) 'installer does not ship or install RoboRev'
+$silentHelperStart = $iss.IndexOf('function CurrentOperationSilent', [StringComparison]::Ordinal)
+$gracefulStopStart = $iss.IndexOf('function TryGracefulStop', [StringComparison]::Ordinal)
+$gracefulStopEnd = $iss.IndexOf('function DestinationFilesAreSafe', [StringComparison]::Ordinal)
+Assert-InstallerTest (($silentHelperStart -ge 0) -and ($gracefulStopStart -gt $silentHelperStart) -and ($gracefulStopEnd -gt $gracefulStopStart)) 'mode-specific silence helper precedes graceful stop'
+$silentHelper = $iss.Substring($silentHelperStart, $gracefulStopStart - $silentHelperStart)
+Assert-InstallerTest ($silentHelper -match '(?s)if IsUninstaller then\s+Result := UninstallSilent\s+else\s+Result := WizardSilent;') 'uninstaller uses UninstallSilent and Setup uses WizardSilent in separate branches'
+$gracefulStop = $iss.Substring($gracefulStopStart, $gracefulStopEnd - $gracefulStopStart)
+Assert-InstallerTest (-not ($gracefulStop -match '\b(?:WizardSilent|UninstallSilent)\b')) 'shared stop path never calls a mode-restricted silence function directly'
+$removeBeforeText = -join @([char]0xC81C, [char]0xAC70, ' ', [char]0xC804, [char]0xC5D0)
+$installBeforeText = -join @([char]0xC124, [char]0xCE58, ' ', [char]0xC804, [char]0xC5D0)
+$confirmationPattern = '(?s)if not CurrentOperationSilent then begin\s+if IsUninstaller then\s+ConfirmationText := [^;]*' + [regex]::Escape($removeBeforeText) + '[^;]*\s+else\s+ConfirmationText := [^;]*' + [regex]::Escape($installBeforeText) + '[^;]*;\s+if MsgBox\(ConfirmationText, mbConfirmation, MB_YESNO\) <> IDYES then Exit;'
+Assert-InstallerTest ($gracefulStop -match $confirmationPattern) 'interactive stop confirmation is operation-specific and silent operations skip it'
+$stopPrompt = $gracefulStop.IndexOf('if not CurrentOperationSilent', [StringComparison]::Ordinal)
+$stopProcess = $gracefulStop.IndexOf('if not CreateProcessW', [StringComparison]::Ordinal)
+Assert-InstallerTest (($stopPrompt -ge 0) -and ($stopProcess -gt $stopPrompt)) 'operation confirmation remains before the exact executable stop request'
 $versionGate = $iss.IndexOf('if not Uninstalling then begin', [StringComparison]::Ordinal)
 $stopGate = $iss.IndexOf('if ExistingExecutableIsLocked(ExePath) then begin', [StringComparison]::Ordinal)
 Assert-InstallerTest (($versionGate -ge 0) -and ($stopGate -gt $versionGate)) 'version evidence is checked before graceful stop'
