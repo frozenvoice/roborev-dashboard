@@ -34,7 +34,9 @@ param(
     [string]$ResultPath,
 
     [Parameter()]
-    [switch]$KeepStaging
+    [switch]$KeepStaging,
+    # Retain the exact release version instead of appending the development -local label.
+    [switch]$ReleasePackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +46,7 @@ Set-StrictMode -Version Latest
 # entry point subject to the same ancestor/reparse checks as the release
 # package helper while remaining safe to dot-source from focused tests.
 . (Join-Path $PSScriptRoot 'release-common.ps1')
+. (Join-Path $PSScriptRoot 'distribution-common.ps1')
 
 $script:LocalInstallerArtifactName = 'RoboRev-Dashboard-Setup.exe'
 $script:LocalDashboardExecutableName = 'roborev-dashboard.exe'
@@ -166,7 +169,8 @@ function Invoke-LocalInstallerPackage {
         [Parameter()][string]$BuildCommit = 'unknown',
         [Parameter()][string]$InnoCache,
         [Parameter()][string]$ResultManifest,
-        [Parameter()][switch]$PreserveStaging
+        [Parameter()][switch]$PreserveStaging,
+        [Parameter()][switch]$ReleasePackage
     )
 
     $project = Assert-LocalDirectory -Path $ProjectRoot
@@ -177,19 +181,36 @@ function Invoke-LocalInstallerPackage {
     if (-not (Test-Path -LiteralPath $outDir -PathType Container)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
     $outDir = Assert-LocalDirectory -Path $outDir
 
-    $sourceVersion = Get-LocalVersionFromPackageJson -ProjectRoot $project
-    if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
-        $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $sourceVersion
-    } elseif (-not (Test-LocalSemVer -Value $PackageVersion)) {
-        throw "PackageVersion is not strict SemVer: $PackageVersion"
-    }
-    if ($PackageVersion -match '(^|-)local(\+|$)') {
-        $baseVersion = ConvertFrom-LocalInstallerVersion -LocalVersion $PackageVersion
-    } else {
+    if ($ReleasePackage) {
+        if ([string]::IsNullOrWhiteSpace($PackageVersion) -or -not (Test-LocalSemVer -Value $PackageVersion)) {
+            throw 'Release installer requires an explicit strict SemVer -PackageVersion.'
+        }
         $baseVersion = $PackageVersion
-        $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $baseVersion
+        $officialManifest = Assert-OfficialReleaseSource -Executable $exe -Version $PackageVersion -Commit $BuildCommit
+        . (Join-Path $PSScriptRoot 'prerequisites.ps1')
+        . (Join-Path $PSScriptRoot 'native-command.ps1')
+        $releaseTooling = Assert-DevelopmentPrerequisites -RootPath $project
+        Push-Location $project
+        try {
+            Invoke-ArtifactCommandContract -GoPath $releaseTooling.GoPath -ArtifactPath $exe -ExpectedVersion $PackageVersion -ExpectedCommit $BuildCommit -ExpectedRelease:$true
+        } finally { Pop-Location }
+    } else {
+        $sourceVersion = Get-LocalVersionFromPackageJson -ProjectRoot $project
+        if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
+            $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $sourceVersion
+        } elseif (-not (Test-LocalSemVer -Value $PackageVersion)) {
+            throw "PackageVersion is not strict SemVer: $PackageVersion"
+        }
+        if ($PackageVersion -match '(^|-)local(\+|$)') {
+            $baseVersion = ConvertFrom-LocalInstallerVersion -LocalVersion $PackageVersion
+        } else {
+            $baseVersion = $PackageVersion
+            $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $baseVersion
+        }
+        if ($baseVersion -cne $sourceVersion) {
+            throw "PackageVersion '$PackageVersion' does not match web/package.json basis version '$sourceVersion'."
+        }
     }
-    if ($baseVersion -cne $sourceVersion) { throw "PackageVersion '$PackageVersion' does not match web/package.json basis version '$sourceVersion'." }
     $versionInfo = ConvertTo-LocalVersionInfoVersion -BaseVersion $baseVersion
     [void](Assert-NoReparsePoint -Path $exe)
     $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -213,8 +234,15 @@ function Invoke-LocalInstallerPackage {
         if ($includeLicense) { Copy-Item -LiteralPath $licensePath -Destination (Join-Path $payload 'LICENSE') -Force }
         $manifestPath = Join-Path $payload 'roborev-dashboard.manifest.json'
         $hashPath = Join-Path $payload 'roborev-dashboard.sha256'
-        [IO.File]::WriteAllText($manifestPath, (New-LocalManifestText -Version $PackageVersion -Commit $BuildCommit -Size $size -Sha256 $sha), [Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText($hashPath, "$sha  $($script:LocalDashboardExecutableName)`n", [Text.UTF8Encoding]::new($false))
+        if ($ReleasePackage) {
+            Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $exe) 'roborev-dashboard.manifest.json') -Destination $manifestPath
+            Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $exe) 'roborev-dashboard.sha256') -Destination $hashPath
+            [void](Assert-OfficialReleaseSource -Executable $payloadExe -Version $PackageVersion -Commit $BuildCommit)
+            if ($sha -cne $officialManifest.sha256) { throw 'Official executable changed after release provenance validation.' }
+        } else {
+            [IO.File]::WriteAllText($manifestPath, (New-LocalManifestText -Version $PackageVersion -Commit $BuildCommit -Size $size -Sha256 $sha), [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($hashPath, "$sha  $($script:LocalDashboardExecutableName)`n", [Text.UTF8Encoding]::new($false))
+        }
         Assert-LocalPayloadAllowlist -Directory $payload
 
         . (Join-Path $PSScriptRoot 'native-command.ps1')
@@ -289,5 +317,5 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ([string]::IsNullOrWhiteSpace($PayloadDirectory)) { throw 'Provide -ExecutablePath or -PayloadDirectory.' }
         $ExecutablePath = Join-Path $PayloadDirectory $script:LocalDashboardExecutableName
     }
-    Write-Output (Invoke-LocalInstallerPackage -Executable $ExecutablePath -ProjectRoot $SourceRoot -PackageOutputDirectory $OutputDirectory -PackageVersion $Version -BuildCommit $Commit -InnoCache $ToolCacheDirectory -ResultManifest $ResultPath -PreserveStaging:$KeepStaging)
+    Write-Output (Invoke-LocalInstallerPackage -Executable $ExecutablePath -ProjectRoot $SourceRoot -PackageOutputDirectory $OutputDirectory -PackageVersion $Version -BuildCommit $Commit -InnoCache $ToolCacheDirectory -ResultManifest $ResultPath -PreserveStaging:$KeepStaging -ReleasePackage:$ReleasePackage)
 }

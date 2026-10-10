@@ -1,6 +1,19 @@
 # Handoff
 
-마지막 갱신: 2026-10-08
+마지막 갱신: 2026-10-10
+
+## 설치형·포터블 통합 릴리스 checkpoint
+
+- PR #1의 구현을 독립적으로 검증하고 보완했다. `package.ps1`의 clean/reproducible 공식 EXE·manifest·SHA 3파일 계약은 그대로 유지한다. `prepare-distributions.ps1`은 그 EXE 하나로 정식 Setup과 deterministic portable ZIP을 만들고, 정확히 6파일을 source HEAD 재검증 뒤 원자적으로 반영한다. 실패/기존 후보는 승격하거나 덮어쓰지 않는다.
+- 정식 버전은 공식 EXE provenance에서 검증하며 설치기·ZIP과 일치한다. 기존 `build-local.cmd`의 PowerShell 5.1 개발용 `-local` 및 `version=dev, release=false` 계약은 유지한다. exact RoboRev v0.64.0 capability와 사용자 승인 설치 정책도 유지한다.
+- Windows 서버는 설정 파일의 쓰기 경로에 대한 사용자별 lifetime lease를 가져 installed/portable의 공유 설정 동시 writer를 차단한다. 같은 설치본 재실행은 기존 authenticated instance를 활성화하며, 별도 `--config-dir`의 서버는 포트 충돌을 피하여 공존한다. Dashboard 종료는 RoboRev daemon을 중지하지 않는다.
+- `distribution-e2e.ps1`은 원본 Setup payload readback, 설치된 공식 3파일 검증, actual Setup 설치/업데이트/재설치/다운그레이드 거부/제거와 portable 실행을 수행한다. 기존 production 설치가 있는 호스트에서는 고정 테스트 AppId와 같은 clean source ISS/공식 payload를 사용하고 그 검증 범위를 명시한다. production AppId·기본 경로·시작 메뉴·대화형 Windows 정책 검증을 통과한 것으로 대체하지 않는다.
+- Windows 11 Home x64 (10.0.26300), Go 1.26.8, Node 24.12.0의 `verify-local -Mode Full` PASS: 전체 Go, PowerShell 계약 회귀, frontend 31 files / 594 tests 및 production build, vet, 개발 EXE 및 세 flag 계약. 이후 runtime/E2E 경계 보완은 focused 검증과 내부 reviewer를 거친다. clean Release 및 실제 배포물 lifecycle/CI 결과는 후보별 외부 evidence로 남긴다.
+- 첫 clean Release 검사는 최신 vulnerability feed의 Go 1.26.8 표준 라이브러리 symbol finding 10건으로 FAIL했다. [Go 공식 release history](https://go.dev/doc/devel/release)의 2026-10-08 보안 수정 1.26.9를 최소 요구 버전으로 올리고, 1.26.8 거부·compiler 재검증 fixture를 갱신한다. 실패 receipt는 `dist/dual-verification/release-failed-go1.26.8.log`에 보존하며 검사 결과를 억제하지 않는다. 이전 보안 checkpoint는 당시 receipt로 유지한다.
+- clean security commit `22c812c7fcd38b5f687d26516c3e82935f7b5bd3`의 Go 1.26.9 `verify-local -Mode Release`는 10개 행 모두 PASS했다. 새 toolchain의 전체 테스트/build/vet, govulncheck v1.8.0 취약점 0개, 재현 package와 packaged flag/smoke를 포함한다. 배포 준비의 실제 실행에서 확인한 중복 Git PATH 배열 오류도 PATH 우선순위의 단일 실행 파일 선택과 회귀 fixture로 보완한다. 최신 후보 lifecycle receipt는 `dist/distribution-e2e.json`, 검증 요약과 CI의 runner 시작 전 budget 차단 근거는 `dist/dual-verification/`에 둔다.
+- 실제 수명주기 검증은 원본 Setup payload·ZIP·manifest 일치, 설치·실행 중 upgrade/reinstall·downgrade 거부·독립 portable 보존까지 통과한 뒤 실행 중 uninstall에서 기존 ISS 결함을 재현했다. 고정 [Inno 6.7.3 source](https://raw.githubusercontent.com/jrsoftware/issrc/is-6_7_3/Projects/Src/Setup.ScriptFunc.pas)와 실제 로그의 `Cannot call "WizardSilent" function during Uninstall`를 대조하고, explicit `IsUninstaller` 분기로 Setup의 `WizardSilent`와 제거의 `UninstallSilent`를 선택하도록 수정한다. 확인 이전의 종료를 추가하지 않으며 test AppId·owned 프로세스·workspace cleanup과 production sentinel 보존은 실패 재현에서도 PASS했다.
+- GitHub Windows CI run [38053352733](https://github.com/frozenvoice/roborev-dashboard/actions/runs/38053352733)은 Actions budget으로 runner 시작 전 차단됐다. 실행된 test/build step은 없으며 로컬 검증의 실패나 CI PASS로 해석하지 않는다. 예산 해소 후 최종 후보의 Windows CI를 실행하기 전까지 release-ready semantic status를 선언하지 않는다.
+- 자동 RoboRev review/LLM/실제 daemon mutation, tag 및 GitHub Release 게시를 수행하지 않는다. 다음 게시 작업은 [RELEASE.md](RELEASE.md)의 명시적 release-owner 승인 정책에 따라 같은 후보의 Setup·ZIP을 하나의 Release에 함께 첨부한다.
 
 ## Local verification entrypoint (implementation handoff)
 

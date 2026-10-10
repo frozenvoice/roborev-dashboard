@@ -51,6 +51,12 @@
 - destructive/agentic action은 실행될 RoboRev executable과 argument array를 미리 보여준다.
 - mutation 뒤에는 UI 추측 상태에 의존하지 않고 RoboRev source of truth를 다시 조회한다.
 
+## 배포 형식
+
+- 다음 정식 Windows 릴리스에는 동일한 검증된 EXE·SemVer·SHA 기준의 `RoboRev-Dashboard-Setup.exe`와 `RoboRev-Dashboard-<version>-win-x64-portable.zip`을 **GitHub Release 하나에** 첨부한다.
+- `scripts/package.ps1`의 기존 3파일 공식 EXE 계약은 보존한다. `scripts/prepare-distributions.ps1`은 그 결과를 재사용하여 설치판과 무설치 포터블 ZIP을 함께 만든다. 기존 `build-local.cmd`의 `-local` 개발 설치기는 별도로 유지한다.
+- 두 배포물 모두 Windows 실제 검증과 릴리스 승인을 거친 후에만 게시하며, 빌드 자체는 태그·GitHub Release·사용자 PC 설치를 수행하지 않는다.
+
 ## 개발 규칙
 
 - 한 번에 하나의 coherent change를 만들고 테스트 성공 후 commit한다.

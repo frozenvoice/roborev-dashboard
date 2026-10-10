@@ -1,5 +1,11 @@
 # Windows 로컬 빌드와 Dashboard 설치
 
+## 정식 릴리스와 개발 설치기의 구분
+
+`scripts/prepare-distributions.ps1`은 clean release EXE와 공식 manifest/SHA를 재사용하여 정식 버전의 Setup과 portable ZIP을 준비한다. 정식 Setup 표시 버전, 설치된 EXE의 `--version-json`, portable EXE의 버전은 같으며 `-local`이 붙지 않는다. 공식 manifest도 설치 폴더와 ZIP에 같은 바이트로 포함한다. 빌드 시점에는 설치·업데이트·제거를 실행하지 않는다. 게시와 검증 절차는 [RELEASE.md](RELEASE.md)를 따른다.
+
+아래 `build-local.cmd`는 별도 개발 경로다. 기존 `0.1.0-local` Setup과 `version=dev, release=false` 실행 파일 계약을 유지하며 정식 릴리스 provenance를 주장하지 않는다.
+
 ## 실행
 
 Windows 11 amd64에서 저장소 루트의 `build-local.cmd`를 더블클릭한다. 다른 working directory에서도 cmd 파일이 있는 checkout을 기준으로 실행한다. Windows 기본 PowerShell 5.1을 사용하며 PowerShell 7 설치, 영구 실행 정책 변경, Windows 보안 설정 변경은 요구하지 않는다.
@@ -12,7 +18,7 @@ Windows 11 amd64에서 저장소 루트의 `build-local.cmd`를 더블클릭한�
 
 기본 흐름은 preflight → 개발 도구 확인·준비 → 의존성 준비 → 전체 테스트 → production build → 설치기 생성 → 검증 → 설치 창 → 설치 결과 검증 → 실행이다. 기본 실행에서 테스트를 생략하는 옵션은 없다. 설치 창에서 사용자가 승인하거나 취소할 수 있다. `-NoInstall`은 설치기를 실행하지 않으며 기존 앱을 종료하지 않는다. `-SilentInstall`을 명시해야만 무인 설치하며, `-NoInstall`과 함께 지정하면 오류다.
 
-개발 도구 준비는 기존 `scripts/install.ps1` 및 `prerequisites.ps1` 정책을 재사용한다. Git, Node.js 22 이상/npm, `go.mod`가 요구하는 Go 1.26.8 이상 중 부족한 도구만 winget 계획에 포함한다. Go 버전 검사는 cmd를 연 위치와 관계없이 checkout에서 선택되는 실제 컴파일러를 사용한다. 기본 `GOTOOLCHAIN=auto`는 필요한 Go 도구체인을 다운로드하고 선택할 수 있다. `GOTOOLCHAIN=local` 또는 오프라인 환경에서는 요구 버전을 직접 준비해야 하며 검사 실패를 무시하지 않는다. 해당 도구의 설치 자체가 별도 권한 승인을 요구할 수 있다. 이것은 관리자 권한을 요구하지 않는 Dashboard 앱 설치와 별개다. RoboRev와 AI agent를 준비하거나 실행하지 않는다.
+개발 도구 준비는 기존 `scripts/install.ps1` 및 `prerequisites.ps1` 정책을 재사용한다. Git, Node.js 22 이상/npm, `go.mod`가 요구하는 Go 1.26.9 이상 중 부족한 도구만 winget 계획에 포함한다. Go 버전 검사는 cmd를 연 위치와 관계없이 checkout에서 선택되는 실제 컴파일러를 사용한다. 기본 `GOTOOLCHAIN=auto`는 필요한 Go 도구체인을 다운로드하고 선택할 수 있다. `GOTOOLCHAIN=local` 또는 오프라인 환경에서는 요구 버전을 직접 준비해야 하며 검사 실패를 무시하지 않는다. 해당 도구의 설치 자체가 별도 권한 승인을 요구할 수 있다. 이것은 관리자 권한을 요구하지 않는 Dashboard 앱 설치와 별개다. RoboRev와 AI agent를 준비하거나 실행하지 않는다.
 
 Inno Setup은 WebPier에서 사용한 공식 **6.7.3** 버전으로 고정한다. 공식 HTTPS 배포 파일의 SHA-256과 서명을 검증한 후 준비하며, 검증된 캐시는 재사용한다. 다운로드·무결성·publisher 검증 실패를 무시하거나 `latest`로 대체하지 않는다. 신뢰 기준은 [고정된 공식 릴리스](https://github.com/jrsoftware/issrc/releases/tag/is-6_7_3)다.
 
@@ -39,6 +45,8 @@ Setup은 고정 AppId로 현재 사용자에게 `%LOCALAPPDATA%\Programs\RoboRev
 설치에는 embedded frontend를 포함한 Dashboard EXE와 명시된 배포 파일만 포함한다. Go, Node.js, npm, Inno Setup, 소스, `node_modules`, 테스트 fixture 또는 사용자 설정은 설치하지 않는다. 실행 시 Git은 여전히 필요하며, RoboRev가 없거나 호환되지 않으면 기존 Agents & Setup 안내와 exact-version fail-closed 정책을 따른다. Fix/Refine 등의 차단 상태는 유지된다.
 
 시작 메뉴의 Dashboard 항목은 `roborev-dashboard.exe --installed`를 실행한다. 같은 사용자·같은 실행 파일 경로의 설치본을 다시 열면 기존 서버가 기본 브라우저를 연다. 최초 실행 시 7410이 다른 서버에 점유되어 있으면 기존 규칙대로 다음 사용 가능한 포트를 사용한다. 포트만 보고 다른 프로세스를 Dashboard로 인정하지 않는다.
+
+Windows 서버는 사용자와 canonical 설정 파일 경로별 lifetime 잠금을 사용한다. 설치형과 포터블의 기본 설정은 같으므로 두 번째 서버는 설정을 읽거나 쓰기 전에 시작을 거부한다. 같은 포터블을 반복 실행해도 같은 설정으로 서버가 중복 시작되지 않는다. 독립적으로 실행할 때는 포터블에 별도 `--config-dir`를 지정한다. 설치형의 종료·업데이트·제거는 해당 EXE 경로의 인증된 프로세스만 대상으로 하며 독립 포터블 서버는 유지된다. 포터블은 콘솔 Ctrl+C로 정상 종료한다.
 
 서버 콘솔은 표시한다. 종료하려면 콘솔에서 **Ctrl+C**를 누르거나 시작 메뉴의 **Stop RoboRev Dashboard** 항목을 사용한다. 브라우저 탭을 닫는 것만으로는 서버가 종료되지 않는다. 고급 사용자는 설치된 EXE의 `--installed-status`로 상태를 확인하고 `--stop-installed`로 정상 종료할 수 있다. `--installed --no-open`은 브라우저를 열지 않는다. 설치 모드와 `--port`, `--config-dir` 등 개별 실행 설정을 섞지 않고, 해당 설정이 필요하면 기존 일반 실행 모드를 사용한다.
 
@@ -77,4 +85,6 @@ Sandbox 자동 검증은 최초 설치, 개발 도구 없는 EXE 버전 조회, 
 4. 다시 구버전 설치기를 실행해 다운그레이드가 거부되는지 확인한다.
 5. unsigned Setup/EXE에 대한 실제 SmartScreen/Application Control 동작을 기록한다. 검사나 보안 설정을 우회하지 않는다.
 
-이번 작업 환경은 Windows 11 amd64지만 Windows Sandbox 실행 파일이 없다. 따라서 이 환경의 실제 빌드와 비파괴 회귀 검증 결과를 설치·제거 E2E 성공으로 표시하지 않는다. 마지막 실행 결과는 `docs/HANDOFF.md`의 이번 checkpoint에 기록한다.
+Windows Sandbox가 없는 fresh Windows 사용자 환경에서는 별도 opt-in `scripts/distribution-e2e.ps1 -DistributionDirectory <candidate> -Version <version> -AllowCurrentUserInstallerTest`로 실제 정식 Setup을 검증할 수 있다. 기본 모드에서는 기존 제품 설치 폴더나 HKCU uninstall 등록이 있으면 중단한다. 임시 `/DIR`, `/NOICONS`, 격리된 앱 profile/config를 사용하고 실제 uninstaller로 테스트 설치만 제거한다. `-OlderSetupPath`와 `-OlderVersion`을 함께 제공하면 실행 중 forward upgrade와 downgrade 거부도 확인한다.
+
+기존 사용자 설치를 보존할 때는 `-UseIsolatedInstallerIdentity`와 검증된 추출 도구의 `-SetupExtractorPath`/`-SetupExtractorSha256`을 함께 지정한다. 동일 ISS·공식 payload의 테스트 AppId 설치기로 수명주기를 확인하고, 원본 배포 Setup은 실행하지 않고 payload를 추출해 같은 EXE·공식 metadata인지 검증한다. 테스트 AppId 수명주기와 production AppId/기본 경로/시작 메뉴 검증은 구분한다. 자세한 trust/명령 계약은 [RELEASE.md](RELEASE.md)를 따른다. 이 gate는 기본 개발 테스트나 build-local 실행에 포함되지 않는다. interactive 취소·시작 메뉴·SmartScreen 경험은 Sandbox 수동 항목으로 구분하며, 실제 실행 결과는 `docs/HANDOFF.md`에 기록한다.

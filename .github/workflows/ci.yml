@@ -131,12 +131,12 @@ jobs:
           & (Join-Path $env:SAFE_CHECKOUT 'dist\roborev-dashboard.exe') --version
           & (Join-Path $env:SAFE_CHECKOUT 'dist\roborev-dashboard.exe') --version-json
 
-      - name: Build reproducible CI package
+      - name: Build reproducible CI installer and portable distributions
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location $env:SAFE_CHECKOUT
-          try { ./scripts/package.ps1 -Version 0.0.0-ci.1 -OutputDirectory .\dist\ci\0.0.0-ci.1 -VerifyReproducible }
+          try { ./scripts/prepare-distributions.ps1 -Version 0.0.0-ci.1 -OutputDirectory .\dist\ci\0.0.0-ci.1 -VerifyReproducible }
           finally { Pop-Location }
 
       - name: Run packaged release smoke

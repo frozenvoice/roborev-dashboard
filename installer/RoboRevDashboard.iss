@@ -476,10 +476,20 @@ begin
   else Result := ComparePrerelease(LeftSuffix, RightSuffix);
 end;
 
+function CurrentOperationSilent(): Boolean;
+begin
+  { Inno forbids WizardSilent during uninstall and UninstallSilent during
+    Setup. Keep these mode-specific calls in explicit separate branches. }
+  if IsUninstaller then
+    Result := UninstallSilent
+  else
+    Result := WizardSilent;
+end;
+
 function TryGracefulStop(const ExePath: String): Boolean;
 var
   ChildExitCode: Cardinal;
-  CommandLine: String;
+  CommandLine, ConfirmationText: String;
   ProcessHandle: THandle;
   ProcessInfo: TDashboardProcessInformation;
   StartupInfo: TDashboardStartupInfo;
@@ -487,11 +497,15 @@ var
 begin
   Result := False;
   if PathHasReparsePoint(ExePath) then Exit;
-  { Interactive Setup asks immediately before the stop request.  A silent
-    Setup is itself the explicit -SilentInstall choice made by build-local, so
-    it sends the same exact-path request without a second UI prompt. }
-  if (not WizardSilent) and
-     (MsgBox('RoboRev Dashboard가 실행 중입니다. 설치 전에 --stop-installed로 정상 종료를 요청하시겠습니까?', mbConfirmation, MB_YESNO) <> IDYES) then Exit;
+  { Interactive install or uninstall asks immediately before the stop request,
+    after Inno's confirmation. Explicit silent operation skips this prompt. }
+  if not CurrentOperationSilent then begin
+    if IsUninstaller then
+      ConfirmationText := 'RoboRev Dashboard가 실행 중입니다. 제거 전에 --stop-installed로 정상 종료를 요청하시겠습니까?'
+    else
+      ConfirmationText := 'RoboRev Dashboard가 실행 중입니다. 설치 전에 --stop-installed로 정상 종료를 요청하시겠습니까?';
+    if MsgBox(ConfirmationText, mbConfirmation, MB_YESNO) <> IDYES then Exit;
+  end;
   StartupInfo.cb := SizeOf(StartupInfo);
   StartupInfo.lpReserved := '';
   StartupInfo.lpDesktop := '';

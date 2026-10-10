@@ -270,6 +270,13 @@ func main() {
 		}()
 	}
 
+	configFile := defaultConfigFile(*configDir)
+	configLease, err := acquireConfigLease(configFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer configLease.Close()
+
 	listener, err := listenLocal(*bind, *port)
 	if err != nil {
 		log.Fatal(err)
@@ -278,7 +285,7 @@ func main() {
 
 	runner := proc.ExecRunner{}
 	gitService := gitx.New(runner)
-	registry := app.NewRegistry(gitService, defaultConfigFile(*configDir))
+	registry := app.NewRegistry(gitService, configFile)
 	initialRepo := *repo
 	if initialRepo == "" && !*installed {
 		initialRepo, _ = os.Getwd()
