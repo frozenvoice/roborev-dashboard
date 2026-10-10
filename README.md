@@ -6,6 +6,14 @@ RoboRev Dashboard는 기존 [`roborev`](https://github.com/kenn-io/roborev) CLI/
 
 ## 새 clone에서 개발 시작
 
+### 설치형 + 포터블 동시 배포
+
+다음 릴리스 후보부터 같은 커밋과 버전으로 **`RoboRev-Dashboard-Setup.exe` (설치형)** 및 **`RoboRev-Dashboard-<버전>-win-x64-portable.zip` (포터블)**을 함께 만들 수 있습니다. GitHub Release 한 건에 두 파일을 첨부하며, 릴리스는 자동으로 게시하지 않습니다.
+
+Windows x64에서 깨끗한 소스 체크아웃을 준비하고 `pwsh -NoProfile -File scripts/prepare-distributions.ps1 -Version 0.1.0 -VerifyReproducible`을 실행합니다. 결과는 `dist/release/0.1.0/`에 두 배포물과 `SHA256SUMS.txt`로 생성됩니다. 기존 버전 폴더는 덮어쓰지 않습니다. 포터블은 ZIP을 푼 뒤 `roborev-dashboard.exe`를 실행하면 되며, Windows 설치·시작 메뉴 등록 없이 로컬 브라우저를 엽니다. 설치형과 포터블은 같은 설정·RoboRev 런타임을 볼 수 있으므로 동시에 실행하지 마세요.
+
+두 배포물 모두 기존 RoboRev/ Git 런타임 요구사항과 Windows SmartScreen의 미서명 개발 빌드 경고가 유지됩니다. 공식 배포 전에는 [릴리스 검증 절차](docs/RELEASE.md)를 통과해야 합니다.
+
 ### Windows에서 원클릭 빌드·설치
 
 Windows 11 amd64에서 소스를 수정한 뒤 저장소 루트의 `build-local.cmd`를 더블클릭하면 개발 도구 확인·준비, `npm ci`, 전체 테스트, production build, 설치기 생성·검증을 순서대로 수행하고 설치 창을 연다. 미커밋 변경도 빌드에 포함하며 Git checkout을 변경하지 않는다. Windows 기본 PowerShell 5.1을 사용한다.
