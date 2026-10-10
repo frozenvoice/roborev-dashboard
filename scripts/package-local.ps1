@@ -34,7 +34,9 @@ param(
     [string]$ResultPath,
 
     [Parameter()]
-    [switch]$KeepStaging
+    [switch]$KeepStaging,
+    # Retain the exact release version instead of appending the development -local label.
+    [switch]$ReleasePackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,7 +130,8 @@ function New-LocalManifestText {
         [Parameter(Mandatory = $true)][string]$Version,
         [Parameter(Mandatory = $true)][string]$Commit,
         [Parameter(Mandatory = $true)][int64]$Size,
-        [Parameter(Mandatory = $true)][string]$Sha256
+        [Parameter(Mandatory = $true)][string]$Sha256,
+        [bool]$IsLocal = $true
     )
     if ($Commit -notmatch '^[0-9a-f]{40}$') { $Commit = 'unknown' }
     $manifest = [ordered]@{
@@ -140,7 +143,7 @@ function New-LocalManifestText {
         size = $Size
         sha256 = $Sha256.ToLowerInvariant()
         signed = $false
-        local = $true
+        local = $IsLocal
     }
     return (($manifest | ConvertTo-Json -Compress) + "`n")
 }
@@ -166,7 +169,8 @@ function Invoke-LocalInstallerPackage {
         [Parameter()][string]$BuildCommit = 'unknown',
         [Parameter()][string]$InnoCache,
         [Parameter()][string]$ResultManifest,
-        [Parameter()][switch]$PreserveStaging
+        [Parameter()][switch]$PreserveStaging,
+        [Parameter()][switch]$ReleasePackage
     )
 
     $project = Assert-LocalDirectory -Path $ProjectRoot
@@ -178,18 +182,30 @@ function Invoke-LocalInstallerPackage {
     $outDir = Assert-LocalDirectory -Path $outDir
 
     $sourceVersion = Get-LocalVersionFromPackageJson -ProjectRoot $project
-    if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
-        $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $sourceVersion
-    } elseif (-not (Test-LocalSemVer -Value $PackageVersion)) {
-        throw "PackageVersion is not strict SemVer: $PackageVersion"
-    }
-    if ($PackageVersion -match '(^|-)local(\+|$)') {
-        $baseVersion = ConvertFrom-LocalInstallerVersion -LocalVersion $PackageVersion
-    } else {
+    if ($ReleasePackage) {
+        if ([string]::IsNullOrWhiteSpace($PackageVersion) -or -not (Test-LocalSemVer -Value $PackageVersion)) {
+            throw 'Release installer requires an explicit strict SemVer -PackageVersion.'
+        }
+        if ($PackageVersion -cne $sourceVersion) {
+            throw "Release installer version '$PackageVersion' does not match web/package.json '$sourceVersion'."
+        }
         $baseVersion = $PackageVersion
-        $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $baseVersion
+    } else {
+        if ([string]::IsNullOrWhiteSpace($PackageVersion)) {
+            $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $sourceVersion
+        } elseif (-not (Test-LocalSemVer -Value $PackageVersion)) {
+            throw "PackageVersion is not strict SemVer: $PackageVersion"
+        }
+        if ($PackageVersion -match '(^|-)local(\+|$)') {
+            $baseVersion = ConvertFrom-LocalInstallerVersion -LocalVersion $PackageVersion
+        } else {
+            $baseVersion = $PackageVersion
+            $PackageVersion = ConvertTo-LocalInstallerVersion -BaseVersion $baseVersion
+        }
+        if ($baseVersion -cne $sourceVersion) {
+            throw "PackageVersion '$PackageVersion' does not match web/package.json basis version '$sourceVersion'."
+        }
     }
-    if ($baseVersion -cne $sourceVersion) { throw "PackageVersion '$PackageVersion' does not match web/package.json basis version '$sourceVersion'." }
     $versionInfo = ConvertTo-LocalVersionInfoVersion -BaseVersion $baseVersion
     [void](Assert-NoReparsePoint -Path $exe)
     $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -213,7 +229,7 @@ function Invoke-LocalInstallerPackage {
         if ($includeLicense) { Copy-Item -LiteralPath $licensePath -Destination (Join-Path $payload 'LICENSE') -Force }
         $manifestPath = Join-Path $payload 'roborev-dashboard.manifest.json'
         $hashPath = Join-Path $payload 'roborev-dashboard.sha256'
-        [IO.File]::WriteAllText($manifestPath, (New-LocalManifestText -Version $PackageVersion -Commit $BuildCommit -Size $size -Sha256 $sha), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($manifestPath, (New-LocalManifestText -Version $PackageVersion -Commit $BuildCommit -Size $size -Sha256 $sha -IsLocal:(-not $ReleasePackage)), [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($hashPath, "$sha  $($script:LocalDashboardExecutableName)`n", [Text.UTF8Encoding]::new($false))
         Assert-LocalPayloadAllowlist -Directory $payload
 
@@ -289,5 +305,5 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ([string]::IsNullOrWhiteSpace($PayloadDirectory)) { throw 'Provide -ExecutablePath or -PayloadDirectory.' }
         $ExecutablePath = Join-Path $PayloadDirectory $script:LocalDashboardExecutableName
     }
-    Write-Output (Invoke-LocalInstallerPackage -Executable $ExecutablePath -ProjectRoot $SourceRoot -PackageOutputDirectory $OutputDirectory -PackageVersion $Version -BuildCommit $Commit -InnoCache $ToolCacheDirectory -ResultManifest $ResultPath -PreserveStaging:$KeepStaging)
+    Write-Output (Invoke-LocalInstallerPackage -Executable $ExecutablePath -ProjectRoot $SourceRoot -PackageOutputDirectory $OutputDirectory -PackageVersion $Version -BuildCommit $Commit -InnoCache $ToolCacheDirectory -ResultManifest $ResultPath -PreserveStaging:$KeepStaging -ReleasePackage:$ReleasePackage)
 }
