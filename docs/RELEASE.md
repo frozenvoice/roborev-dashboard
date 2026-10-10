@@ -71,3 +71,11 @@ The local release gate, the gated online installer evidence, the exact-candidate
 ## Support evidence
 
 For a reproducible report, include the sanitized `--version-json` result, target OS/architecture, manifest and SHA-256, the failing bounded phase and whether the failure was local, daemon, policy or network. Never attach `%USERPROFILE%`, credentials, API keys, raw daemon output, prompts or private repository content without redaction.
+
+## 설치형·포터블 동일 버전 릴리스 후보
+
+위의 `scripts/package.ps1`은 검증 가능한 단독 EXE·manifest·SHA-256의 3종 공식 빌드 계약을 유지합니다. 사용자용 배포물 두 개를 한 번에 준비하려면 Windows x64 깨끗한 체크아웃에서 `pwsh -File scripts/prepare-distributions.ps1 -Version <SemVer> -VerifyReproducible`을 실행합니다.
+
+이 스크립트는 위 공식 EXE의 동일한 바이트를 넣은 `RoboRev-Dashboard-Setup.exe`와 `RoboRev-Dashboard-<SemVer>-win-x64-portable.zip`을 생성하며, 설치기 payload SHA-256·ZIP의 내부 EXE SHA-256·공식 manifest SHA-256을 비교합니다. ZIP에는 EXE와 공식 manifest·SHA-256 파일만 포함하며, 설정/계정/기존 RoboRev 바이너리는 포함하지 않습니다. 출력은 `dist/release/<SemVer>/`에 원자적으로 반영하고 같은 버전의 기존 후보는 덮어쓰지 않습니다.
+
+**하나의 GitHub Release에 Setup EXE와 portable ZIP을 모두 첨부**합니다(`SHA256SUMS.txt`도 함께 권장). 단, 로컬 빌드는 태그·GitHub Release·게시·서명을 수행하지 않습니다. 둘 다 위 Windows 수동 E2E/CI와 외부 설치기 수명주기 검증이 완료되기 전까지 게시할 수 있는 것으로 주장하지 않습니다. 기존 `0.1.0-local` 개발 설치기 경로와 회귀 검사는 변경하지 않습니다.
