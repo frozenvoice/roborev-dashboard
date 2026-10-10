@@ -19,6 +19,19 @@ function Get-DistributionLockName {
     finally { $stream.Dispose() }
 }
 
+function Resolve-DistributionGit {
+    # Several installations may expose git.exe. Select PATH priority before
+    # reading Source, so the typed GitPath argument always receives one string.
+    $command = Get-Command git -CommandType Application -All -ErrorAction Stop | Select-Object -First 1
+    $path = [string]$command.Source
+    if ([string]::IsNullOrWhiteSpace($path) -or ![IO.Path]::IsPathRooted($path)) { throw 'Git must resolve to one absolute application path.' }
+    $path = Get-FullPathSafe -Path $path
+    if (!(Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Resolved Git application does not exist.' }
+    [void](Assert-SafeExistingParent -Path $path)
+    [void](Assert-NoReparsePoint -Path $path)
+    return $path
+}
+
 function Assert-OfficialReleaseSource {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Executable, [Parameter(Mandatory)][string]$Version,
@@ -125,7 +138,7 @@ function Invoke-DistributionPreparation {
     [void](Assert-SafeExistingParent -Path $parent)
     if (!$PackageBuilder) { $PackageBuilder = { param($p, $v, $s, $r) & (Join-Path $p 'scripts/package.ps1') -Version $v -OutputDirectory $s -VerifyReproducible:$r } }
     if (!$InstallerBuilder) { $InstallerBuilder = { param($e, $p, $s, $v, $c) Invoke-LocalInstallerPackage -Executable $e -ProjectRoot $p -PackageOutputDirectory $s -PackageVersion $v -BuildCommit $c -ReleasePackage } }
-    if (!$SourceGuard) { $SourceGuard = { param($p) $git = (Get-Command git -CommandType Application -ErrorAction Stop).Source; Assert-CleanGitRepository -RepositoryRoot $p -GitPath $git } }
+    if (!$SourceGuard) { $SourceGuard = { param($p) Assert-CleanGitRepository -RepositoryRoot $p -GitPath (Resolve-DistributionGit) } }
     $mutex = [Threading.Mutex]::new($false, (Get-DistributionLockName -ProjectRoot $project))
     $locked = $false
     $stage = $null

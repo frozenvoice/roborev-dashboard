@@ -415,7 +415,7 @@ exit 0
     if ($UseIsolatedInstallerIdentity) {
         $step = 'isolated-identity-setup-compilation'
         $canonicalCurrent = Assert-OfficialReleaseSource -Executable $officialExe -Version $Version -Commit $manifest.commit
-        $sourceGit = (Get-Command git -CommandType Application -ErrorAction Stop).Source
+        $sourceGit = Resolve-DistributionGit
         $isolatedInstallerSourceCommit = Assert-CleanGitRepository -RepositoryRoot $root -GitPath $sourceGit
         Assert-IsolatedInstallerSourceCommit $isolatedInstallerSourceCommit $canonicalCurrent.commit
         [void](Assert-SafeExistingParent -Path (Join-Path $root 'installer'))

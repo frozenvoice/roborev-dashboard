@@ -28,6 +28,38 @@ if (Test-Path -LiteralPath $testRoot) { throw "Refusing to reuse existing distri
 [void](Assert-SafeExistingParent -Path $testRoot)
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 try {
+    $realGit = Resolve-DistributionGit
+    Assert-DistributionTest ($realGit -is [string] -and [IO.Path]::IsPathRooted($realGit)) 'Git resolution returns one absolute string'
+    $firstGitDirectory = Join-Path $testRoot 'first-git'
+    $secondGitDirectory = Join-Path $testRoot 'second-git'
+    foreach ($directory in @($firstGitDirectory, $secondGitDirectory)) {
+        New-Item -ItemType Directory -Path $directory | Out-Null
+        # Discovery fixtures only: these files are never executed.
+        [IO.File]::WriteAllBytes((Join-Path $directory 'git.exe'), [byte[]](0x4D, 0x5A))
+    }
+    $savedGitTestPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+    try {
+        $env:PATH = $firstGitDirectory + [IO.Path]::PathSeparator + $secondGitDirectory + [IO.Path]::PathSeparator + $savedGitTestPath
+        Assert-DistributionTest (@(Get-Command git -CommandType Application -All).Count -ge 2) 'duplicate Git PATH fixture exposes multiple applications'
+        $selectedGit = Resolve-DistributionGit
+        Assert-DistributionTest ($selectedGit -is [string] -and $selectedGit -ceq (Join-Path $firstGitDirectory 'git.exe')) 'duplicate Git resolution preserves first PATH entry'
+        $env:PATH = $secondGitDirectory + [IO.Path]::PathSeparator + $firstGitDirectory + [IO.Path]::PathSeparator + $savedGitTestPath
+        Assert-DistributionTest ((Resolve-DistributionGit) -ceq (Join-Path $secondGitDirectory 'git.exe')) 'Git selection follows changed PATH priority'
+    } finally { [Environment]::SetEnvironmentVariable('PATH', $savedGitTestPath, 'Process') }
+    $cleanGitFixture = Join-Path $testRoot 'clean-source'
+    $emptyGitTemplate = Join-Path $testRoot 'empty-template'
+    $emptyGitHooks = Join-Path $testRoot 'empty-hooks'
+    foreach ($directory in @($cleanGitFixture, $emptyGitTemplate, $emptyGitHooks)) { New-Item -ItemType Directory -Path $directory | Out-Null }
+    & $realGit -C $cleanGitFixture init --quiet ("--template=" + $emptyGitTemplate)
+    if ($LASTEXITCODE -ne 0) { throw 'Git source guard fixture initialization failed.' }
+    & $realGit -C $cleanGitFixture -c user.name=DistributionFixture -c user.email=fixture@example.invalid -c ("core.hooksPath=" + $emptyGitHooks) commit --allow-empty --no-gpg-sign --quiet -m 'Distribution fixture'
+    if ($LASTEXITCODE -ne 0) { throw 'Git source guard fixture commit failed.' }
+    $fixtureCommit = Assert-CleanGitRepository -RepositoryRoot $cleanGitFixture -GitPath (Resolve-DistributionGit)
+    Assert-DistributionTest ($fixtureCommit -cmatch '^[0-9a-f]{40}$') 'resolved Git performs actual clean-source commit read'
+    Assert-DistributionThrows {
+        Invoke-DistributionPreparation -ProjectRoot $cleanGitFixture -DistributionVersion '0.1.0' -Destination (Join-Path $testRoot 'guard-candidate') -PackageBuilder { throw 'Clean Git guard reached fake package.' }
+    } 'default distribution clean guard reaches the fake build with duplicate host Git installations' 'Clean Git guard reached fake package'
+    Assert-DistributionTest (!(Test-Path -LiteralPath (Join-Path $testRoot 'guard-candidate'))) 'Git guard fixture produces no release candidate'
     $source = Join-Path $testRoot 'official'
     New-DistributionFixture -Directory $source
     $exe = Join-Path $source 'roborev-dashboard.exe'
