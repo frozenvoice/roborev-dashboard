@@ -40,7 +40,7 @@ Dashboard 앱은 관리자 권한이나 경로 선택 없이 `%LOCALAPPDATA%\Pro
 
 - Git
 - Node.js 22 이상과 npm
-- Go 1.26.8 이상 (`go.mod`의 패치 버전 요구사항)
+- Go 1.26.9 이상 (`go.mod`의 패치 버전 요구사항)
 
 새 checkout에서는 다음 순서로 검사·설치 계획을 확인하고 개발 의존성을 준비한다.
 

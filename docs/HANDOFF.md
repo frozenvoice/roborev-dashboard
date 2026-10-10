@@ -9,6 +9,8 @@
 - Windows 서버는 설정 파일의 쓰기 경로에 대한 사용자별 lifetime lease를 가져 installed/portable의 공유 설정 동시 writer를 차단한다. 같은 설치본 재실행은 기존 authenticated instance를 활성화하며, 별도 `--config-dir`의 서버는 포트 충돌을 피하여 공존한다. Dashboard 종료는 RoboRev daemon을 중지하지 않는다.
 - `distribution-e2e.ps1`은 원본 Setup payload readback, 설치된 공식 3파일 검증, actual Setup 설치/업데이트/재설치/다운그레이드 거부/제거와 portable 실행을 수행한다. 기존 production 설치가 있는 호스트에서는 고정 테스트 AppId와 같은 clean source ISS/공식 payload를 사용하고 그 검증 범위를 명시한다. production AppId·기본 경로·시작 메뉴·대화형 Windows 정책 검증을 통과한 것으로 대체하지 않는다.
 - Windows 11 Home x64 (10.0.26300), Go 1.26.8, Node 24.12.0의 `verify-local -Mode Full` PASS: 전체 Go, PowerShell 계약 회귀, frontend 31 files / 594 tests 및 production build, vet, 개발 EXE 및 세 flag 계약. 이후 runtime/E2E 경계 보완은 focused 검증과 내부 reviewer를 거친다. clean Release 및 실제 배포물 lifecycle/CI 결과는 후보별 외부 evidence로 남긴다.
+- 첫 clean Release 검사는 최신 vulnerability feed의 Go 1.26.8 표준 라이브러리 symbol finding 10건으로 FAIL했다. [Go 공식 release history](https://go.dev/doc/devel/release)의 2026-10-08 보안 수정 1.26.9를 최소 요구 버전으로 올리고, 1.26.8 거부·compiler 재검증 fixture를 갱신한다. 실패 receipt는 `dist/dual-verification/release-failed-go1.26.8.log`에 보존하며 검사 결과를 억제하지 않는다. 이전 보안 checkpoint는 당시 receipt로 유지한다.
+- GitHub Windows CI run [38053352733](https://github.com/frozenvoice/roborev-dashboard/actions/runs/38053352733)은 Actions budget으로 runner 시작 전 차단됐다. 실행된 test/build step은 없으며 로컬 검증의 실패나 CI PASS로 해석하지 않는다. 예산 해소 후 최종 후보의 Windows CI를 실행하기 전까지 release-ready semantic status를 선언하지 않는다.
 - 자동 RoboRev review/LLM/실제 daemon mutation, tag 및 GitHub Release 게시를 수행하지 않는다. 다음 게시 작업은 [RELEASE.md](RELEASE.md)의 명시적 release-owner 승인 정책에 따라 같은 후보의 Setup·ZIP을 하나의 Release에 함께 첨부한다.
 
 ## Local verification entrypoint (implementation handoff)

@@ -18,7 +18,7 @@ Windows 11 amd64에서 저장소 루트의 `build-local.cmd`를 더블클릭한�
 
 기본 흐름은 preflight → 개발 도구 확인·준비 → 의존성 준비 → 전체 테스트 → production build → 설치기 생성 → 검증 → 설치 창 → 설치 결과 검증 → 실행이다. 기본 실행에서 테스트를 생략하는 옵션은 없다. 설치 창에서 사용자가 승인하거나 취소할 수 있다. `-NoInstall`은 설치기를 실행하지 않으며 기존 앱을 종료하지 않는다. `-SilentInstall`을 명시해야만 무인 설치하며, `-NoInstall`과 함께 지정하면 오류다.
 
-개발 도구 준비는 기존 `scripts/install.ps1` 및 `prerequisites.ps1` 정책을 재사용한다. Git, Node.js 22 이상/npm, `go.mod`가 요구하는 Go 1.26.8 이상 중 부족한 도구만 winget 계획에 포함한다. Go 버전 검사는 cmd를 연 위치와 관계없이 checkout에서 선택되는 실제 컴파일러를 사용한다. 기본 `GOTOOLCHAIN=auto`는 필요한 Go 도구체인을 다운로드하고 선택할 수 있다. `GOTOOLCHAIN=local` 또는 오프라인 환경에서는 요구 버전을 직접 준비해야 하며 검사 실패를 무시하지 않는다. 해당 도구의 설치 자체가 별도 권한 승인을 요구할 수 있다. 이것은 관리자 권한을 요구하지 않는 Dashboard 앱 설치와 별개다. RoboRev와 AI agent를 준비하거나 실행하지 않는다.
+개발 도구 준비는 기존 `scripts/install.ps1` 및 `prerequisites.ps1` 정책을 재사용한다. Git, Node.js 22 이상/npm, `go.mod`가 요구하는 Go 1.26.9 이상 중 부족한 도구만 winget 계획에 포함한다. Go 버전 검사는 cmd를 연 위치와 관계없이 checkout에서 선택되는 실제 컴파일러를 사용한다. 기본 `GOTOOLCHAIN=auto`는 필요한 Go 도구체인을 다운로드하고 선택할 수 있다. `GOTOOLCHAIN=local` 또는 오프라인 환경에서는 요구 버전을 직접 준비해야 하며 검사 실패를 무시하지 않는다. 해당 도구의 설치 자체가 별도 권한 승인을 요구할 수 있다. 이것은 관리자 권한을 요구하지 않는 Dashboard 앱 설치와 별개다. RoboRev와 AI agent를 준비하거나 실행하지 않는다.
 
 Inno Setup은 WebPier에서 사용한 공식 **6.7.3** 버전으로 고정한다. 공식 HTTPS 배포 파일의 SHA-256과 서명을 검증한 후 준비하며, 검증된 캐시는 재사용한다. 다운로드·무결성·publisher 검증 실패를 무시하거나 `latest`로 대체하지 않는다. 신뢰 기준은 [고정된 공식 릴리스](https://github.com/jrsoftware/issrc/releases/tag/is-6_7_3)다.
 
