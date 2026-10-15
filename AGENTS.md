@@ -2,6 +2,14 @@
 
 이 문서는 Codex, Cursor 및 다른 개발 에이전트가 공통으로 따르는 agent-neutral 지침이다. 저장소 안의 모든 작업에 적용한다. 단, `Codex 멀티에이전트 운영 규칙` 절은 Codex에서만 적용한다.
 
+## GitHub Actions 수동 실행 정책
+
+- GitHub hosted CI는 기본 개발 검증 수단이 아니다. 기존·신규 workflow의 시작 이벤트는 `workflow_dispatch`만 허용한다. `workflow_call`은 명시적 수동 root에서만 도달하는 재사용 workflow에 한정한다.
+- `push`, `pull_request`, `pull_request_target`, `workflow_run`, `repository_dispatch`, `schedule` 등 자동 시작 이벤트와 우회용 경량 job·가짜 성공 job을 추가하지 않는다. Git hook·스크립트·에이전트 설정의 자동 dispatch도 금지한다.
+- 실제 Actions dispatch·watch·rerun은 사용자의 해당 원격 실행에 대한 명시적 요청이 있어야 한다. 릴리스 준비·게시 요청이나 기존 릴리스 게이트만으로 실행을 승인받은 것으로 해석하지 않는다. 승인이나 정확한 SHA의 성공 근거가 없으면 미충족 게이트를 보고하며 공개하지 않는다. 기존 Windows Tier 1 전체 검증·패키징·exact-candidate 계약은 유지한다.
+- 코드 변경에는 관련 로컬 lint·타입 검사·단위 테스트·빌드·핵심 회귀 검증을 반드시 수행한다. 실패는 원인 분석·수정 후 관련 검사를 재실행한다. 실행하지 못한 검사는 명령과 구체적 이유를 보고하며 원격 CI로 대체하지 않는다.
+- 문서·지침만 바꾸는 작업은 diff·링크·경로·명령 및 해당 정책을 로컬에서 확인한다. 아래 verify-local Full/Release 완료 규칙은 실행 코드·스크립트·fixture·빌드/패키징 입력 변경에 적용하며 문서만 수정할 때 앱 빌드·설치 회귀를 요구하지 않는다.
+
 ## 프로젝트 목적
 
 - 이 프로젝트는 기존 RoboRev CLI/daemon을 그대로 사용하는 독립 localhost Web Dashboard다.
