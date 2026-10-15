@@ -1,6 +1,6 @@
 # 로컬 품질 검증
 
-`scripts/verify-local.ps1`은 Windows 11 Tier 1 개발 완료 전 검증의 단일 진입점이다. 기존 `scripts/test.ps1`, `scripts/build.ps1`, `scripts/package.ps1`, `scripts/release-e2e.ps1`가 소유한 검사를 다시 구현하지 않고 순서와 결과만 조정한다. GitHub Actions는 계속 `workflow_dispatch` 수동 실행으로 유지한다.
+`scripts/verify-local.ps1`은 Windows 11 Tier 1 개발 완료 전 검증의 단일 진입점이다. 기존 `scripts/test.ps1`, `scripts/build.ps1`, `scripts/package.ps1`, `scripts/release-e2e.ps1`가 소유한 검사를 다시 구현하지 않고 순서와 결과만 조정한다. GitHub Actions는 계속 `workflow_dispatch` 수동 실행으로 유지한다. 릴리스 준비를 포함해 실제 dispatch·watch·rerun은 사용자의 해당 Actions 실행에 대한 명시적 요청이 있어야 하며, 원격 CI는 필수 로컬 검증을 대체하지 않는다. 문서·지침만 변경하면 `AGENTS.md`의 문서 검증 범위(diff·링크·경로·명령·정책 확인)를 따른다.
 
 ## 사용법
 
