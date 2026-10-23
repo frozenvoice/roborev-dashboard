@@ -34,6 +34,21 @@ beforeEach(() => { window.localStorage.setItem('roborev-dashboard-language', 'en
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('RepositoryMoveDialog', () => {
+  it('contains keyboard focus, returns it on unmount, and closes on Escape without executing', async () => {
+    const onClose = vi.fn(), fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const opener = document.createElement('button'); document.body.append(opener); opener.focus()
+    const view = renderDialog({ onClose })
+    const close = screen.getByRole('button', { name: 'Close repository move dialog' })
+    expect(close).toHaveFocus()
+    await userEvent.tab({ shift: true })
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+    await userEvent.tab(); expect(close).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    view.unmount(); expect(opener).toHaveFocus(); opener.remove()
+  })
   it('uses every registered opaque identity and has no free-text or merge controls', () => {
     renderDialog()
     const select = screen.getByRole('combobox', { name: 'Registered destination' })

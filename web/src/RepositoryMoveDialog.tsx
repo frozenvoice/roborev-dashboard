@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import { normalizeRepositoryMovePreview, normalizeRepositoryMoveResult, request, type Repository, type RepositoryInventoryRow, type RepositoryMovePreview, type RepositoryMoveResult } from './api'
 import { useI18n } from './i18n'
+import { useModalFocus } from './useModalFocus'
 
 export type RepositoryMoveAvailability = {
   canMove: boolean
@@ -32,6 +33,7 @@ export function RepositoryMoveDialog({ source, destinations, availability, onClo
   const confirmAbort = useRef<AbortController | null>(null)
   const confirming = useRef(false)
   const mounted = useRef(true)
+  const modalFocus = useModalFocus(close, state === 'confirming')
 
   const options = destinations
   const selected = destinations.find(repo => repo.identity === destinationIdentity) ?? null
@@ -130,7 +132,7 @@ export function RepositoryMoveDialog({ source, destinations, availability, onClo
 
   const unavailableHint = availability.reason === 'unsupported' ? t('repo.moveUnsupported') : t('repo.moveUnavailable')
   return <div className="prompt-overlay" role="presentation">
-    <section className="prompt-dialog move-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-move-title">
+    <section {...modalFocus} className="prompt-dialog move-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-move-title">
       <header><div><span className="eyebrow">{t('repo.move')}</span><h2 id="repository-move-title">{t('repo.moveTitle')}</h2><p>{t('repo.moveDescription')}</p></div><button className="icon-button" type="button" aria-label={t('repo.moveClose')} onClick={close} disabled={state === 'confirming'}><X /></button></header>
       <form onSubmit={prepare}>
         <div className="move-facts"><span><b>{t('repo.moveSource')}</b><strong>{(preview?.sourceName ?? source.name) || t('common.none')}</strong></span><span><b>{t('repo.moveSourcePath')}</b><code>{preview?.sourcePath ?? source.path}</code></span><span><b>{t('repo.moveJobs')}</b><strong>{preview?.jobCount ?? source.jobCount}</strong></span><span><b>{t('repo.moveStatus')}</b><strong>{t('repo.trackedNotRegistered')}</strong></span></div>
