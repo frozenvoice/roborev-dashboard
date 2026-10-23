@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RepositoryMergeDialog } from './RepositoryMergeDialog'
 import type { RepositoryMergeCandidate, RepositoryMergeSnapshot } from './api'
@@ -29,6 +30,39 @@ beforeEach(() => { window.localStorage.setItem('roborev-dashboard-language', 'en
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('RepositoryMergeDialog', () => {
+  it('previews and confirms after StrictMode setup/cleanup, retaining keyboard focus until completion', async () => {
+    let finish!: (value: Response) => void
+    const pending = new Promise<Response>(resolve => { finish = resolve })
+    const onClose = vi.fn(), onSuccess = vi.fn()
+    const fetchSpy = vi.fn((input: RequestInfo | URL) => String(input).endsWith('/preview') ? response(preview) : pending)
+    vi.stubGlobal('fetch', fetchSpy)
+    const opener = document.createElement('button'); document.body.append(opener); opener.focus()
+    const view = render(<StrictMode><I18nProvider><RepositoryMergeDialog source={source} targets={targets} availability={{ canMerge: true, reason: null }} onClose={onClose} onSuccess={onSuccess} onRefresh={vi.fn()} /></I18nProvider></StrictMode>)
+    const dialog = screen.getByRole('dialog', { name: 'Merge stale RoboRev repository entry' })
+    expect(dialog).toContainElement(document.activeElement as HTMLElement)
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Registered target' }), 'target-a')
+    await userEvent.click(screen.getByRole('button', { name: 'Prepare merge' }))
+    const confirm = await screen.findByRole('button', { name: 'Confirm merge' })
+    confirm.focus(); await userEvent.tab()
+    expect(screen.getByRole('button', { name: 'Close repository merge dialog' })).toHaveFocus()
+    await userEvent.click(confirm)
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(dialog).toHaveFocus()
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    finish(await response({ status: 'merged' }))
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce())
+    view.unmount(); expect(opener).toHaveFocus(); opener.remove()
+  })
+
+  it('closes on Escape while editing without submitting a command', async () => {
+    const onClose = vi.fn(), fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    renderDialog({ onClose })
+    await userEvent.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledOnce()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
   it('keeps every server candidate selectable and sends exact preview fields', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => { calls.push({ url: String(input), init }); return response(preview) }))

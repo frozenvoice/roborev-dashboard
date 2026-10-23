@@ -1,6 +1,13 @@
 # Handoff
 
-마지막 갱신: 2026-10-10
+마지막 갱신: 2026-10-23
+
+## 2026-10-23 UI 및 npm 보안 보완
+
+- 저장소 병합 dialog는 StrictMode effect 재실행 때 mounted 상태를 복원한다. 경로 복구와 병합 dialog는 초기 포커스·Tab 순환·Escape·호출 버튼 복귀를 공유하며, 실행 중 Escape/닫기는 작업을 취소하거나 재전송하지 않는다.
+- dialog 바깥 ancestor 형제 subtree를 inert로 격리하고 기존 inert 값을 복원한 뒤 호출 버튼으로 복귀한다. 숨김/비활성 컨트롤은 포커스 순환에서 제외한다.
+- DOMPurify 3.4.17, Vite 6.4.5 및 Vitest 4.1.12로 갱신했다. Vitest 3의 mocker advisory에는 패치 backport가 없어 최소 지원 4.x로 변경했고 tinypool 의존성은 제거됐다. 공식 npm 감사 결과 알려진 경고 0개이며 실제 악용 재현을 의미하지 않는다.
+- Go 1.26.9·Node 24.21.0 Full 검증의 Go tests/vet, frontend 597 tests/build, 개발 EXE 및 flag 계약 PASS. 내부 검토의 inert 보완 뒤 focused 26 tests, 최종 frontend 전체 599 tests와 build를 추가 확인했다. 실제 RoboRev/LLM·실사용 데이터·설치·원격 Actions를 실행하지 않았다.
 
 ## 설치형·포터블 통합 릴리스 checkpoint
 

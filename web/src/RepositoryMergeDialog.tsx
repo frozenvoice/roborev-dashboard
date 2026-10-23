@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import { normalizeRepositoryMergePreview, normalizeRepositoryMergeResult, request, type RepositoryMergeCandidate, type RepositoryMergePreview, type RepositoryMergeSnapshot } from './api'
 import { useI18n } from './i18n'
+import { useModalFocus } from './useModalFocus'
 
 export type RepositoryMergeAvailability = {
   canMerge: boolean
@@ -32,10 +33,13 @@ export function RepositoryMergeDialog({ source, targets, availability, onClose, 
   const confirmAbort = useRef<AbortController | null>(null)
   const confirming = useRef(false)
   const mounted = useRef(true)
+  const modalFocus = useModalFocus(close, state === 'confirming')
 
   const selected = targets.find(target => target.repositoryIdentity === targetIdentity) ?? null
 
-  useEffect(() => () => {
+  useEffect(() => {
+    mounted.current = true
+    return () => {
     mounted.current = false
     previewGeneration.current += 1
     previewAbort.current?.abort()
@@ -44,6 +48,7 @@ export function RepositoryMergeDialog({ source, targets, availability, onClose, 
     confirmAbort.current?.abort()
     confirmAbort.current = null
     confirming.current = false
+    }
   }, [])
 
   function close() {
@@ -129,7 +134,7 @@ export function RepositoryMergeDialog({ source, targets, availability, onClose, 
   const shownSource = preview?.source ?? source
   const shownTarget = preview?.target ?? selected
   return <div className="prompt-overlay" role="presentation">
-    <section className="prompt-dialog merge-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-merge-title">
+    <section {...modalFocus} className="prompt-dialog merge-dialog" role="dialog" aria-modal="true" aria-labelledby="repository-merge-title">
       <header><div><span className="eyebrow">{t('repo.merge')}</span><h2 id="repository-merge-title">{t('repo.mergeTitle')}</h2><p>{t('repo.mergeDescription')}</p></div><button className="icon-button" type="button" aria-label={t('repo.mergeClose')} onClick={close} disabled={state === 'confirming'}><X /></button></header>
       <form onSubmit={prepare}>
         <div className="merge-facts"><span><b>{t('repo.mergeSource')}</b><strong>{shownSource.name || t('common.none')}</strong></span><span><b>{t('repo.mergeSourcePath')}</b><code>{shownSource.path}</code></span><span><b>{t('repo.mergeSourceJobs')}</b><strong>{shownSource.jobCount}</strong></span><span><b>{t('repo.mergeTargetJobs')}</b><strong>{shownTarget?.jobCount ?? t('common.none')}</strong></span></div>
