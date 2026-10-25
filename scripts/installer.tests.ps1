@@ -142,7 +142,21 @@ foreach ($artName in @(
         'setup-minimize.png', 'setup-close.png', 'setup-backdrop-1x.png', 'setup-backdrop-2x.png')) {
     Assert-InstallerTest (Test-Path -LiteralPath (Join-Path $repoRoot "assets\installer\$artName") -PathType Leaf) "installer art exists: $artName"
 }
-Assert-InstallerTest (Test-Path -LiteralPath (Join-Path $repoRoot 'scripts\test-setup-ui.ps1') -PathType Leaf) 'isolated setup UI test exists'
+$setupUiPath = Join-Path $repoRoot 'scripts\test-setup-ui.ps1'
+Assert-InstallerTest (Test-Path -LiteralPath $setupUiPath -PathType Leaf) 'isolated setup UI test exists'
+$setupUi = [IO.File]::ReadAllText($setupUiPath, [Text.Encoding]::UTF8)
+$lockWait = $setupUi.IndexOf('$fixtureMutex.WaitOne(0)', [StringComparison]::Ordinal)
+$ownsRefusal = $setupUi.IndexOf('Another setup UI run owns', [StringComparison]::Ordinal)
+$firstStop = $setupUi.IndexOf('Stop-FixtureProcesses $fixtureRoot', [StringComparison]::Ordinal)
+$firstRemove = $setupUi.IndexOf('Remove-Item -LiteralPath $fixtureRoot -Recurse -Force', [StringComparison]::Ordinal)
+Assert-InstallerTest (($lockWait -gt 0) -and ($ownsRefusal -gt $lockWait) -and ($firstStop -gt $ownsRefusal) -and ($firstRemove -gt $firstStop)) 'fixture directory is locked before it is inspected or cleaned'
+$ownerGate = $setupUi.IndexOf('if ($fixtureLocked) {', $firstRemove, [StringComparison]::Ordinal)
+Assert-InstallerTest ($ownerGate -gt $firstRemove) 'fixture cleanup is gated on the lock owner'
+$finalStop = $setupUi.IndexOf('Stop-FixtureProcesses $fixtureRoot', $ownerGate, [StringComparison]::Ordinal)
+$finalRemove = if ($finalStop -ge 0) { $setupUi.IndexOf('Remove-Item -LiteralPath $fixtureRoot', $finalStop, [StringComparison]::Ordinal) } else { -1 }
+$releaseAt = if ($finalRemove -ge 0) { $setupUi.IndexOf('$fixtureMutex.ReleaseMutex()', $finalRemove, [StringComparison]::Ordinal) } else { -1 }
+Assert-InstallerTest (($finalStop -gt $ownerGate) -and ($finalRemove -gt $finalStop) -and ($releaseAt -gt $finalRemove)) 'fixture cleanup in finally runs only for the lock owner and releases after cleanup'
+& $setupUiPath -FixtureLockSelfTest
 
 $treeTemp = Join-Path ([IO.Path]::GetTempPath()) ('roborev-dashboard-installer-tree-tests-' + [guid]::NewGuid().ToString('N'))
 try {

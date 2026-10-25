@@ -8,6 +8,7 @@
 - AppId, `%LOCALAPPDATA%\Programs\RoboRev Dashboard`, 사용자별 권한, 다운그레이드 거부, 설치 잠금, reparse 검사, SHA-256 검증, `/DASHBOARDNOLAUNCH`, `/DASHBOARDRESULT=`, `--installed`/`--stop-installed`, 종료 코드 19와 제거 범위는 그대로다. 테마는 진행률·버튼·문구만 바꾸고 프로세스 종료나 결과 파일을 건드리지 않는다. 검증 실패 후 완료 페이지가 성공으로 보이지 않게 문구만 고친다.
 - 시작 메뉴 그룹 기본값은 계속 `RoboRev Dashboard`다. 격리 UI 테스트만 `/DProgramGroupName`으로 다른 그룹을 컴파일한다.
 - 격리 검증 `scripts/test-setup-ui.ps1`은 테스트 AppId와 TEMP `/DIR`만 사용한다. 확인 전 미설치, 실제 진행률, 업데이트·재설치, 종료 확인 거부와 수락, 다운그레이드 거부, `/VERYSILENT /DASHBOARDNOLAUNCH`의 ready→installing→succeeded/verified, SHA-256 불일치 exit 19, `/NOSTYLE`, 제거, DialogFontSize 8/10/12/16에서 글자 맞춤을 통과했다. 기본 창은 96 DPI에서 600×340이다. 생산 설치 경로·등록·시작 메뉴·실행 중 Dashboard는 변하지 않았다.
+- 같은 TEMP 픽스처 디렉터리는 체크아웃이 달라도 하나다. 검사·프로세스 중지·삭제 전에 `Global\RoboRevDashboard.SetupUi.` 배타 잠금을 잡고, 그 잠금을 가진 실행만 `finally`에서 정리한다. 잠금을 못 얻으면 다른 실행의 payload·로그를 지우지 않고 실패한다.
 - 내부 검토에서 설치 게이트와 테마 이벤트 순서, 결과 IPC, 정상 종료 확인이 우회되지 않는 것을 코드와 위 격리 실행으로 확인했다. 고칠 material finding은 없었다.
 - `verify-local -Mode Full` 재실행은 Prerequisites, Repository tests, Go vet, Development build, Development executable contract가 모두 PASS(exit 0)했다. 첫 실행은 이 변경과 무관한 `internal/runtimecontrol` 타이밍 테스트가 부하 중 한 번 실패해 Repository tests가 FAIL이었고, 그 테스트만 `-count=3`으로 통과한 뒤 Full을 다시 실행했다. 테스트 시간이나 단언은 완화하지 않았다. RoboRev review, Actions dispatch, 설치형 사용자 제거, GitHub Release는 하지 않았다.
 

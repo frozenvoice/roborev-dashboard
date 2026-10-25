@@ -2,15 +2,79 @@ param(
     # Inno scales its wizard from the dialog font. 8 is the design size; 10, 12
     # and 16 are the 125%, 150% and 200% font steps used to stand in for those
     # DPI layouts without changing the system DPI.
-    [int[]]$DialogFontSizes = @(8, 10, 12, 16)
+    [int[]]$DialogFontSizes = @(8, 10, 12, 16),
+    # Proves the fixed TEMP fixture lock without compiling or launching Setup.
+    [switch]$FixtureLockSelfTest
 )
 
 # Drives a real themed RoboRev-Dashboard-Setup.exe. Every installer is compiled
 # from installer\RoboRevDashboard.iss with its own AppId and a /DIR under TEMP.
 # The payload is a synthetic executable that exits immediately unless this
 # script starts it with --serve. Nothing here opens the production install
-# path, and the only processes stopped are ones this script started, by PID.
+# path. The fixed TEMP fixture is exclusively locked; only that owner inspects,
+# stops, or deletes it.
 $ErrorActionPreference = 'Stop'
+
+function Get-SetupUiFixtureLockName {
+    param([Parameter(Mandatory)][string]$Root)
+    $normalized = $Root.TrimEnd('\').ToLowerInvariant()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized))
+    } finally { $sha.Dispose() }
+    $hash = [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+    return ('Global\RoboRevDashboard.SetupUi.' + $hash)
+}
+
+if ($FixtureLockSelfTest) {
+    $fixed = Join-Path ([IO.Path]::GetTempPath()) 'roborev-dashboard-setup-ui'
+    $fixedName = Get-SetupUiFixtureLockName -Root $fixed
+    if ($fixedName -cnotmatch '^Global\\RoboRevDashboard\.SetupUi\.[0-9a-f]{64}$') { throw "Unexpected fixture lock name: $fixedName" }
+    $again = Get-SetupUiFixtureLockName -Root ($fixed.TrimEnd('\') + '\')
+    if ($fixedName -cne $again) { throw 'Fixture lock name changed when the directory slash changed.' }
+    $other = Get-SetupUiFixtureLockName -Root (Join-Path ([IO.Path]::GetTempPath()) 'roborev-dashboard-setup-ui-other')
+    if ($fixedName -ceq $other) { throw 'Different fixture directories shared one lock name.' }
+
+    $probeRoot = Join-Path ([IO.Path]::GetTempPath()) ('roborev-dashboard-setup-ui-lock-' + [guid]::NewGuid().ToString('N'))
+    $probeName = Get-SetupUiFixtureLockName -Root $probeRoot
+    $mutex = [Threading.Mutex]::new($false, $probeName)
+    $locked = $false
+    $holder = $null
+    try {
+        try { $locked = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $locked = $true }
+        if (-not $locked) { throw 'Fixture lock self-test could not acquire its own mutex.' }
+        $holder = [PowerShell]::Create()
+        [void]$holder.AddScript(@'
+param($name)
+$mutex = [Threading.Mutex]::new($false, $name)
+$owned = $false
+try {
+    try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    if ($owned) { 'owned' } else { 'blocked' }
+} finally {
+    if ($owned) { $mutex.ReleaseMutex() }
+    $mutex.Dispose()
+}
+'@).AddArgument($probeName)
+        $result = @($holder.Invoke())
+        if ($holder.HadErrors) { throw ('Fixture lock overlap probe failed: ' + (($holder.Streams.Error | ForEach-Object { $_.Exception.Message }) -join '; ')) }
+        if ($result.Count -ne 1 -or [string]$result[0] -cne 'blocked') { throw "Overlapping fixture run was not blocked: $($result -join ',')" }
+    } finally {
+        if ($holder) { $holder.Dispose() }
+        if ($locked) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+    $released = [Threading.Mutex]::new($false, $probeName)
+    $releasedOwned = $false
+    try {
+        try { $releasedOwned = $released.WaitOne(0) } catch [Threading.AbandonedMutexException] { $releasedOwned = $true }
+        if (-not $releasedOwned) { throw 'Fixture lock stayed held after the owner released it.' }
+    } finally {
+        if ($releasedOwned) { $released.ReleaseMutex() }
+        $released.Dispose()
+    }
+    return
+}
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $scriptPath = Join-Path $repo 'installer\RoboRevDashboard.iss'
 $evidenceDir = Join-Path $repo '.tmp\setup-ui'
@@ -627,12 +691,20 @@ $appId = $null
 $uninstallKey = $null
 $groupDir = $null
 $serve = $null
+$fixtureRoot = $null
+$fixtureMutex = $null
+$fixtureLocked = $false
 try {
     Set-Location -LiteralPath $repo
     $before = Get-ProductionSnapshot
     . (Join-Path $repo 'scripts\prepare-inno.ps1')
     $iscc = Invoke-PrepareInno -ProjectRoot $repo
     $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) 'roborev-dashboard-setup-ui'
+    # Separate checkouts share this one TEMP directory. Own it before looking
+    # at or removing anything there; a live run must keep its payload and logs.
+    $fixtureMutex = [Threading.Mutex]::new($false, (Get-SetupUiFixtureLockName -Root $fixtureRoot))
+    try { $fixtureLocked = $fixtureMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $fixtureLocked = $true }
+    if (-not $fixtureLocked) { throw "Another setup UI run owns $fixtureRoot" }
     if (Test-Path -LiteralPath $fixtureRoot) {
         if (Get-ChildItem -LiteralPath $fixtureRoot -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue) { throw "Refusing a reparse point under $fixtureRoot" }
         Stop-FixtureProcesses $fixtureRoot
@@ -918,37 +990,45 @@ try {
     $report.error = $_.Exception.Message
     throw
 } finally {
-    if ($serve -and -not $serve.HasExited) {
-        try { Start-Process -FilePath (Join-Path $installDir 'roborev-dashboard.exe') -ArgumentList '--stop-installed' -WindowStyle Hidden -Wait | Out-Null } catch { }
-        if (-not $serve.HasExited) { Stop-Process -Id $serve.Id -Force -ErrorAction SilentlyContinue }
-    }
-    foreach ($process in $owned) {
-        try {
-            if (-not $process) { continue }
-            foreach ($id in @(Get-TreeIds $process)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-        } catch { }
-    }
-    Stop-FixtureProcesses $fixtureRoot
     try {
-        if ($uninstallKey -and (Test-Path -LiteralPath $uninstallKey)) {
-            $leftover = Join-Path $installDir 'unins000.exe'
-            if (Test-Path -LiteralPath $leftover -PathType Leaf) { Invoke-Uninstall 'Recovery' }
-            if (Test-Path -LiteralPath $uninstallKey) { Remove-Item -LiteralPath $uninstallKey -Recurse -Force -ErrorAction SilentlyContinue }
-        }
-        if ($logDir -and (Test-Path -LiteralPath $logDir) -and $evidenceDir) {
+        if ($fixtureLocked) {
+            if ($serve -and -not $serve.HasExited) {
+                try { Start-Process -FilePath (Join-Path $installDir 'roborev-dashboard.exe') -ArgumentList '--stop-installed' -WindowStyle Hidden -Wait | Out-Null } catch { }
+                if (-not $serve.HasExited) { Stop-Process -Id $serve.Id -Force -ErrorAction SilentlyContinue }
+            }
+            foreach ($process in $owned) {
+                try {
+                    if (-not $process) { continue }
+                    foreach ($id in @(Get-TreeIds $process)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+                } catch { }
+            }
+            Stop-FixtureProcesses $fixtureRoot
+            try {
+                if ($uninstallKey -and (Test-Path -LiteralPath $uninstallKey)) {
+                    $leftover = Join-Path $installDir 'unins000.exe'
+                    if (Test-Path -LiteralPath $leftover -PathType Leaf) { Invoke-Uninstall 'Recovery' }
+                    if (Test-Path -LiteralPath $uninstallKey) { Remove-Item -LiteralPath $uninstallKey -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+                if ($logDir -and (Test-Path -LiteralPath $logDir) -and $evidenceDir) {
+                    New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+                    Copy-Item -Path (Join-Path $logDir '*.log') -Destination $evidenceDir -Force -ErrorAction SilentlyContinue
+                }
+                if ($groupDir -and (Test-Path -LiteralPath $groupDir)) { Remove-Item -LiteralPath $groupDir -Recurse -Force -ErrorAction SilentlyContinue }
+                if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            } catch {
+                Write-Warning $_.Exception.Message
+            }
+            $report.seconds = [Math]::Round($timer.Elapsed.TotalSeconds, 1)
+            $report.finishedAt = [DateTime]::UtcNow.ToString('o')
             New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
-            Copy-Item -Path (Join-Path $logDir '*.log') -Destination $evidenceDir -Force -ErrorAction SilentlyContinue
+            $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidenceDir 'report.json') -Encoding utf8
+            Write-Host "Setup UI report: $(Join-Path $evidenceDir 'report.json')"
         }
-        if ($groupDir -and (Test-Path -LiteralPath $groupDir)) { Remove-Item -LiteralPath $groupDir -Recurse -Force -ErrorAction SilentlyContinue }
-        if ($fixtureRoot -and (Test-Path -LiteralPath $fixtureRoot)) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
-    } catch {
-        Write-Warning $_.Exception.Message
+    } finally {
+        if ($null -ne $fixtureMutex) {
+            try { if ($fixtureLocked) { $fixtureMutex.ReleaseMutex() } } finally { $fixtureMutex.Dispose() }
+        }
     }
-    $report.seconds = [Math]::Round($timer.Elapsed.TotalSeconds, 1)
-    $report.finishedAt = [DateTime]::UtcNow.ToString('o')
-    New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
-    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $evidenceDir 'report.json') -Encoding utf8
-    Write-Host "Setup UI report: $(Join-Path $evidenceDir 'report.json')"
 }
 if (-not $report.passed) { throw 'Setup UI checks did not pass' }
 Write-Host ("All setup UI checks passed ({0:F1}s)." -f $timer.Elapsed.TotalSeconds)
