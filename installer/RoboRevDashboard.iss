@@ -22,6 +22,9 @@
 #ifndef AppId
   #define AppId "D7B6E4A4-76E5-4F33-A9CE-CF1B8E8DF0AF"
 #endif
+#ifndef ProgramGroupName
+  #define ProgramGroupName "RoboRev Dashboard"
+#endif
 #ifndef IncludeLicense
   #define IncludeLicense 0
 #endif
@@ -47,7 +50,7 @@ VersionInfoDescription={#AppName} Setup
 DefaultDirName={localappdata}\Programs\RoboRev Dashboard
 DisableDirPage=yes
 UsePreviousAppDir=no
-DefaultGroupName={#AppName}
+DefaultGroupName={#ProgramGroupName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64os
@@ -56,7 +59,7 @@ OutputDir={#OutputDir}
 OutputBaseFilename=RoboRev-Dashboard-Setup
 Compression=lzma2/max
 SolidCompression=yes
-WizardStyle=modern
+; WizardStyle, back colour and backdrop come from SetupTheme.iss.
 SetupLogging=yes
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExeName}
@@ -150,6 +153,7 @@ var
   UpdateMode: Boolean;
   DashboardResultPath: String;
   DashboardStateWriteFailed: Boolean;
+  PrepareFailure: String;
 
 function CreateMutexW(Attributes: Integer; InitialOwner: Boolean; Name: String): THandle;
   external 'CreateMutexW@kernel32.dll stdcall';
@@ -631,6 +635,7 @@ begin
   VerificationFailed := False;
   UpdateMode := False;
   DashboardStateWriteFailed := False;
+  PrepareFailure := '';
   DashboardResultPath := ParameterValue('/DASHBOARDRESULT=');
   UpdateNoLaunch := HasParameter('/DASHBOARDNOLAUNCH');
   if DashboardResultPath <> '' then begin
@@ -661,13 +666,16 @@ begin
   ErrorText := InstallPreconditionError(False);
   if ErrorText <> '' then begin
     WriteDashboardResult('failed', 'precondition');
+    PrepareFailure := ErrorText;
     Result := ErrorText;
     Exit;
   end;
   if not WriteDashboardResult('installing', 'copy-started') then begin
     Result := '설치 결과 상태 파일을 기록할 수 없어 설치를 중단했습니다.';
+    PrepareFailure := Result;
     Exit;
   end;
+  PrepareFailure := '';
   Result := '';
 end;
 
@@ -739,4 +747,61 @@ end;
 procedure DeinitializeUninstall();
 begin
   ReleaseInstallingMutex();
+end;
+
+{ Presentation hooks for SetupTheme.iss. They only choose wording. The gates
+  above still decide whether anything is copied, stopped, launched or reported. }
+function SetupThemeInstalledVersion(): String;
+var
+  RegistryKey: String;
+begin
+  Result := '';
+  RegistryKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + Chr(123) + '{#AppId}' + Chr(125) + '_is1';
+  if not RegQueryStringValue(HKCU, RegistryKey, 'BuildVersion', Result) then
+    RegQueryStringValue(HKCU, RegistryKey, 'DisplayVersion', Result);
+end;
+
+function SetupThemeMode(): Integer;
+var
+  InstalledVersion: String;
+begin
+  { 0 install, 1 update, 2 reinstall. A refused downgrade or unreadable version
+    keeps the plain install wording; PrepareToInstall reports why it stops. }
+  Result := 0;
+  InstalledVersion := SetupThemeInstalledVersion();
+  if (InstalledVersion = '') or (not VersionEvidenceValid(InstalledVersion)) then Exit;
+  if CompareVersions(InstallerBaseVersion, InstalledVersion) = 0 then
+    Result := 2
+  else if CompareVersions(InstallerBaseVersion, InstalledVersion) > 0 then
+    Result := 1;
+end;
+
+function SetupThemeFailure(): String;
+begin
+  Result := PrepareFailure;
+end;
+
+#define public SetupThemeAppName AppName
+#define public SetupThemeAppObject "RoboRev Dashboard를"
+#define public SetupThemeVersion AppVersion
+#define public SetupThemeNote "RoboRev와 설정은 변경하지 않습니다."
+#define public SetupThemeArt "..\assets\installer"
+#include "SetupTheme.iss"
+
+[Code]
+{ Runs after the theme's CurPageChanged. A post-copy verification or result-file
+  failure already has its exit code and result state; this only stops the
+  finished page from calling that outcome a successful install. }
+<event('CurPageChanged')>
+procedure DashboardCorrectFinishedPage(CurPageID: Integer);
+begin
+  if CurPageID <> wpFinished then Exit;
+  if not (VerificationFailed or DashboardStateWriteFailed) then Exit;
+  ThemeDoneHeading.Caption := '설치를 마쳤지만 실행하지 않습니다';
+  if VerificationFailed then
+    ThemeDoneBody.Caption := '설치된 실행 파일 검증에 실패했습니다. Dashboard를 실행하지 않습니다.'
+  else
+    ThemeDoneBody.Caption := '설치 결과 상태를 기록하지 못했습니다. Dashboard를 실행하지 않습니다.';
+  ThemeDoneIcon.Visible := False;
+  ThemeRun.Visible := False;
 end;
