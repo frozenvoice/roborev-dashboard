@@ -40,7 +40,7 @@ dist\installer\RoboRev-Dashboard-Setup.exe
 
 ## 설치·실행·업데이트·제거
 
-Setup은 고정 AppId로 현재 사용자에게 `%LOCALAPPDATA%\Programs\RoboRev Dashboard`에 설치한다. 설치 경로 페이지와 시작 메뉴 폴더 선택 페이지는 생략한다. 새 버전은 같은 설치 항목을 갱신하고, 같은 기준 버전의 로컬 빌드도 새 파일로 재설치할 수 있다. 명백하게 낮은 기준 버전으로의 다운그레이드는 차단한다.
+Setup은 고정 AppId로 현재 사용자에게 `%LOCALAPPDATA%\Programs\RoboRev Dashboard`에 설치한다. 설치 창은 CycleArc·WebPier·SIDETALK과 같은 600×340 다크 프레임이며, 진행률은 Inno Setup이 보고하는 실제 파일 진행률이다. 고대비 또는 `/NOSTYLE`에서는 같은 배치를 시스템 프레임 안에 둔다. 이 표현 계층은 설치 경로, AppId, 정상 종료 확인, `/DASHBOARDNOLAUNCH`, `/DASHBOARDRESULT=`, SHA-256 검증과 제거 범위를 바꾸지 않는다. 설치 경로 페이지와 시작 메뉴 폴더 선택 페이지는 생략한다. 새 버전은 같은 설치 항목을 갱신하고, 같은 기준 버전의 로컬 빌드도 새 파일로 재설치할 수 있다. 명백하게 낮은 기준 버전으로의 다운그레이드는 차단한다.
 
 설치에는 embedded frontend를 포함한 Dashboard EXE와 명시된 배포 파일만 포함한다. Go, Node.js, npm, Inno Setup, 소스, `node_modules`, 테스트 fixture 또는 사용자 설정은 설치하지 않는다. 실행 시 Git은 여전히 필요하며, RoboRev가 없거나 호환되지 않으면 기존 Agents & Setup 안내와 exact-version fail-closed 정책을 따른다. Fix/Refine 등의 차단 상태는 유지된다.
 

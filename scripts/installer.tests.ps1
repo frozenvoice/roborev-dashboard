@@ -47,6 +47,8 @@ $iss = [IO.File]::ReadAllText($issPath, [Text.Encoding]::UTF8)
 foreach ($required in @(
         'AppId={{{#AppId}}',
         'DefaultDirName={localappdata}\Programs\RoboRev Dashboard',
+        '#define ProgramGroupName "RoboRev Dashboard"',
+        'DefaultGroupName={#ProgramGroupName}',
         'PrivilegesRequired=lowest',
         'ArchitecturesAllowed=x64os',
         'DisableDirPage=yes',
@@ -106,6 +108,55 @@ $readyState = $iss.IndexOf("WriteDashboardResult('ready'", [StringComparison]::O
 $installingState = $iss.IndexOf("WriteDashboardResult('installing'", [StringComparison]::Ordinal)
 $succeededState = $iss.IndexOf("WriteDashboardResult('succeeded'", [StringComparison]::Ordinal)
 Assert-InstallerTest (($readyState -ge 0) -and ($installingState -gt $readyState) -and ($succeededState -gt $installingState)) 'result states follow setup lifecycle order'
+Assert-InstallerTest (-not $iss.Contains('WizardStyle=modern' + "`r`n")) 'product script does not set a second wizard style'
+$themePath = Join-Path $repoRoot 'installer\SetupTheme.iss'
+$theme = [IO.File]::ReadAllText($themePath, [Text.Encoding]::UTF8)
+foreach ($requiredTheme in @(
+        'WizardStyle=modern dark polar hidebevels',
+        '<event(''CurInstallProgressChanged'')>',
+        'ThemeFill.Width := Width',
+        'ThemeMode := SetupThemeMode();',
+        'Failure := SetupThemeFailure();')) {
+    Assert-InstallerTest ($theme.Contains($requiredTheme)) "theme script contains '$requiredTheme'"
+}
+Assert-InstallerTest (-not $theme.Contains('ReleaseInstallingMutex')) 'theme does not own the install mutex'
+Assert-InstallerTest (-not $theme.Contains('WriteDashboardResult')) 'theme does not write install result state'
+Assert-InstallerTest (-not $theme.Contains('CreateProcessW')) 'theme does not start processes'
+Assert-InstallerTest (-not $theme.Contains('taskkill')) 'theme has no taskkill'
+Assert-InstallerTest (-not $theme.Contains('DASHBOARDRESULT')) 'theme does not touch the result channel'
+Assert-InstallerTest (-not $theme.Contains('DASHBOARDNOLAUNCH')) 'theme does not interpret the no-launch switch'
+$includeAt = $iss.LastIndexOf('#include "SetupTheme.iss"', [StringComparison]::Ordinal)
+$modeAt = $iss.IndexOf('function SetupThemeMode', [StringComparison]::Ordinal)
+$failureAt = $iss.IndexOf('function SetupThemeFailure', [StringComparison]::Ordinal)
+$correctAt = $iss.IndexOf('procedure DashboardCorrectFinishedPage', [StringComparison]::Ordinal)
+Assert-InstallerTest (($modeAt -gt $customExitStart) -and ($failureAt -gt $modeAt) -and ($includeAt -gt $failureAt) -and ($correctAt -gt $includeAt)) 'theme is included after the install gates and the finished-page correction follows it'
+$correctEnd = $iss.IndexOf('ThemeRun.Visible := False;', [StringComparison]::Ordinal)
+Assert-InstallerTest ($correctEnd -gt $correctAt) 'finished-page correction hides the launch checkbox'
+$correctBody = $iss.Substring($correctAt, $correctEnd - $correctAt)
+Assert-InstallerTest (-not $correctBody.Contains('LaunchAllowed')) 'finished-page correction does not change the launch gate'
+Assert-InstallerTest (-not $correctBody.Contains('WriteDashboardResult')) 'finished-page correction does not write result state'
+Assert-InstallerTest ($iss.Contains('PrepareFailure := ErrorText')) 'prepare failure text is retained for the themed failure page'
+foreach ($artName in @(
+        'setup-brand.png', 'setup-logo.png', 'setup-done.png', 'setup-failed.png',
+        'setup-panel-location.png', 'setup-panel-detail.png', 'setup-track.png',
+        'setup-minimize.png', 'setup-close.png', 'setup-backdrop-1x.png', 'setup-backdrop-2x.png')) {
+    Assert-InstallerTest (Test-Path -LiteralPath (Join-Path $repoRoot "assets\installer\$artName") -PathType Leaf) "installer art exists: $artName"
+}
+$setupUiPath = Join-Path $repoRoot 'scripts\test-setup-ui.ps1'
+Assert-InstallerTest (Test-Path -LiteralPath $setupUiPath -PathType Leaf) 'isolated setup UI test exists'
+$setupUi = [IO.File]::ReadAllText($setupUiPath, [Text.Encoding]::UTF8)
+$lockWait = $setupUi.IndexOf('$fixtureMutex.WaitOne(0)', [StringComparison]::Ordinal)
+$ownsRefusal = $setupUi.IndexOf('Another setup UI run owns', [StringComparison]::Ordinal)
+$firstStop = $setupUi.IndexOf('Stop-FixtureProcesses $fixtureRoot', [StringComparison]::Ordinal)
+$firstRemove = $setupUi.IndexOf('Remove-Item -LiteralPath $fixtureRoot -Recurse -Force', [StringComparison]::Ordinal)
+Assert-InstallerTest (($lockWait -gt 0) -and ($ownsRefusal -gt $lockWait) -and ($firstStop -gt $ownsRefusal) -and ($firstRemove -gt $firstStop)) 'fixture directory is locked before it is inspected or cleaned'
+$ownerGate = $setupUi.IndexOf('if ($fixtureLocked) {', $firstRemove, [StringComparison]::Ordinal)
+Assert-InstallerTest ($ownerGate -gt $firstRemove) 'fixture cleanup is gated on the lock owner'
+$finalStop = $setupUi.IndexOf('Stop-FixtureProcesses $fixtureRoot', $ownerGate, [StringComparison]::Ordinal)
+$finalRemove = if ($finalStop -ge 0) { $setupUi.IndexOf('Remove-Item -LiteralPath $fixtureRoot', $finalStop, [StringComparison]::Ordinal) } else { -1 }
+$releaseAt = if ($finalRemove -ge 0) { $setupUi.IndexOf('$fixtureMutex.ReleaseMutex()', $finalRemove, [StringComparison]::Ordinal) } else { -1 }
+Assert-InstallerTest (($finalStop -gt $ownerGate) -and ($finalRemove -gt $finalStop) -and ($releaseAt -gt $finalRemove)) 'fixture cleanup in finally runs only for the lock owner and releases after cleanup'
+& $setupUiPath -FixtureLockSelfTest
 
 $treeTemp = Join-Path ([IO.Path]::GetTempPath()) ('roborev-dashboard-installer-tree-tests-' + [guid]::NewGuid().ToString('N'))
 try {

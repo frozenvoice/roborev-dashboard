@@ -28,7 +28,7 @@ Vite production output을 `internal/webui/dist`에 생성하고 Go `embed`로 �
 
 Windows 설치본만 `--installed`로 단일 인스턴스 처리를 사용한다. 현재 사용자 SID와 canonical EXE identity로 제한한 native IPC에서 기존 process를 검증하고 activation/shutdown을 요청한다. Named pipe transport는 pinned `github.com/Microsoft/go-winio v0.6.2`, 권한·peer identity 검증은 Windows API를 사용한다. Pipe DACL은 현재 사용자로 제한하고 OS에서 얻은 peer PID의 SID, executable path와 file identity를 확인한다. localhost HTTP 응답이나 실행 파일 이름만으로 identity를 판단하지 않는다. 이 control channel은 browser API를 추가하지 않으며 기존 Host/Origin/CSRF 보호를 유지한다. `--stop-installed`는 기존 shutdown 순서와 cancellation budget을 사용하고 RoboRev daemon stop으로 연결하지 않는다.
 
-Inno Setup은 현재 사용자 설치와 고정 AppId/경로를 소유한다. 사용자의 설치 승인 후에만 이전 exact EXE에 정상 종료를 요청하고, 파일 잠금 해제 후 명시한 배포 파일만 교체한다. 콘솔과 시작 메뉴의 종료 바로가기로 lifecycle을 노출하며 사용자 설정은 기존 OS user config 경로에 유지한다. 설치기의 uninstall은 설정, 저장소, RoboRev와 agent 데이터를 제거하지 않는다. 일반 EXE 실행과 명시적 port/config 옵션은 기존 동작을 유지한다. 세부 운영 계약과 미검증 E2E 범위는 [Windows 설치 안내](WINDOWS-INSTALLER.md)를 따른다.
+Inno Setup은 현재 사용자 설치와 고정 AppId/경로를 소유한다. 설치 창의 다크 프레임은 `installer/SetupTheme.iss` 표현 계층이며, 준비·복사·검증·실행·제거 판단은 기존 `[Code]` 게이트가 그대로 한다. 사용자의 설치 승인 후에만 이전 exact EXE에 정상 종료를 요청하고, 파일 잠금 해제 후 명시한 배포 파일만 교체한다. 콘솔과 시작 메뉴의 종료 바로가기로 lifecycle을 노출하며 사용자 설정은 기존 OS user config 경로에 유지한다. 설치기의 uninstall은 설정, 저장소, RoboRev와 agent 데이터를 제거하지 않는다. 일반 EXE 실행과 명시적 port/config 옵션은 기존 동작을 유지한다. 세부 운영 계약과 미검증 E2E 범위는 [Windows 설치 안내](WINDOWS-INSTALLER.md)를 따른다.
 
 ### RoboRev runtime 설치 신뢰 경계
 
